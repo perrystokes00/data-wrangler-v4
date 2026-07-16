@@ -347,7 +347,7 @@ def main(argv=None):
                          "(e.g. dataview,file_catalog,las_catalog). "
                          "With more than one, output files are suffixed "
                          "per schema.")
-    ap.add_argument("--out", default="schema_docs", help="Output directory")
+    ap.add_argument("--out", default="support/schema_docs", help="Output directory")
     ap.add_argument("--driver", default=None,
                     help="ODBC driver name (auto-detected if omitted)")
     ap.add_argument("--areas-in", default=None,

@@ -510,7 +510,14 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
             return
         try:
             out = os.path.join(bulk_dir, f"_{tag}_extract"); os.makedirs(out, exist_ok=True)
-            lp, cp, nl, nc = mod.write_staging_csvs(directory, out_dir=out, source=tag.upper())
+            # Pass the GATED, de-duplicated, recursion-aware list the loader just computed.
+            # Calling write_staging_csvs(directory, ...) instead threw that list away and let
+            # the extractor re-glob the folder itself — re-reading files the gate said to
+            # skip, missing subfolders on a recursive scan, and (with a case-insensitive
+            # double glob) counting every file twice. _call_extractor also warns loudly when
+            # an extractor has no `files` parameter, instead of silently swallowing it.
+            lp, cp, nl, nc = _call_extractor(mod.write_staging_csvs, directory, out,
+                                             tag.upper(), files, recursive)
             log_cols = next(_csv.reader(open(lp, encoding="utf-8")))
             curve_cols = next(_csv.reader(open(cp, encoding="utf-8")))
             scan["rows"].append({"file": f"{tag.upper()} → log  ({nl} files)", "path": lp, "cols": log_cols,
@@ -1149,14 +1156,33 @@ def _cascade(skipset, children):
     return out
 
 
+def _dget(d, *keys):
+    """Fetch a value from a staging row by column name, IGNORING CASE.
+
+    The gate used to do d.get("LOG_ID") / d.get("UWI") — exact, uppercase. When the
+    extractors were realigned to the DDL they began emitting lowercase `log_id` / `uwi`,
+    every lookup returned None, _file_key returned "", the file dict came out empty, and the
+    gate concluded there was nothing to resolve. It returned True and let logs with no UWI
+    stage — silently. A gate that fails open because a column changed case is worse than no
+    gate, because it still looks like it ran.
+    """
+    if not d:
+        return ""
+    lower = {str(k).strip().lower(): v for k, v in d.items()}
+    for k in keys:
+        v = lower.get(str(k).strip().lower())
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return ""
+
+
 def _file_key(d):
     """Identify which source file a staging row came from — log_id for logs, file path for PDFs."""
     import os as _os
-    for k in ("LOG_ID", "SRVY_ID", "INTERP_ID"):
-        v = (d.get(k) or "").strip()
-        if v:
-            return v
-    fp = (d.get("FILE_PATH") or "").strip()
+    v = _dget(d, "LOG_ID", "SRVY_ID", "INTERP_ID")
+    if v:
+        return v
+    fp = _dget(d, "FILE_PATH")
     return _os.path.basename(fp) if fp else ""
 
 
@@ -1217,8 +1243,8 @@ def render_review_uwi(ss, server, database, schema="dataview"):
                 continue
             for d in data:
                 lg = _file_key(d)
-                uwi = (d.get("UWI") or "").strip()
-                wn = (d.get("WELL_NAME") or "").strip()
+                uwi = _dget(d, "UWI")
+                wn = _dget(d, "WELL_NAME")
                 if lg:
                     files.setdefault(lg, {"log_id": lg, "uwi": uwi, "well_name": wn,
                                           "fmt": (r.get("extracted") or "").upper(),
@@ -1282,7 +1308,12 @@ def render_review_uwi(ss, server, database, schema="dataview"):
                 hdr, data = _read_uwi_rows(path)
             except Exception:
                 return
-            if "UWI" not in (hdr or []):
+            # find the UWI column AS IT IS SPELLED in this file. Extractors emit lowercase
+            # `uwi` since the DDL alignment; older ones emit `UWI`. Testing for the literal
+            # "UWI" made this bail on every realigned extract — so the assigned UWIs were
+            # never stamped and skipped files were never dropped, with no error either way.
+            ucol = next((h for h in (hdr or []) if str(h).strip().lower() == "uwi"), None)
+            if not ucol:
                 return
             keep = []
             for d in data:
@@ -1291,7 +1322,7 @@ def render_review_uwi(ss, server, database, schema="dataview"):
                 if v and v["skip"]:
                     continue                                   # drop skipped file's rows
                 if v and v["uwi"]:
-                    d["UWI"] = v["uwi"]                         # stamp/overwrite the resolved UWI
+                    d[ucol] = v["uwi"]                          # stamp/overwrite the resolved UWI
                 keep.append(d)
             with open(path, "w", newline="", encoding="utf-8") as fh:
                 w = csv.DictWriter(fh, fieldnames=hdr); w.writeheader(); w.writerows(keep)

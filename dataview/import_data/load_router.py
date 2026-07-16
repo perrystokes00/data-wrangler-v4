@@ -183,7 +183,19 @@ def run(engine=None, dialect=None):
         _scroll_to_top()
 
     # once routed, hand off to the chosen loader (with a way back)
-    route = ss.get("lr_route")
+    # Route B is the default for EVERY folder — it reads every supported type, CSV and Excel
+    # included. So there is no routing decision left to make, and the screen that used to make
+    # it (directory box → "Scan & route" → classify → always B) was pure overhead: you typed
+    # the folder, then bulk_dir_loader asked for it again. Worse, the counts that screen drew
+    # were discarded by its own st.rerun() before they could render, and the unsupported-file
+    # listing after that rerun was unreachable.
+    #
+    # Go straight to B. bulk_dir_loader asks for the directory ONCE and does the only real
+    # scan. The router keeps what it is actually good for: ⇄ to route A, and "Load another
+    # folder", both on the routed page. _load_another pops lr_route, which lands back here and
+    # re-defaults to B with an empty directory box.
+    route = ss.get("lr_route") or "B"
+    ss["lr_route"] = route
     if route in ("A", "B"):
         top = st.columns([1, 1, 3])
         if top[0].button("← Load another folder", key="lr_back_top"):
@@ -222,49 +234,12 @@ def run(engine=None, dialect=None):
             _load_another(ss); st.rerun()
         return
 
-    st.title("📁 Directory Loader")
-    st.caption("Drop in a folder — the extensions decide the path. "
-               "**CSV / Excel** go to the tabular loader; **LAS, DLIS, LIS, WITSML, PDF** "
-               "go to the well-file loader.")
-
-    directory = st.text_input("Directory", value=ss.get("lr_dir", ss.get("dl_dir", "")))
-    recursive = st.checkbox("Include subdirectories", value=ss.get("lr_recursive", False))
-    ss["lr_dir"], ss["lr_recursive"] = directory, recursive
-
-    if st.button("🔍 Scan & route", type="primary") and directory:
-        if not os.path.isdir(directory):
-            st.error("Not a directory.")
-            return
-        ss["lr_found"] = classify(directory, recursive)
-
-    found = ss.get("lr_found")
-    if not found:
-        return
-
-    a, b, c = found["A"], found["B"], found["C"]
-    loadable = a + b
-    m = st.columns(2)
-    m[0].metric("loadable", len(loadable), help=_fmt(_counts(loadable)) if loadable else None)
-    m[1].metric("not supported", len(c), help=_fmt(_counts(c)) if c else None)
-    if loadable:
-        st.caption(f"**{_fmt(_counts(loadable))}**")
-
-    if not loadable:
-        st.warning("Nothing loadable here. Supported: " + ", ".join(A_EXTS + B_EXTS))
-        if c:
-            _listing(f"{len(c)} unsupported file(s)", c)
-        return
-
-    # Default to B. It reads every supported type (CSV/Excel included, via
-    # page_dir_loader.profile_directory, which also explodes workbooks) and it's where the
-    # governance lives: UWI gate, file catalog, staging via BCP, data-quality report,
-    # repairs, date-format check, dry run, verify. Route A stays one click away on the
-    # routed page (⇄) for the per-table flow — it isn't retired, just not the default.
-    _go_b(ss, directory)
-    st.rerun()
-
-    if c:
-        _listing(f"{len(c)} unsupported file(s) — ignored", c)
+    # Unreachable: `route` is defaulted to "B" above, so control never arrives here. What
+    # stood here was the old pre-scan screen — a directory box, a recursion checkbox, and a
+    # "Scan & route" button that classified the folder and then routed to B unconditionally.
+    # classify() is kept: it is a cheap, pure extension census, and the "N unsupported files"
+    # answer it produces is worth surfacing INSIDE the loader some day — it was never visible
+    # here, because the st.rerun() that followed threw the rendered counts away.
 
 
 render = main = show = app = run

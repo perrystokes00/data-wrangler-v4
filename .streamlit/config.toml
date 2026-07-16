@@ -10,7 +10,10 @@
 # the CSS-themed chrome does). Since Midnight Gold is the default, that's the
 # intended look.
 
+[server]
+fileWatcherType = "none"
 [theme]
+
 base                     = "dark"
 backgroundColor          = "#0e0e10"   # cell background  (bg)
 secondaryBackgroundColor = "#17171a"   # header / alt rows (bg_mid)
