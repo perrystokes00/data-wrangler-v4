@@ -1,0 +1,214 @@
+==============================================================================
+repo audit — C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean
+package: dataview/   ·   entry points: app_v3.py, tools, scripts
+326 python file(s) parsed
+==============================================================================
+
+1. DUPLICATE MODULES  — the same module name in two places
+------------------------------------------------------------------------------
+  37 module name(s) exist inside the package AND outside it.
+
+  What this IS: two files you could edit, one of which is not running. Same
+  problem as N numbered copies in a Downloads folder, one level up.
+
+  What this is NOT (usually): a runtime hijack. Subdirectories are not on
+  sys.path merely by existing, so `import X` from the repo root will NOT find
+  a copy in subdir/X.py — the try/except fallback just fails. The hijack is
+  real only when a script is run FROM INSIDE one of these directories, which
+  puts that directory on sys.path[0] and lets its siblings win.
+
+  ⚠ bcp_capture
+      in package : dataview\...\bcp_capture.py
+      ALSO AT   : file_catalog\bcp_capture.py
+      (archived): _ARCHIVE_dead\_refactor_quarantine\modules\bcp_capture.py
+  ⚠ bcp_capture_bench
+      in package : dataview\...\bcp_capture_bench.py
+      ALSO AT   : file_catalog\bcp_capture_bench.py
+  ⚠ build_catalog_mirror
+      in package : dataview\...\build_catalog_mirror.py
+      ALSO AT   : sql\build_catalog_mirror.py
+  ⚠ build_county_geojson_ND_GOM
+      in package : dataview\...\build_county_geojson_ND_GOM.py
+      ALSO AT   : mapping\build_county_geojson_ND_GOM.py
+  ⚠ build_county_geojson_gom
+      in package : dataview\...\build_county_geojson_gom.py
+      ALSO AT   : mapping\build_county_geojson_gom.py
+  ⚠ build_county_geojson_nd
+      in package : dataview\...\build_county_geojson_nd.py
+      ALSO AT   : mapping\build_county_geojson_nd.py
+  ⚠ build_geojson_from_snowflake
+      in package : dataview\...\build_geojson_from_snowflake.py
+      ALSO AT   : mapping\build_geojson_from_snowflake.py
+  ⚠ catalog_capture
+      in package : dataview\...\catalog_capture.py
+      ALSO AT   : file_catalog\catalog_capture.py
+      (archived): _ARCHIVE_dead\_refactor_quarantine\modules\catalog_capture.py
+  ⚠ catalog_docs
+      in package : dataview\...\catalog_docs.py
+      ALSO AT   : file_catalog\catalog_docs.py
+  ⚠ catalog_readiness
+      in package : dataview\...\catalog_readiness.py
+      ALSO AT   : file_catalog\catalog_readiness.py
+  ⚠ catalog_scorecard
+      in package : dataview\...\catalog_scorecard.py
+      ALSO AT   : file_catalog\catalog_scorecard.py
+  ⚠ clear_catalog
+      in package : dataview\...\clear_catalog.py
+      ALSO AT   : tools\clear_catalog.py
+  ⚠ file_viewer
+      in package : dataview\...\file_viewer.py
+      ALSO AT   : documents\file_viewer.py
+      (archived): _ARCHIVE_dead\_refactor_quarantine\modules\file_viewer.py
+  ⚠ geography_layers
+      in package : dataview\...\geography_layers.py
+      ALSO AT   : mapping\geography_layers.py
+  ⚠ grids
+      in package : dataview\...\grids.py
+      ALSO AT   : mapping\grids.py
+  ⚠ migrate_petroleum_regions
+      in package : dataview\...\migrate_petroleum_regions.py
+      ALSO AT   : tools\migrate_petroleum_regions.py
+  ⚠ migrate_state_regions
+      in package : dataview\...\migrate_state_regions.py
+      ALSO AT   : tools\migrate_state_regions.py
+  ⚠ page_selected_documents
+      in package : dataview\...\page_selected_documents.py
+      ALSO AT   : documents\page_selected_documents.py
+  ⚠ page_well_map
+      in package : dataview\...\page_well_map.py
+      ALSO AT   : mapping\page_well_map.py
+  ⚠ page_workbench
+      in package : dataview\...\page_workbench.py
+      ALSO AT   : file_catalog\page_workbench.py
+  ⚠ populate_dv_well_protraction_area
+      in package : dataview\...\populate_dv_well_protraction_area.py
+      ALSO AT   : mapping\populate_dv_well_protraction_area.py
+  ⚠ project_map
+      in package : dataview\...\project_map.py
+      ALSO AT   : mapping\project_map.py
+  ⚠ promote_catalog
+      in package : dataview\...\promote_catalog.py
+      ALSO AT   : file_catalog\promote_catalog.py
+  ⚠ promote_fk_review
+      in package : dataview\...\promote_fk_review.py
+      ALSO AT   : file_catalog\promote_fk_review.py
+      (archived): _ARCHIVE_dead\_refactor_quarantine\modules\promote_fk_review.py
+  ⚠ promote_timing
+      in package : dataview\...\promote_timing.py
+      ALSO AT   : file_catalog\promote_timing.py
+  ⚠ run
+      in package : dataview\...\run.py
+      ALSO AT   : loaders\run.py
+  ⚠ run_h3
+      in package : dataview\...\run_h3.py
+      ALSO AT   : mapping\run_h3.py
+  ⚠ setup_database
+      in package : dataview\...\setup_database.py
+      ALSO AT   : sql\setup_database.py
+  ⚠ shapefile_catalog
+      in package : dataview\...\shapefile_catalog.py
+      ALSO AT   : mapping\shapefile_catalog.py
+      (archived): _ARCHIVE_dead\_refactor_quarantine\modules\shapefile_catalog.py
+  ⚠ shp_to_protraction_geojson
+      in package : dataview\...\shp_to_protraction_geojson.py
+      ALSO AT   : mapping\shp_to_protraction_geojson.py
+  ⚠ standardize_well_attrs
+      in package : dataview\...\standardize_well_attrs.py
+      ALSO AT   : loaders\standardize_well_attrs.py
+      ALSO AT   : standardize\standardize_well_attrs.py
+  ⚠ triage_inventory
+      in package : dataview\...\triage_inventory.py
+      ALSO AT   : file_catalog\triage_inventory.py
+  ⚠ vault_copy
+      in package : dataview\...\vault_copy.py
+      ALSO AT   : file_catalog\vault_copy.py
+  ⚠ vault_organizer
+      in package : dataview\...\vault_organizer.py
+      ALSO AT   : file_catalog\vault_organizer.py
+  ⚠ vault_run
+      in package : dataview\...\vault_run.py
+      ALSO AT   : file_catalog\vault_run.py
+  ⚠ worker_core
+      in package : dataview\...\worker_core.py
+      ALSO AT   : file_catalog\worker_core.py
+
+  → loaded_modules.txt records which copy actually loaded. That trace is
+    truth; this scan only proves the ambiguity exists.
+
+2. TOP-LEVEL DIRECTORIES
+------------------------------------------------------------------------------
+  APP      = reached from the package or an entry-point FILE (what runs)
+  script   = reached only from a utility directory (tools/, scripts/ ...)
+  orphan?  = neither — a CANDIDATE, not a verdict
+
+  _ARCHIVE_dead            ARCHIVE    [20 tracked]
+      the archive itself — nothing to do
+  assets                   APP        [11 tracked]
+      path string: 'Add assets/geo/us_counties.geojson to enable the geography constraint.', 'assets/data_wrangler.png'
+  dataview                 PACKAGE    [206 tracked]
+      the package itself
+  docs                     script     [24 tracked]
+      reached only from tools/ — the app does not touch it
+  documentation            orphan?    [25 tracked]
+      no import and no path string from any scanned file
+  documents                orphan?    [3 tracked]
+      no import and no path string from any scanned file
+  exports                  orphan?    [53 tracked]
+      no import and no path string from any scanned file
+  file_catalog             orphan?    [16 tracked]
+      no import and no path string from any scanned file
+  import_templates         orphan?    [5 tracked]
+      no import and no path string from any scanned file
+  importer                 orphan?    [3 tracked]
+      no import and no path string from any scanned file
+  loaders                  script     [37 tracked]
+      reached only from tools/ — the app does not touch it
+  mapping                  orphan?    [13 tracked]
+      no import and no path string from any scanned file
+  modules                  APP        [5 tracked]
+      imported as a package; path string: '-> Live copy: modules\\', '2. modules\\bcp_capture.py -> shim to root'
+  schema_docs              orphan?    [20 tracked]
+      no import and no path string from any scanned file
+  schemas                  APP        [3 tracked]
+      path string: 'http://www.witsml.org/schemas/1series', 'schemas/dataview_fk_catalog.json'
+  scripts                  ENTRY      [1 tracked]
+      scanned as an entry point — not a candidate
+  sql                      script     [70 tracked]
+      reached only from tools/ — the app does not touch it
+  standardize              orphan?    [3 tracked]
+      no import and no path string from any scanned file
+  tools                    ENTRY      [124 tracked]
+      scanned as an entry point — not a candidate
+  translators              script     [4 tracked]
+      reached only from scripts/ — the app does not touch it
+  vault                    APP        [15 tracked]
+      path string: '+ vault\\curated', "Add the per-file VAULTED_AT / PROMOTED_AT stamps to GLOBAL_FILE_CATALOG if\n    they aren't there yet. They're populated by the vault/promote stages so the\n    inventory-vs-processed scorecard can show how far each file actually got."
+  well_icons               script     [2 tracked]
+      reached only from tools/ — the app does not touch it
+
+3. ARCHIVE CANDIDATES
+------------------------------------------------------------------------------
+  documentation, documents, exports, file_catalog, import_templates, importer, mapping, schema_docs, standardize
+
+  NOT a verdict. A static scan cannot see a path built at runtime, typed into
+  the UI, or read from a config file. Directories holding data, SQL or docs
+  that nothing imports will land here and may still be needed.
+
+  Move, don't delete — one at a time, app green between each:
+      git mv documentation _ARCHIVE_dead/documentation
+      git mv documents _ARCHIVE_dead/documents
+      git mv exports _ARCHIVE_dead/exports
+      git mv file_catalog _ARCHIVE_dead/file_catalog
+      git mv import_templates _ARCHIVE_dead/import_templates
+      git mv importer _ARCHIVE_dead/importer
+      git mv mapping _ARCHIVE_dead/mapping
+      git mv schema_docs _ARCHIVE_dead/schema_docs
+      git mv standardize _ARCHIVE_dead/standardize
+
+  Anything UNTRACKED above is not in git. Copy it somewhere safe first;
+  there is no `git checkout` to undo a bad move.
+
+==============================================================================
+Static analysis proves a reference EXISTS. It cannot prove one is ABSENT.
+Section 3 is a list of questions, not answers.
+==============================================================================

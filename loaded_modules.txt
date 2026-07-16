@@ -5,6 +5,17 @@ dataview\core\db.py
 dataview\core\demo_reset.py
 dataview\core\hash_keys.py
 dataview\import_data\__init__.py
+dataview\import_data\bulk_dir_loader.py
+dataview\import_data\dlis_header_loader.py
+dataview\import_data\docx_document_loader.py
+dataview\import_data\file_gate.py
+dataview\import_data\las_header_loader.py
+dataview\import_data\lis_header_loader.py
 dataview\import_data\load_diagnostics.py
 dataview\import_data\load_router.py
 dataview\import_data\page_dir_loader.py
+dataview\import_data\pdf_document_loader.py
+dataview\import_data\pdf_field_review.py
+dataview\import_data\staging_qa.py
+dataview\import_data\staging_repair.py
+dataview\import_data\witsml_header_loader.py

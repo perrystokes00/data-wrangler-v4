@@ -834,9 +834,94 @@ def _funcs(engine, table):
         return []
 
 
+# ── near-match: name it the same way, or don't claim it ────────────────────────────────
+# Deliberately NOT token overlap — that mis-mapped catastrophically and was abandoned.
+# The only rule here: canonicalize both names through a small abbreviation table, then
+# require EXACT equality. `SRVY_ID` and `survey_id` both canonicalize to `survey|id`.
+# `TOP_MD` canonicalizes to `top|md` and matches nothing unless the DB really has that
+# column — in which case it was an exact match anyway. No guessing, no scoring.
+#
+# Every pair below is one the DDL alignment actually created. Add to it only when the
+# schema proves the pair — never because a name "looks like" another.
+_STEM_SYNONYMS = {
+    "srvy": "survey", "srv": "survey", "svy": "survey",
+    "sta": "station", "stn": "station",
+    "incl": "inclination", "inc": "inclination",
+    "azim": "azimuth", "az": "azimuth",
+    "tvdss": "tvd", "tvdsubsea": "tvd",
+    "elev": "elevation",
+    "nbr": "num", "no": "num",
+    "desc": "description",
+}
+
+
+def _canon_col(name):
+    """Canonical form of a column name: split on non-alphanumerics, expand each token
+    through _STEM_SYNONYMS, rejoin. Returns a string used for EQUALITY only."""
+    import re
+    toks = [t for t in re.split(r"[^a-z0-9]+", str(name).lower()) if t]
+    return "|".join(_STEM_SYNONYMS.get(t, t) for t in toks)
+
+
+def _near_matches(unmapped_srcs, free_db_cols):
+    """{source: (db_col, why)} for sources whose canonical name equals exactly one free
+    target column. Ambiguity (two sources → one target, or two targets → one source)
+    yields NO proposal — an ambiguous auto-map is the mis-mapping bug all over again."""
+    by_canon_db = {}
+    for c in free_db_cols:
+        by_canon_db.setdefault(_canon_col(c), []).append(c)
+    hits = {}
+    for s in unmapped_srcs:
+        cands = by_canon_db.get(_canon_col(s)) or []
+        if len(cands) == 1:
+            hits.setdefault(cands[0], []).append(s)
+    out = {}
+    for db_col, srcs in hits.items():
+        if len(srcs) != 1:
+            continue                      # two sources want it — make the human choose
+        s = srcs[0]
+        out[s] = (db_col, f"`{s}` and `{db_col}` are the same name once abbreviations are "
+                          f"expanded (`{_canon_col(s)}`)")
+    return out
+
+
+def _stg_nonnull_counts(engine, stg_table, cols):
+    """{column: rows holding a non-blank value} for the staging table. {} when the table
+    isn't staged yet or the query fails — the caller must treat {} as UNKNOWN, not zero."""
+    if engine is None or not stg_table or not cols:
+        return {}
+    import pandas as pd
+    from sqlalchemy import text
+    def _q(c):                                   # bracket-quote; staging cols are all varchar
+        return "[" + str(c).replace("]", "]]") + "]"
+    try:
+        have = pd.read_sql(text("SELECT c.name n FROM sys.columns c "
+                                "WHERE c.object_id=OBJECT_ID(:t)"),
+                           engine, params={"t": stg_table})
+        real = {str(r.n) for r in have.itertuples()}
+        use = [c for c in cols if c in real]
+        if not use:
+            return {}
+        sel = ", ".join(
+            f"SUM(CASE WHEN {_q(c)} IS NOT NULL AND LTRIM(RTRIM({_q(c)}))<>'' THEN 1 ELSE 0 END) "
+            f"AS c{i}" for i, c in enumerate(use))
+        df = pd.read_sql(text(f"SELECT {sel} FROM {stg_table}"), engine)
+        if df.empty:
+            return {}
+        row = df.iloc[0]
+        return {c: int(row[f"c{i}"] or 0) for i, c in enumerate(use)}
+    except Exception:
+        return {}
+
+
 def _suggest_functions(engine, table, src_cols, cmap, existing_funcs, schema="dataview"):
     """Propose function rules for required columns not covered by map/stamp/existing rules.
-    Returns [{target, fn, arg, why}] the user can accept or edit."""
+    Returns [{target, fn, arg, why}] the user can accept or edit.
+
+    Called only AFTER near-match resolution, so a required column whose source column was
+    sitting right there unmapped is already mapped and never reaches this function. That
+    ordering is the fix — inventing a key for a column a source can fill is what created
+    the collisions this loader then complained about."""
     import re
     missing = _required_missing(engine, table, cmap, existing_funcs, schema)
     if not missing:
@@ -878,10 +963,15 @@ def _suggest_functions(engine, table, src_cols, cmap, existing_funcs, schema="da
     return proposals
 
 
-def build_map_review(engine, scan_rows, schema="dataview"):
+def build_map_review(engine, scan_rows, schema="dataview", with_data=False):
     """For every matched staged table, propose a column map (synonym-aware), classify each
-    column (exact / mapped / skip), tag FK columns, and flag required-but-uncovered columns.
-    Returns a list of per-table review dicts."""
+    column (exact / mapped / near / skip), tag FK columns, flag required-but-uncovered
+    columns, AND flag source columns that hold data but map nowhere.
+    Returns a list of per-table review dicts.
+
+    with_data=True queries staging for non-null counts, so a dropped column can be reported
+    with the number of rows it would discard. Only pass it once the tables are staged —
+    pre-staging callers (data sufficiency / auto-X) leave it False and get counts=unknown."""
     FKC, COLS, KIND = _live_catalog_parsed(engine, schema)
     review = []
     for r in scan_rows:
@@ -922,7 +1012,7 @@ def build_map_review(engine, scan_rows, schema="dataview"):
         # learned synonym (`mnemonic` matches directly AND dv_column_map remembers
         # CURVE_NAME→mnemonic from when the extractor emitted that name). The loader already
         # knows which claim is stronger, so decide here rather than fail at promote.
-        _PRI = {"exact": 0, "confirmed": 1, "guess": 2}
+        _PRI = {"exact": 0, "confirmed": 1, "guess": 2, "near": 3}
         best = {}
         for x in rows:
             if x["status"] == "skip":
@@ -938,7 +1028,41 @@ def build_map_review(engine, scan_rows, schema="dataview"):
             lose["target"] = "— skip —"
             lose["note"] = f"`{win['source']}` ({win['status']}) already fills {_tc}"
 
+        # ── near-match: the obvious source column, sitting right there unmapped ─────
+        # Auto-X only ever asked "is every required target column covered?". It never
+        # asked "is every source column that holds data going somewhere?" — so a source
+        # that matched nothing mapped nowhere, silently, because the target was nullable.
+        # Formation tops loaded with a name and no depths that way.
+        _claimed = {str(x["target"]).lower() for x in rows if x["status"] != "skip"}
+        _fn_claimed = {str(f.get("target", "")).lower() for f in _funcs(engine, tu)}
+        _free_db = [c for c in db_cols if c not in _claimed and c not in _fn_claimed]
+        _open = [x for x in rows
+                 if x["status"] == "skip" and not x.get("note")
+                 and x["source"].upper() not in skips and pdl._norm(x["source"]).upper() not in skips]
+        near = _near_matches([x["source"] for x in _open], _free_db)
+        for x in _open:
+            hit = near.get(x["source"])
+            if hit:
+                x["target"], x["status"] = hit[0], "near"
+                x["note"] = hit[1]
+                x["fk"] = (lambda f: f[1] if f else "")(pdl._fk_of(tu, hit[0], FKC))
+
         cmap = {x["source"]: x["target"] for x in rows if x["status"] != "skip"}
+
+        # ── what's still going nowhere, and does it hold data? ──────────────────────
+        # A column that is 100% empty in staging is not a loss; warning about it would
+        # only teach you to ignore the warning. Count first, then speak. No count
+        # available (not staged yet) = unknown, say so rather than assume.
+        _still = [x["source"] for x in rows
+                  if x["status"] == "skip" and not x.get("note")
+                  and x["source"].upper() not in skips and pdl._norm(x["source"]).upper() not in skips]
+        counts = _stg_nonnull_counts(engine, r.get("stg_table"), _still) if with_data else {}
+        dropped_cols = []
+        for c in _still:
+            n = counts.get(c)
+            if n == 0:
+                continue                                   # provably empty — not a loss
+            dropped_cols.append({"source": c, "rows": n})  # n=None → unknown, still warn
 
         # A derived rule is only for a column NO source can fill. Once the extractors emit
         # station_id / survey_id / mnemonic directly, yesterday's rules are redundant — drop
@@ -956,13 +1080,17 @@ def build_map_review(engine, scan_rows, schema="dataview"):
         req_missing = _required_missing(engine, tu, cmap, funcs, schema)
         suggested = _suggest_functions(engine, tu, src_cols, cmap, funcs, schema)
         settled = ("exact", "confirmed", "skip")   # skip = a reviewed decision (no DB home)
-        # auto-map: every source column is an exact 1:1 match and nothing required is missing
-        auto = (bool(rows) and all(x["status"] == "exact" for x in rows) and not req_missing)
+        # auto-map: every source column is an exact 1:1 match and nothing required is missing.
+        # A near-match or a dropped column is a DECISION — never made silently on your behalf.
+        auto = (bool(rows) and all(x["status"] == "exact" for x in rows)
+                and not req_missing and not dropped_cols)
         stg_tbl = r.get("stg_table") or stg_name(tu)
         review.append({"target": t, "skey": stg_tbl, "stg_table": stg_tbl,
                        "src_cols": src_cols, "db_cols": db_cols, "rows": rows,
                        "funcs": funcs, "required_missing": req_missing, "suggested_funcs": suggested,
                        "auto": auto,
+                       "near": [x for x in rows if x["status"] == "near"],
+                       "dropped_cols": dropped_cols,
                        "dropped_funcs": dropped_funcs,
                        "demoted": [x for x in rows if x.get("note")],
                        "exact": sum(1 for x in rows if x["status"] == "exact"),
@@ -1202,7 +1330,7 @@ def render_match_map(ss, server, database, schema="dataview"):
     if st.button("Build mappings", type="primary"):
         try:
             eng = get_engine(server, database)
-            review = build_map_review(eng, scan["rows"], schema)
+            review = build_map_review(eng, scan["rows"], schema, with_data=True)
             # silently auto-map tables where every column is an exact 1:1 match
             maps = dict(ss.get("bdl_maps", {}))
             meta = dict(ss.get("bdl_mapmeta", {}))            # skey → (target, stg_table)
@@ -1235,11 +1363,14 @@ def render_match_map(ss, server, database, schema="dataview"):
         "confirmed": r["confirmed"],
         "to review": len(r["exceptions"]),
         "required missing": ", ".join(r["required_missing"]) or "—",
+        "data dropped": ", ".join(d["source"] for d in r.get("dropped_cols", [])) or "—",
         "status": "✅ auto" if r["skey"] in auto_set else
-                  ("✅" if not r["exceptions"] and not r["required_missing"] else "⚠")}
+                  ("⚠" if (r["exceptions"] or r["required_missing"] or r.get("dropped_cols"))
+                   else "✅")}
         for r in review]), hide_index=True, use_container_width=True)
     st.caption("**✅ auto** = every column matched exactly, mapped for you (no review needed) · "
-               "**to review** = unmapped or a fresh guess.")
+               "**to review** = unmapped or a fresh guess · **data dropped** = source columns "
+               "holding values that map nowhere and would be discarded silently.")
 
     review_needed = [r for r in review if r["skey"] not in auto_set]
     if not review_needed:
@@ -1252,12 +1383,33 @@ def render_match_map(ss, server, database, schema="dataview"):
         editors = {}
         fn_editors = {}
         for r in review:
-            n_exc = len(r["exceptions"]); flag = "⚠" if (n_exc or r["required_missing"]) else "✅"
+            n_exc = len(r["exceptions"])
+            flag = "⚠" if (n_exc or r["required_missing"] or r.get("dropped_cols")) else "✅"
             settled = ("exact", "confirmed", "skip")
             slabel = r["target"] if r["stg_table"] == stg_name(r["target"].upper()) \
                 else f"{r['target']} ⟵ {r['stg_table'].split('.')[-1]}"
             with st.expander(f"{flag}  {slabel}  ·  {len(r['src_cols'])} cols, "
-                             f"{n_exc} to review", expanded=bool(n_exc or r["required_missing"])):
+                             f"{n_exc} to review",
+                             expanded=bool(n_exc or r["required_missing"] or r.get("dropped_cols"))):
+                # ⚠ THE SILENT LOSS — a nullable target means nothing else will ever tell you
+                if r.get("dropped_cols"):
+                    _d = r["dropped_cols"]
+                    st.warning(
+                        f"⚠ **{len(_d)} source column(s) hold data but map nowhere — this data "
+                        f"will be silently discarded:**\n\n"
+                        + "\n".join(
+                            f"- `{d['source']}` — "
+                            + (f"**{d['rows']:,} row(s)** with a value" if d["rows"] is not None
+                               else "row count unknown (staging not queryable)")
+                            for d in _d)
+                        + "\n\nMap each one below, or set it to **— skip —** to state on the "
+                          "record that dropping it is intended. The target column is nullable, "
+                          "so the load will otherwise succeed with the values missing.")
+                if r.get("near"):
+                    st.info("Near-match — proposed **mapping**, not a rule (pre-filled below, "
+                            "change or skip it if wrong):\n\n"
+                            + "\n".join(f"- `{x['source']}` → **{x['target']}** — {x['note']}"
+                                        for x in r["near"]))
                 if r["required_missing"]:
                     st.warning("Required, not covered by map/stamp/function: "
                                + ", ".join(r["required_missing"])
@@ -1333,12 +1485,26 @@ def render_match_map(ss, server, database, schema="dataview"):
             _remember(eng, target.upper(), fp, cmap)
             _remember_skips(eng, target.upper(), skip_cols)     # persist skip decisions
             fe = fn_editors.get(skey)
-            rules = []
+            rules, blocked = [], []
+            _mapped = {str(v).lower() for v in cmap.values()}
             if fe is not None:
                 for _, fr in fe.iterrows():
-                    if fr["Target column"] and fr["Function"]:
-                        rules.append({"target": fr["Target column"], "fn": fr["Function"],
-                                      "arg": fr["Argument"] or ""})
+                    if not (fr["Target column"] and fr["Function"]):
+                        continue
+                    tc = str(fr["Target column"]).lower()
+                    # Mutual exclusion: a column a source fills cannot also be derived.
+                    # Refusing here means the UI can't construct the collision at all —
+                    # rather than promote failing three layers away with "only one thing
+                    # can fill a column".
+                    if tc in _mapped:
+                        blocked.append(tc)
+                        continue
+                    rules.append({"target": fr["Target column"], "fn": fr["Function"],
+                                  "arg": fr["Argument"] or ""})
+            if blocked:
+                st.info(f"**{target}** — rule(s) for " + ", ".join(f"`{c}`" for c in blocked)
+                        + " were dropped: a source column is mapped to that column, so the "
+                          "rule would collide. Skip the source column if you want the rule instead.")
             funcs_all[skey] = rules
             _remember_funcs(eng, target.upper(), rules)
         ss["bdl_maps"] = maps
