@@ -16,7 +16,24 @@ Generated PKs (casing_id, stim_id, zone_id, …) are emitted as sequence values 
 parent so the set-based promote's seq_num handles them. UWI is often blank → the review gate.
 Tables with no dv_* home (NPT events, CBL bond, daily ops) are skipped (left for doc-linking).
 """
-import os, csv, glob, re
+import os, csv, glob, hashlib, re
+
+
+def inventory_id(full_path):
+    """The SOURCE DOCUMENT's identity — SHA1(UPPER(abspath), UTF-16-LE), 40 chars.
+
+    Identical to file_gate.inventory_id and the PK of file_catalog.GLOBAL_FILE_CATALOG.
+    Stamped on EVERY row of EVERY kind this file produces.
+
+    Why it matters here more than anywhere: one scout ticket feeds 11 target tables. The UWI
+    gate used to key on whatever per-table id a row happened to carry — INTERP_ID, SRVY_ID —
+    and casing/stim/dst/dst_period/pressure rows carry NONE of those and no FILE_PATH either.
+    _file_key returned "" for them, the gate skipped them outright, and they staged with a
+    blank uwi: `Cannot insert NULL into 'uwi'`. The screen said "assign in the UWI gate" and
+    the gate could not see them. One key per document fixes all eleven at once.
+    """
+    s = str(full_path).upper().strip()
+    return hashlib.sha1(s.encode("utf-16-le")).hexdigest().upper()
 
 
 def _num(s):
@@ -279,26 +296,26 @@ def extract_file(path, source="PDF"):
 _COLS = {
     "well": ["uwi", "well_name", "operator_name", "field_name", "county", "province_state",
              "well_status", "spud_date", "completion_date", "final_td", "kb_elevation",
-             "elevation_ouom", "source"],
+             "elevation_ouom", "source", "inventory_id"],
     "formation": ["uwi", "strat_name_set", "strat_unit_id", "strat_unit_name", "interp_id",
                   "interpreter_ba_id", "interp_date", "top_depth", "base_depth", "depth_ouom",
-                  "source"],
+                  "source", "inventory_id"],
     "casing": ["UWI", "CASING_ID", "CASING_TYPE", "STRING_NUM", "OD_IN", "WEIGHT_LB_FT", "GRADE",
-               "BASE_DEPTH", "SOURCE"],
+               "BASE_DEPTH", "SOURCE", "inventory_id"],
     "stim": ["UWI", "COMPLETION_ID", "STIM_ID", "STAGE_NUM", "STIM_TYPE", "STAGE_TOP_DEPTH",
              "STAGE_BASE_DEPTH", "FLUID_VOLUME_BBL", "PROPPANT_MASS_LBS", "MAX_TREATING_PRESSURE_PSI",
-             "MAX_RATE_BPM", "SOURCE"],
-    "dst": ["UWI", "DST_ID", "DST_NUM", "TEST_TYPE", "TEST_DATE", "SOURCE"],
+             "MAX_RATE_BPM", "SOURCE", "inventory_id"],
+    "dst": ["UWI", "DST_ID", "DST_NUM", "TEST_TYPE", "TEST_DATE", "SOURCE", "inventory_id"],
     "dst_period": ["UWI", "DST_ID", "PERIOD_ID", "PERIOD_TYPE", "PERIOD_SEQ", "DURATION_MIN",
-                   "CHOKE_SIZE", "AVG_OIL_RATE", "AVG_GAS_RATE", "AVG_WATER_RATE", "SOURCE"],
+                   "CHOKE_SIZE", "AVG_OIL_RATE", "AVG_GAS_RATE", "AVG_WATER_RATE", "SOURCE", "inventory_id"],
     "pressure": ["UWI", "PRESSURE_ID", "PRESSURE_TYPE", "TEST_DATE", "DEPTH", "PRESSURE", "FLUID_TYPE",
-                 "MOBILITY", "STRAT_UNIT_NAME", "TOOL_TYPE", "SOURCE"],
-    "petro_interp": ["UWI", "INTERP_ID", "INTERP_NAME", "INTERP_DATE", "SOURCE"],
+                 "MOBILITY", "STRAT_UNIT_NAME", "TOOL_TYPE", "SOURCE", "inventory_id"],
+    "petro_interp": ["UWI", "INTERP_ID", "INTERP_NAME", "INTERP_DATE", "SOURCE", "inventory_id"],
     "petro_zone": ["UWI", "INTERP_ID", "ZONE_ID", "ZONE_NAME", "TOP_DEPTH", "BASE_DEPTH",
-                   "GROSS_THICKNESS", "NET_THICKNESS", "NET_TO_GROSS", "PHI_EFFECTIVE_AVG", "SW_AVG", "SOURCE"],
-    "srvy_hdr": ["uwi", "survey_id", "source"],
+                   "GROSS_THICKNESS", "NET_THICKNESS", "NET_TO_GROSS", "PHI_EFFECTIVE_AVG", "SW_AVG", "SOURCE", "inventory_id"],
+    "srvy_hdr": ["uwi", "survey_id", "source", "inventory_id"],
     "srvy_sta": ["uwi", "survey_id", "station_id", "md", "incl", "azim", "tvd",
-                 "depth_ouom", "source"],
+                 "depth_ouom", "source", "inventory_id"],
 }
 _FILE = {k: f"pdf_{k}.csv" for k in _COLS}
 # kind → (target table, staging suffix)
@@ -318,7 +335,13 @@ def write_staging_csvs(directory, out_dir=None, source="PDF", files=None):
     agg = {k: [] for k in _COLS}
     for p in paths:
         r = extract_file(p, source)
+        # ONE id for the whole document, stamped on every row of every kind. Done here
+        # rather than in extract_file's ~11 row-append sites: one place to be right, and a
+        # new document kind cannot forget it.
+        iid = inventory_id(os.path.abspath(p))
         for k in _COLS:
+            for row in r.get(k, []):
+                row["inventory_id"] = iid
             agg[k].extend(r.get(k, []))
     written = {}
     for k, rows in agg.items():

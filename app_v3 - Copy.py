@@ -192,38 +192,6 @@ def _inject_theme(t: dict):
         border-color: {primary} !important;
         box-shadow: 0 8px 24px {shadow};
     }}
-
-    /* ── Scrollbars ──────────────────────────────────────────────────
-       Chrome/Edge default to a thin, near-invisible bar against a dark
-       background — on #0e0e10 the stock thumb is almost the same value as
-       the track. Wider, and coloured from the theme rather than hardcoded,
-       so it stays right when the theme changes. */
-    ::-webkit-scrollbar {{
-        width: 14px;
-        height: 14px;
-    }}
-    ::-webkit-scrollbar-track {{
-        background: {bg_mid} !important;
-        border-radius: 7px;
-    }}
-    ::-webkit-scrollbar-thumb {{
-        background: {accent} !important;
-        border-radius: 7px;
-        /* a track-coloured border insets the thumb: full 14px hit target,
-           slimmer visible bar, so it reads as a control and not a slab */
-        border: 3px solid {bg_mid};
-        background-clip: padding-box;
-    }}
-    ::-webkit-scrollbar-thumb:hover {{
-        background: {primary} !important;
-        background-clip: padding-box;
-    }}
-    ::-webkit-scrollbar-corner {{ background: {bg_mid} !important; }}
-    /* Firefox — no pseudo-elements, only these two properties */
-    * {{
-        scrollbar-width: auto;
-        scrollbar-color: {accent} {bg_mid};
-    }}
     </style>
     """, unsafe_allow_html=True)
 

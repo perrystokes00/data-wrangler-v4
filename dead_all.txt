@@ -1,0 +1,300 @@
+==============================================================================
+dead code — C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean
+338 file(s) parsed
+==============================================================================
+
+1. UNREACHABLE  — proven: these statements cannot execute
+------------------------------------------------------------------------------
+  4 block(s). This is the finding to act on — the rest are questions.
+
+  dataview\import_data\page_dir_loader.py:696
+      unreachable — preceding statement is a st.rerun() never returns; 1 statement(s) after it
+  dataview\import_data\page_pipeline.py:862
+      unreachable — preceding statement is a st.rerun() never returns; 4 statement(s) after it
+  dataview\mapping\page_well_map_docs.py:989
+      unreachable — preceding statement is a return; 2 statement(s) after it
+  dataview\mapping\page_well_map_docs.py:1434
+      unreachable — preceding statement is a return; 4 statement(s) after it
+
+  A `st.rerun()` / `st.stop()` raises. Anything after it in the same block is
+  dead and looks completely normal — no linter flags it.
+
+2. NEVER CALLED  — defined here, name appears nowhere in this tree
+------------------------------------------------------------------------------
+  190 name(s). NOT proof. Verify each before deleting:
+    · called from OUTSIDE this root? re-run with --root at the repo root
+    · called by name from a .bat, a test, or SQL? not scanned
+    · reached via getattr / a string this scan didn't recognise as an identifier?
+
+  app_v3.py
+      :922   card_help
+  dataview\core\catalog_dialect.py
+      :31    dateadd_days
+      :42    limit_clause
+      :56    select_top
+      :78    timestamp_type
+      :84    timestamp_default
+      :90    quote_ident
+      :106   if_not_exists_table
+      :142   create_schema_ddl
+      :155   create_index_ddl
+  dataview\core\config.py
+      :52    get_snowflake_private_key
+      :88    get_snowflake_engine
+      :124   get_snowflake_connection
+  dataview\core\db.py
+      :368   drop_table_if_exists
+  dataview\core\db_dialect.py
+      :1015  register_dialect
+  dataview\core\db_pool.py
+      :21    set_engine
+      :38    clear_engine
+      :45    has_engine
+  dataview\core\delete_util.py
+      :73    build_delete_plan
+  dataview\core\dw_utils.py
+      :62    null_if_empty
+      :73    uwi_from_api
+      :102   uwi_from_rrc
+      :109   audit_row
+      :235   dedup
+  dataview\core\fk.py
+      :29    build_fk_dependency_graph
+      :587   load_fk_samples
+      :993   insert_missing_parent_rows
+      :1353  introspect_fk_demo
+      :1375  auto_seed_fk_oracle
+  dataview\core\fk_catalog.py
+      :21    _domain_path
+      :183   reload_catalog
+  dataview\core\fk_entity.py
+      :302   sha1_sql_expr
+      :779   build_entity_mapping
+      :986   insert_entity_rows
+  dataview\core\hash_keys.py
+      :86    sql_sha1_expr
+  dataview\core\path_identity.py
+      :128   identity_from_path
+  dataview\core\schema.py
+      :255   load_schema_from_file
+  dataview\core\ui_helpers.py
+      :14    pill
+  dataview\file_catalog\audit_log.py
+      :247   audit_impersonate_exit
+      :258   audit_skip
+      :262   audit_assign
+      :267   audit_reassign
+      :272   audit_remove_assign
+      :285   audit_export
+      :290   audit_ppdm_update
+      :295   audit_user_create
+      :300   audit_user_deactivate
+      :305   audit_user_delete
+      :309   audit_crawl
+      :314   audit_clear
+  dataview\file_catalog\catalog_docs.py
+      :162   render_documents
+  dataview\file_catalog\catalog_rules.py
+      :122   extract_las_fields
+      :248   extract_dlis_fields
+      :275   extract_segy_fields
+      :786   bootstrap_well
+      :867   extract_and_score_inventory
+      :981   get_rules
+  dataview\file_catalog\csv_catalog.py
+      :91    classify_csv
+  dataview\file_catalog\dlis_catalog.py
+      :375   fast_dlis_meta
+      :1246  catalog_dlis_directory
+      :1321  catalog_lis_directory
+  dataview\file_catalog\doc_catalog_store.py
+      :340   render_catalog_widget
+  dataview\file_catalog\dv_catalog_adapter.py
+      :178   get_users
+      :195   authenticate
+      :252   is_first_user
+      :264   auto_assign_next_batch
+      :355   get_leaderboard
+  dataview\file_catalog\dv_office_loader.py
+      :97    _well_exists
+      :102   _normalise_uwi
+  dataview\file_catalog\file_header_catalog.py
+      :498   get_catalog_headers
+      :548   get_header_text
+      :561   export_to_pipeline_csv
+      :591   get_ppdm_well_headers
+      :607   compare_catalog_to_ppdm
+  dataview\file_catalog\file_header_store.py
+      :156   store_las_headers
+      :183   store_dlis_headers
+      :233   store_lis_headers
+  dataview\file_catalog\file_inventory.py
+      :63    _fast_hash
+      :309   _scan_file
+      :938   start_background_scoring
+      :1000  stop_background_scoring
+  dataview\file_catalog\file_inventory_governance.py
+      :441   change_password
+      :496   create_group_and_assign
+      :562   extend_assignment
+      :585   mark_file_cataloged
+      :618   get_my_assignments
+      :638   get_all_groups
+      :658   get_assignment_files
+      :677   get_extension_history
+  dataview\file_catalog\inv_email.py
+      :93    notify_assignment_created
+      :115   notify_due_date_approaching
+      :134   notify_due_date_extended
+      :154   notify_assignment_completed
+  dataview\file_catalog\las_catalog.py
+      :160   ensure_catalog_schema
+      :235   add_repository
+      :288   create_well_from_las
+      :627   catalog_directory
+      :706   search_catalog
+      :951   export_files
+      :1032  get_file_curves
+      :1066  get_catalog_summary
+      :1142  get_distinct_values
+      :1174  update_uwi_match
+  dataview\file_catalog\p190_catalog.py
+      :106   _find_coords
+      :518   catalog_p190_directory
+      :551   get_p190_summary
+  dataview\file_catalog\page_file_catalog.py
+      :19    _try_import
+  dataview\file_catalog\page_file_inventory.py
+      :188   card_end
+      :600   _tab_assign
+  dataview\file_catalog\page_file_inventory_gov.py
+      :188   card_end
+      :612   _tab_assign
+  dataview\file_catalog\page_file_manager.py
+      :188   card_end
+      :852   _tab_assign
+  dataview\file_catalog\page_monitor.py
+      :78    _promoted_count
+  dataview\file_catalog\page_triage.py
+      :94    _reextract
+      :565   render_capture
+  dataview\file_catalog\page_well_documents.py
+      :51    _poly_contains
+  dataview\file_catalog\page_workbench.py
+      :1297  _date_only
+      :1555  _backfill_cataloged
+      :3395  _tab_headers
+      :4646  _pipeline_stages
+  dataview\file_catalog\pdf_db_loader.py
+      :44    _guid
+      :145   _bootstrap_well
+      :150   _well_exists
+  dataview\file_catalog\pdf_survey_catalog.py
+      :97    clear_pdf_cache
+      :518   validate_stations
+  dataview\file_catalog\segy_catalog.py
+      :93    _ebcdic_to_ascii
+      :518   ensure_seis_catalog_columns
+      :855   catalog_segy_directory
+      :930   get_segy_summary
+  dataview\file_catalog\segy_header.py
+      :244   to_catalog_fields
+  dataview\file_catalog\seis_filename_parser.py
+      :94    parse_seis_filenames
+  dataview\file_catalog\vault_copy.py
+      :136   unique_dest
+  dataview\file_catalog\witsml_catalog.py
+      :189   load_witsml
+  dataview\file_catalog\work_queue.py
+      :161   mark_done
+      :175   mark_error
+      :190   mark_skip
+  dataview\file_catalog\worker_core.py
+      :1170  _docx_uwi
+  dataview\import_data\entity_seeder.py
+      :98    seed_entities
+  dataview\import_data\exporters.py
+      :651   render_export_ui
+  dataview\import_data\load_router.py
+      :133   _listing
+  dataview\import_data\mapping.py
+      :573   save_entity_mapping
+      :595   restore_entity_mapping
+  dataview\import_data\page_dir_loader.py
+      :497   _map_entity_fk_target
+      :509   build_load_bundle
+      :556   fk_coverage
+      :687   _colmap_stage
+      :769   _validate_stage
+      :821   _fk_stage
+  dataview\import_data\staging.py
+      :896   load_from_path
+  dataview\import_data\staging_repair.py
+      :66    looks_mangled
+      :243   iso_from
+  dataview\mapping\boem_geo.py
+      :48    set_code_field
+      :204   feature_collection
+  dataview\mapping\dv_spatial_loader.py
+      :374   toggle_layer
+      :527   import_folder
+  dataview\mapping\dv_table_loader.py
+      :790   load_catalog_csvs
+  dataview\mapping\geography_layers.py
+      :183   add_all_geography
+  dataview\mapping\mapping_studio.py
+      :228   category_of_type
+      :645   available_types
+      :996   closest_snapshots
+  dataview\mapping\page_well_map.py
+      :40    _help_badge
+      :88    _load_user_prefs
+      :96    _save_user_prefs
+      :588   _qry_gom_wells
+      :1068  _qry_gom_status_codes
+      :1572  _h3_resolution_for_zoom
+      :2174  _qry_gom_zoom_targets
+      :3729  _show_detail
+      :4331  _build_batch_pdf
+  dataview\mapping\page_well_map_docs.py
+      :1740  _show_detail
+      :2004  _build_batch_pdf
+  dataview\mapping\us_geo.py
+      :133   state_labels
+      :137   code_for_label
+      :194   county_feature
+  dataview\reference_tables\boem_area_codes.py
+      :86    area_name
+  dataview\reference_tables\boem_status_codes.py
+      :67    status_name
+      :79    status_label
+  dataview\reference_tables\dv_standards_seed.py
+      :186   seed_all_standards
+      :315   map_well_type
+      :323   map_well_status
+      :331   map_kgs_status
+  dataview\reference_tables\page_rules.py
+      :66    _tbl_display
+  tools\cleanup_tier2_junk.py
+      :34    under_protected
+  tools\load_kgs.py
+      :203   parse_int
+  tools\seed_catalog.py
+      :451   _get_existing_pks
+      :466   _get_db_col_names
+      :797   check_adhoc_queries
+      :950   seed_all_server
+      :1189  validate_catalog
+
+3. NEVER IMPORTED  — no module in this tree imports them
+------------------------------------------------------------------------------
+  add_segy_fastpath, analyze_dead_files, analyze_tier4_orphans, app_v3, bcp_capture_bench, bcp_probe, bench_capture, bench_capture_parallel, bench_profile, breakdown, build_county_geojson_ND_GOM, build_county_geojson_gom, build_county_geojson_nd, build_fixtures, build_fk_catalog, build_geojson_from_snowflake, build_schema_domain, build_well_documents_view, bulk_runner, check_well, classify_dir, cleanup_now, cleanup_tier2_junk, cleanup_tier3_versions, cleanup_tier4_orphans, clear_seismic, clear_stuck_state, clone_db, clone_schema, compare_extract, config, copy_n_files, copy_reference_data, copy_views, db_scorecard, dead_code, debug_survey, delete_ks_by_kid, delete_ks_no_docs, delete_ks_uwi15, delete_util, deploy, deploy_deep_fixes, deploy_federation, dev_resume, diagnose_transport, diff_dupe_copies, docs_per_well, dv_standards_seed, enrich_from_dbf, ensure_catalog_columns, entity_seeder, export_for_snowflake, extract_by_list, extract_matched_wells, federation_map, finish_gold_insert, fk_catalog, force_capture, format_library, gen_relax_ddl, gen_schema_catalog, gen_schema_docs, gen_scout_tickets, generate_core_images, generate_county_boundaries, generate_dataview_schema, generate_dataview_testdata, generate_licence, generate_osdu_wells, generate_snapshot, gold_fix_uwi14, gold_key_check, gold_rebuild, grids, index_well_master, ingest_to_snowflake, ingest_to_snowflake_fast, kgs_las, kill_all_py, kill_pid, ks_coord_fill, ks_coord_fill_fast, ks_gold_uwi14_now, ks_in_gold, ks_in_gold_fast, las_report, las_report_all, las_scan, las_triage, load_core_photos, load_kgs, load_ks_header_to_gold, load_nd_gdb, load_ok_csv, load_preflight, load_rrc_maf016, load_rrc_w1_permits, load_survey_pdfs, load_well_header_csv, load_well_master, make_test_dataset_all, make_well_shapefile, merge_bcp_capture, migrate_petroleum_regions, migrate_state_regions, missing_files, page_ai_importer, page_catalog_search, page_data_model, page_dv_catalog, page_fed_loader, page_federation_search, page_file_inventory, page_file_inventory_gov, page_import_gom, page_import_gom_dir_srvy, page_import_osdu, page_import_rrc, page_import_rrc_shp, page_import_shapefile, page_import_witsml, page_las, page_licence, page_mapping_studio, page_pipeline_tools, page_ppdm_map, page_rules, page_seed, page_well_map_docs, parallel_crawl, pipeline_batch_ui, poc_seis3d_geom, populate_dv_well_protraction_area, populate_h3, profile_capture, profile_files, project_map, promote_timing, provenance_audit, rebuild_db, recapture, recatalog_seis, reconcile_dupes_tier1, recover, refresh_demo_grids, repair_promote_functions, repromote, resolve_log_identity, run_fixture_triage, run_h3, run_stage, schema_sync, seed_catalog, seed_deep_refs, seed_las_catalog, seed_political, seed_queue, seed_references, seed_refs, seed_refs2, seed_uom, setup_dataview, setup_wranglerview, shp_to_protraction_geojson, skip_detail, slow_files, spatial_seeder, standardize_well_attrs, tidy_scratch, upload_to_snowflake, validate_h3_backfill, validate_h3_views, validate_v_gom_well_attributes, validate_v_well, vault_run, walk_and_load, walk_bulk, walk_fast, walk_petroleum, walk_test, who_locks, worker_pool
+
+  Weakest signal of the three. An entry point, a CLI script run by hand, a
+  page dispatched by string, or anything a .bat launches will all appear here
+  and be perfectly alive.
+
+==============================================================================
+Section 1 is proof. Sections 2 and 3 are questions — a name scan cannot see
+dynamic dispatch, and this codebase dispatches on strings in at least two places.
+==============================================================================

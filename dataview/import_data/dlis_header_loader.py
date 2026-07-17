@@ -38,6 +38,23 @@ def entity_id(*parts):
     return hashlib.sha1(s.upper().strip().encode("utf-16-le")).hexdigest().upper()
 
 
+def inventory_id(full_path):
+    """The SOURCE DOCUMENT's identity — SHA1(UPPER(abspath), UTF-16-LE), 40 chars.
+
+    Identical to file_gate.inventory_id, and the PK of file_catalog.GLOBAL_FILE_CATALOG.
+    Stamped on EVERY row this extractor emits, so the UWI gate can key on the document
+    rather than on a per-table id (LOG_ID / SRVY_ID / INTERP_ID). One document, one key,
+    every target table — assign the UWI once and it reaches all of them.
+
+    Path-derived, not content-derived, and deliberately: the catalog must know a file's
+    identity BEFORE opening it, or the size+mtime pre-filter could never skip a read. It
+    also means an edited file keeps its identity (and its assigned UWI); a MOVED file does
+    not — file_gate spots that via FILE_HASH_FULL.
+    """
+    s = str(full_path).upper().strip()
+    return hashlib.sha1(s.encode("utf-16-le")).hexdigest().upper()
+
+
 def find_dlis(directory, recursive=False):
     """Every .dlis under `directory`, de-duplicated.
 
@@ -145,6 +162,7 @@ def extract_file(path, source="DLIS"):
     stem = os.path.splitext(os.path.basename(path))[0]
     size_mb = os.path.getsize(path) / 1e6 if os.path.exists(path) else 0
     want_minmax = size_mb <= MAX_SCAN_MB
+    iid = inventory_id(os.path.abspath(path))   # one id for the whole document
     log_rows, curve_rows = [], []
 
     with dlisio.dlis.load(path) as files:
@@ -176,7 +194,7 @@ def extract_file(path, source="DLIS"):
                     top, base = _num(lo), _num(hi)    # depth: full precision, not .4g
                     continue                          # the depth index is the log range
                 rows.append({
-                    "uwi": uwi, "log_id": log_id,
+                    "uwi": uwi, "log_id": log_id, "inventory_id": iid,
                     # curve_id is NOT NULL and no source column carries it. Generate it here
                     # so no concat rule is needed — and hash it, because
                     # '{log_id}_{mnemonic}' does not fit 40 chars for real DLIS mnemonics.
@@ -191,7 +209,8 @@ def extract_file(path, source="DLIS"):
                     "depth_ouom": depth_ouom, "source": source})
             curve_rows.extend(rows)
             log_rows.append({
-                "uwi": uwi, "log_id": log_id, "log_type": "DLIS", "log_date": "",
+                "uwi": uwi, "log_id": log_id, "inventory_id": iid,
+                "log_type": "DLIS", "log_date": "",
                 "run_num": run or "1", "top_depth": top, "base_depth": base,
                 "depth_ouom": depth_ouom, "source": source,
                 "well_name": wn, "file_path": os.path.abspath(path),
@@ -219,7 +238,9 @@ def extract_directory(directory, source="DLIS", files=None, recursive=False):
             # file quietly not existing.
             stem = os.path.splitext(os.path.basename(path))[0]
             log_rows.append({
-                "uwi": "", "log_id": f"LOG_{stem}", "log_type": "DLIS", "log_date": "",
+                "uwi": "", "log_id": f"LOG_{stem}",
+                "inventory_id": inventory_id(os.path.abspath(path)),
+                "log_type": "DLIS", "log_date": "",
                 "run_num": "1", "top_depth": "", "base_depth": "", "depth_ouom": "",
                 "source": source, "well_name": f"[extract error: {e}]",
                 "file_path": os.path.abspath(path), "file_format": "DLIS"})
@@ -245,11 +266,12 @@ def write_staging_csvs(directory, out_dir=None, source="DLIS", files=None, recur
     # carried for the UWI gate, which shows it so the reviewer can identify the well.
     # It will surface as an unmapped source column in Match & Map; skip it there once
     # and the decision is recorded.
-    log_cols = ["uwi", "log_id", "log_type", "run_num", "log_date", "top_depth",
-                "base_depth", "depth_ouom", "file_path", "file_format", "well_name",
-                "source"]
-    curve_cols = ["uwi", "log_id", "curve_id", "mnemonic", "curve_description",
-                  "curve_unit", "min_value", "max_value", "depth_ouom", "source"]
+    log_cols = ["uwi", "log_id", "inventory_id", "log_type", "run_num", "log_date",
+                "top_depth", "base_depth", "depth_ouom", "file_path",
+                "file_format", "well_name", "source"]
+    curve_cols = ["uwi", "log_id", "inventory_id", "curve_id", "mnemonic",
+                  "curve_description", "curve_unit", "min_value", "max_value",
+                  "depth_ouom", "source"]
     lp = os.path.join(out_dir, "dlis_well_log.csv")
     cp = os.path.join(out_dir, "dlis_well_log_curve.csv")
     with open(lp, "w", newline="", encoding="utf-8") as fh:

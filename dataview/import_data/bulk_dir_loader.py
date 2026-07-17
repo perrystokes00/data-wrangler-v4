@@ -12,7 +12,7 @@ analysis, (4) Add/Remap/Null resolution grid, (5) topo-ordered set-based promote
 Reuses page_dir_loader for the catalog/match/fingerprint logic so this pipeline and
 the per-table loader agree on tables, fingerprints, and the synonym store.
 """
-import os, csv, subprocess, tempfile, urllib.parse
+import os, time, contextlib, csv, subprocess, tempfile, urllib.parse
 
 try:
     import streamlit as st
@@ -364,6 +364,45 @@ def _call_extractor(fn, directory, out_dir, source, files, recursive):
     return fn(directory, **kw)
 
 
+class _Phases:
+    """Wall-clock per scan phase, so 'the scan is slow' becomes a number.
+
+    Written because three separate theories about what made a 35s scan slow — extraction,
+    hashing, OCR — were each killed by one measurement. The instrument beats the hunch.
+
+    It also answers the only question that matters at scale: WHICH phase grows with file
+    count. 35s over 65 files could be 90s or 9 minutes over 1,000, depending entirely on
+    where the time sits — and on whether that phase parallelises. Hashing does (hashlib
+    drops the GIL, though disk bandwidth caps it well short of core count). DLIS/LIS
+    extraction does NOT, safely: frame.curves() holds whole arrays, so N workers multiply
+    peak memory.
+    """
+    def __init__(self):
+        self.t = {}
+        self.n = {}
+
+    @contextlib.contextmanager
+    def phase(self, name, count=None):
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.t[name] = self.t.get(name, 0.0) + (time.perf_counter() - t0)
+            if count is not None:
+                self.n[name] = self.n.get(name, 0) + count
+
+    def result(self, total=None):
+        rows = [{"phase": k, "seconds": round(v, 2),
+                 "files": self.n.get(k), "pct": None} for k, v in self.t.items()]
+        tot = total if total is not None else sum(self.t.values())
+        for r in rows:
+            r["pct"] = round(100.0 * r["seconds"] / tot, 1) if tot else 0.0
+        rows.sort(key=lambda r: -r["seconds"])
+        acct = sum(self.t.values())
+        return {"phases": rows, "total": round(tot, 2), "accounted": round(acct, 2),
+                "unaccounted": round(max(0.0, tot - acct), 2)}
+
+
 def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\Bulk",
                            recursive=False, force=False):
     """profile_directory using the JSON catalog when a path is set (fast), else live
@@ -373,27 +412,32 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
     whenever the EXTRACTOR changed rather than the data: the bytes are identical, so the gate
     would otherwise (correctly) skip them."""
     import json, tempfile
+    _ph = _Phases()
+    _t_start = time.perf_counter()
     cj = _catalog_json()
     tmp = None
     if cj is not None:
         cat = cj[3]                                           # raw catalog dict from JSON
         cat_path = st.session_state.get("bdl_cat")
         dirs = list(_iter_dirs(directory, recursive))
-        scan = pdl.profile_directory(dirs[0], cat_path)
-        for d in dirs[1:]:                                    # merge subfolder scans (recursive)
-            sub = pdl.profile_directory(d, cat_path)
-            scan["rows"].extend(sub.get("rows", []))
+        with _ph.phase("profile (read + fingerprint every file)", count=len(dirs)):
+            scan = pdl.profile_directory(dirs[0], cat_path)
+            for d in dirs[1:]:                                # merge subfolder scans (recursive)
+                sub = pdl.profile_directory(d, cat_path)
+                scan["rows"].extend(sub.get("rows", []))
     else:
-        cat = load_catalog_live(engine, schema)               # fallback: introspect + temp file
+        with _ph.phase("catalog (live DB introspection)"):
+            cat = load_catalog_live(engine, schema)           # fallback: introspect + temp file
         fd, tmp = tempfile.mkstemp(suffix=".json"); os.close(fd)
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(cat, fh)
         try:
             dirs = list(_iter_dirs(directory, recursive))
-            scan = pdl.profile_directory(dirs[0], tmp)
-            for d in dirs[1:]:
-                sub = pdl.profile_directory(d, tmp)
-                scan["rows"].extend(sub.get("rows", []))
+            with _ph.phase("profile (read + fingerprint every file)", count=len(dirs)):
+                scan = pdl.profile_directory(dirs[0], tmp)
+                for d in dirs[1:]:
+                    sub = pdl.profile_directory(d, tmp)
+                    scan["rows"].extend(sub.get("rows", []))
         finally:
             try: os.unlink(tmp)
             except OSError: pass
@@ -429,10 +473,12 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
             if cand:
                 # NB: no `schema` — the file catalog lives in its own schema
                 # (catalog.GLOBAL_FILE_CATALOG), not the dataview one.
-                gate_dec = _gate.classify(engine, cand, root=directory, force=force)
+                with _ph.phase("gate: hash + classify", count=len(cand)):
+                    gate_dec = _gate.classify(engine, cand, root=directory, force=force)
                 # upsert() returns (n, note) — older copies returned a bare int. Don't let a
                 # version-skewed pair of files break a scan over a return shape.
-                _res = _gate.upsert(engine, gate_dec, root=directory)
+                with _ph.phase("gate: catalog upsert"):
+                    _res = _gate.upsert(engine, gate_dec, root=directory)
                 _note = _res[1] if isinstance(_res, (tuple, list)) and len(_res) > 1 else None
                 keep = set(_gate.to_extract(gate_dec, force))
                 skip_files = {os.path.abspath(p) for p in gate_dec if p not in keep}
@@ -484,8 +530,9 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
         try:
             las_out = os.path.join(bulk_dir, "_las_extract")     # accessible to bcp, unlike os temp
             os.makedirs(las_out, exist_ok=True)
-            lp, cp, nl, nc = _call_extractor(_las.write_staging_csvs, directory, las_out,
-                                             "LAS", las_files, recursive)
+            with _ph.phase("extract: LAS", count=len(las_files)):
+                lp, cp, nl, nc = _call_extractor(_las.write_staging_csvs, directory, las_out,
+                                                 "LAS", las_files, recursive)
             log_cols = next(_csv.reader(open(lp, encoding="utf-8")))
             curve_cols = next(_csv.reader(open(cp, encoding="utf-8")))
             scan["rows"].append({"file": f"LAS → log  ({nl} files)", "path": lp, "cols": log_cols,
@@ -516,8 +563,9 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
             # skip, missing subfolders on a recursive scan, and (with a case-insensitive
             # double glob) counting every file twice. _call_extractor also warns loudly when
             # an extractor has no `files` parameter, instead of silently swallowing it.
-            lp, cp, nl, nc = _call_extractor(mod.write_staging_csvs, directory, out,
-                                             tag.upper(), files, recursive)
+            with _ph.phase(f"extract: {tag.upper()}", count=len(files)):
+                lp, cp, nl, nc = _call_extractor(mod.write_staging_csvs, directory, out,
+                                                 tag.upper(), files, recursive)
             log_cols = next(_csv.reader(open(lp, encoding="utf-8")))
             curve_cols = next(_csv.reader(open(cp, encoding="utf-8")))
             scan["rows"].append({"file": f"{tag.upper()} → log  ({nl} files)", "path": lp, "cols": log_cols,
@@ -543,7 +591,8 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
     if wml_files and _witsml is not None:
         try:
             out = os.path.join(bulk_dir, "_witsml_extract"); os.makedirs(out, exist_ok=True)
-            written = _witsml.write_staging_csvs(directory, out_dir=out, source="WITSML")
+            with _ph.phase("extract: WITSML", count=len(wml_files)):
+                written = _witsml.write_staging_csvs(directory, out_dir=out, source="WITSML")
             # kind → (target table, staging table, parent-order hint)
             wmap = {
                 "log":       ("DV_WELL_LOG", "stg.dv_well_log_witsml"),
@@ -577,8 +626,16 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
     if pdf_files and _pdf is not None:
         try:
             out = os.path.join(bulk_dir, "_pdf_extract"); os.makedirs(out, exist_ok=True)
-            written = _call_extractor(_pdf.write_staging_csvs, directory, out, "PDF",
-                                      pdf_files, recursive)
+            with _ph.phase("extract: PDF (pdfplumber; OCR if no text layer)",
+                           count=len(pdf_files)):
+                written = _call_extractor(_pdf.write_staging_csvs, directory, out, "PDF",
+                                          pdf_files, recursive)
+            # PDFs whose OCR blew the budget: copied to the do-later bucket, NOT extracted.
+            # Surfaced here because the whole point of deferring rather than grinding is that
+            # you find out. `res["ocr"] = True` has existed all along and displayed nowhere —
+            # which is how three test scans hid 72% of a 35s scan.
+            if getattr(_pdf, "LAST_DEFERRED", None):
+                scan["pdf_deferred"] = list(_pdf.LAST_DEFERRED)
             for kind, (path, n) in written.items():
                 target = _pdf.TARGET.get(kind)
                 if not target:
@@ -610,8 +667,9 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
     if docx_files and _docx is not None:
         try:
             out = os.path.join(bulk_dir, "_docx_extract"); os.makedirs(out, exist_ok=True)
-            written = _call_extractor(_docx.write_staging_csvs, directory, out, "DOCX",
-                                      docx_files, recursive)
+            with _ph.phase("extract: Word", count=len(docx_files)):
+                written = _call_extractor(_docx.write_staging_csvs, directory, out, "DOCX",
+                                          docx_files, recursive)
             for kind, (path, n) in written.items():
                 target = _docx.TARGET.get(kind)
                 if not target:
@@ -635,6 +693,10 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
 
     # formats present on disk that no working extractor can read → reported, never silent
     scan["missing_extractors"] = _missing_extractors(directory, recursive)
+    # Wall clock for the whole call, so `unaccounted` is honest — it's whatever the named
+    # phases don't explain (reference-table name matching, ordering, row bookkeeping, and
+    # anything nobody has thought to measure yet). A big unaccounted number is a finding.
+    scan["timing"] = _ph.result(total=time.perf_counter() - _t_start)
     return scan
 
 
@@ -981,7 +1043,7 @@ def build_map_review(engine, scan_rows, schema="dataview", with_data=False):
     pre-staging callers (data sufficiency / auto-X) leave it False and get counts=unknown."""
     FKC, COLS, KIND = _live_catalog_parsed(engine, schema)
     review = []
-    for r in scan_rows:
+    for _ri, r in enumerate(scan_rows):
         t = r.get("table")
         if not t:
             continue
@@ -1092,7 +1154,26 @@ def build_map_review(engine, scan_rows, schema="dataview", with_data=False):
         auto = (bool(rows) and all(x["status"] == "exact" for x in rows)
                 and not req_missing and not dropped_cols)
         stg_tbl = r.get("stg_table") or stg_name(tu)
-        review.append({"target": t, "skey": stg_tbl, "stg_table": stg_tbl,
+        # skey identifies THIS SCAN ROW. It must be unique across the whole review or
+        # Streamlit raises StreamlitDuplicateElementKey and Phase 2 dies outright — not a
+        # warning, not a mis-map you could fix, the review screen simply refuses to render,
+        # so you cannot even reach the control that would skip the offending file.
+        #
+        # Two earlier attempts were not enough, and each failure named the next one:
+        #   skey = stg_table          -> two CSVs auto-matching the same target collided
+        #                                (Completion_Parameters_Perforations.csv and
+        #                                 Production_Data_..._Monthly_Production.csv both
+        #                                 matched DV_WELL_GOM_BACKUP)
+        #   skey = stg_table + fp     -> identical files in DIFFERENT folders collided: same
+        #                                target AND same column shape, so the fingerprint is
+        #                                the same by construction. This tree has eight such
+        #                                filenames across sample_pdfs/ and more_pdfs/.
+        # The row's own position is the only thing guaranteed distinct per scan row. The
+        # path is carried too, for a key that means something when read in a traceback.
+        _tag = os.path.basename(str(r.get("path") or r.get("file") or "")) or "row"
+        skey = f"{stg_tbl}#{_ri}#{_tag}"
+        review.append({"target": t, "skey": skey, "stg_table": stg_tbl,
+                       "src_file": r.get("file", ""),
                        "src_cols": src_cols, "db_cols": db_cols, "rows": rows,
                        "funcs": funcs, "required_missing": req_missing, "suggested_funcs": suggested,
                        "auto": auto,
@@ -1104,6 +1185,18 @@ def build_map_review(engine, scan_rows, schema="dataview", with_data=False):
                        "confirmed": sum(1 for x in rows if x["status"] == "confirmed"),
                        "exceptions": [x["source"] for x in rows if x["status"] not in settled],
                        "fp": pdl.fingerprint_cols(src_cols)})
+    # Belt and braces. skey is unique by construction (the row index is in it), but this has
+    # now collided twice, and each time the symptom was Phase 2 refusing to render at all —
+    # the worst possible failure for a review screen, because the fix lives inside the screen
+    # you can no longer see. If a future edit reintroduces it, degrade rather than crash.
+    _seen = {}
+    for _e in review:
+        _k = _e["skey"]
+        if _k in _seen:
+            _seen[_k] += 1
+            _e["skey"] = f"{_k}#{_seen[_k]}"
+        else:
+            _seen[_k] = 0
     return review
 
 
@@ -1177,9 +1270,32 @@ def _dget(d, *keys):
 
 
 def _file_key(d):
-    """Identify which source file a staging row came from — log_id for logs, file path for PDFs."""
+    """Which SOURCE DOCUMENT did this staging row come from?
+
+    INVENTORY_ID first, because it is the only key that is per-DOCUMENT. Everything below it
+    is per-TABLE and merely happens to be shared sometimes:
+
+        one scout ticket -> 11 CSVs
+            well header    -> _file_key = 'scout.pdf'     (FILE_PATH fallback)
+            formation tops -> _file_key = 'ML_scout_1'    (INTERP_ID)
+            survey header  -> _file_key = 'SRVY_scout'    (SRVY_ID)
+
+    Three keys, one document. Assign a UWI against one and the other two never see it: they
+    stay blank, hit `uwi NOT NULL`, and never load. Orphaned rows from a document whose UWI
+    you already typed in.
+
+    It works for logs today only by luck — well_log.csv and well_log_curve.csv happen to
+    share LOG_ID, so the sibling rewrite reaches the curves. That is a per-table key doing a
+    per-document job by coincidence of naming.
+
+    INVENTORY_ID = file_gate.inventory_id(abspath(path)) — SHA1 of the path, 40 chars, stamped
+    by the extractor on every row it emits. Same document, same key, every table.
+    """
     import os as _os
-    v = _dget(d, "LOG_ID", "SRVY_ID", "INTERP_ID")
+    v = _dget(d, "INVENTORY_ID")
+    if v:
+        return v
+    v = _dget(d, "LOG_ID", "SRVY_ID", "INTERP_ID")     # legacy: pre-INVENTORY_ID extracts
     if v:
         return v
     fp = _dget(d, "FILE_PATH")
@@ -1204,11 +1320,21 @@ def _uwi_exists(engine, uwis, schema="dataview"):
 
 
 def _extract_uwi_files(scan):
-    """Rows in the scan that came from an extractor (DLIS/LIS/WITSML/LAS) and carry a UWI column.
-    Returns the log-shaped rows (one per extracted CSV) that gate staging."""
-    return [r for r in scan.get("rows", [])
-            if r.get("extracted") and "UWI" in [c.upper() for c in r.get("cols", [])]
-            and "curve" not in (r.get("stg_table", "") or "")]
+    """Every extracted CSV whose rows can be tied to a source document.
+
+    Was: log-shaped rows only — `"curve" not in stg_table` and a UWI column required. That
+    excluded most of what a PDF produces (formation tops, survey stations, casing...), so
+    those tables never entered the gate at all: no UWI inspected, no UWI stamped, rows
+    orphaned. Any CSV carrying INVENTORY_ID or UWI is gateable.
+    """
+    out = []
+    for r in scan.get("rows", []):
+        if not r.get("extracted"):
+            continue
+        cols = [str(c).upper() for c in (r.get("cols") or [])]
+        if "INVENTORY_ID" in cols or "UWI" in cols:
+            out.append(r)
+    return out
 
 
 def _read_uwi_rows(path):
@@ -1232,6 +1358,15 @@ def render_review_uwi(ss, server, database, schema="dataview"):
         return True                                            # no extracted formats → nothing to gate
     eng = get_engine(server, database)
 
+    # INVENTORY_ID → the real filename. The gate already built {abspath: inventory_id} when it
+    # hashed the directory, so invert it: no extractor needs to emit a path column, and it
+    # works for every format at once. Without this the grid shows the operator a 40-char SHA1
+    # and asks them to identify it — the PDF extractor emits no FILE_PATH, so there was
+    # nothing else to fall back to.
+    _iid_path = {}
+    for _p, _i in ((scan.get("gate") or {}).get("ids") or {}).items():
+        _iid_path.setdefault(str(_i), _p)
+
     # inspect the extract CSVs for per-file (log_id) UWI status
     files = ss.get("bdl_uwi_files")
     if files is None:
@@ -1243,17 +1378,69 @@ def render_review_uwi(ss, server, database, schema="dataview"):
                 continue
             for d in data:
                 lg = _file_key(d)
+                if not lg:
+                    continue
                 uwi = _dget(d, "UWI")
                 wn = _dget(d, "WELL_NAME")
-                if lg:
-                    files.setdefault(lg, {"log_id": lg, "uwi": uwi, "well_name": wn,
-                                          "fmt": (r.get("extracted") or "").upper(),
-                                          "path": r["path"], "assigned": uwi, "skip": False})
+                # A document now contributes rows from SEVERAL CSVs. setdefault() would let
+                # whichever table happened to be read first define the entry — and a curve or
+                # station row carries no WELL_NAME, so the operator would be asked to identify
+                # a document with nothing to identify it BY. Merge: first non-blank wins.
+                v = files.get(lg)
+                if v is None:
+                    v = {"log_id": lg, "uwi": "", "well_name": "", "fmt": "",
+                         "label": "", "paths": set(), "assigned": "", "skip": False}
+                    files[lg] = v
+                v["uwi"] = v["uwi"] or uwi
+                v["well_name"] = v["well_name"] or wn
+                v["fmt"] = v["fmt"] or (r.get("extracted") or "").upper()
+                v["assigned"] = v["assigned"] or uwi
+                v["paths"].add(r["path"])
+                # what the OPERATOR sees. INVENTORY_ID is a 40-char hash — useless in a grid.
+                # Prefer the real path from the gate's id map; then a path column if the
+                # extractor emits one; then the per-table key. Include the parent folder:
+                # this directory has eight filenames that appear twice from different
+                # folders (Survey_ANADARKO_1H_Landmark.pdf, ...) with DIFFERENT content, so
+                # the basename alone would show two identical-looking rows.
+                if not v["label"]:
+                    fp = _iid_path.get(lg) or _dget(d, "FILE_PATH")
+                    if fp:
+                        _par = os.path.basename(os.path.dirname(fp))
+                        v["label"] = (f"{_par}\\{os.path.basename(fp)}" if _par
+                                      else os.path.basename(fp))
+                    else:
+                        v["label"] = (_dget(d, "LOG_ID", "SRVY_ID", "INTERP_ID")
+                                      or lg[:12] + "…")
         # validate EVERY present UWI against dv_well in one query; blank or not-found → must resolve
+        # Remembered operator assignments first: a UWI typed into this gate before is keyed to
+        # the document's INVENTORY_ID, so it comes back on a re-run, a Reset, or a restart.
+        # It OVERRIDES what the file carried — an operator looking at the document beats a
+        # parser guessing at it. `origin` records which, so the grid can say so rather than
+        # silently presenting a remembered value as if the file supplied it.
+        for v in files.values():
+            v["origin"] = "file" if v["uwi"] else "—"
+        try:
+            if _gate is not None:
+                saved = _gate.get_identity(eng, list(files.keys()))
+                for lg, u in saved.items():
+                    v = files.get(lg)
+                    if v and u:
+                        v["uwi"] = u
+                        v["assigned"] = u
+                        v["origin"] = "saved"
+        except Exception:
+            pass                                   # remembering is a convenience, never a gate
         present = _uwi_exists(eng, {v["uwi"] for v in files.values() if v["uwi"]}, schema)
         for v in files.values():
             v["valid"] = bool(v["uwi"]) and _desep(v["uwi"]) in present
         ss["bdl_uwi_files"] = files
+
+    # Outcome of the previous "Validate & apply", stashed because the st.rerun() that follows
+    # it discards anything rendered in that pass. Shown here — including on the run where the
+    # gate closes, so "Applied. All files resolved" is actually visible.
+    _msg = ss.pop("bdl_uwi_msg", None)
+    if _msg:
+        (st.error if _msg[0] == "error" else st.success)(_msg[1])
 
     unresolved = [v for v in files.values() if not v.get("valid") and not v["skip"]]
     if not unresolved:
@@ -1267,26 +1454,48 @@ def render_review_uwi(ss, server, database, schema="dataview"):
 
     grid = pd.DataFrame([{"action": "SKIP" if v["skip"] else "keep",
                           "assign UWI": v["assigned"],
-                          "file (log_id)": v["log_id"], "format": v["fmt"],
-                          "well name": v["well_name"], "header UWI": v["uwi"] or "—"}
+                          "document": v["label"], "format": v["fmt"],
+                          "well name": v["well_name"], "header UWI": v["uwi"] or "—",
+                          "tables": len(v["paths"]), "UWI from": v.get("origin", "—")}
                          for v in unresolved])
     edited = st.data_editor(
         grid, hide_index=True, use_container_width=True, key="bdl_uwi_gate",
-        column_order=["action", "assign UWI", "file (log_id)", "well name", "format", "header UWI"],
+        column_order=["action", "assign UWI", "document", "tables", "well name", "format",
+                      "header UWI", "UWI from"],
         column_config={
-            "action": st.column_config.SelectboxColumn("action (keep/SKIP)", options=["keep", "SKIP"],
-                                                       required=True, width="small",
-                                                       help="SKIP = drop this file from the run"),
-            "assign UWI": st.column_config.TextColumn(help="a UWI that exists in dv_well"),
-            "file (log_id)": st.column_config.TextColumn(disabled=True),
+            "action": st.column_config.SelectboxColumn(
+                "action", options=["keep", "SKIP", "FORGET"], required=True, width="small",
+                help="SKIP = drop this DOCUMENT from the run.  FORGET = erase the remembered "
+                     "assignment for it (use when a UWI was assigned just to see how the data "
+                     "flowed — otherwise it persists into every future run of that file)"),
+            "assign UWI": st.column_config.TextColumn(help="a UWI that exists in dv_well — it is "
+                                                           "stamped on EVERY row this document "
+                                                           "produced, in every target table, and "
+                                                           "remembered for the next run"),
+            "document": st.column_config.TextColumn(disabled=True),
+            "tables": st.column_config.NumberColumn(disabled=True, width="small",
+                                                    help="how many target tables this document "
+                                                         "feeds — one decision covers all of them"),
             "format": st.column_config.TextColumn(disabled=True, width="small"),
             "well name": st.column_config.TextColumn(disabled=True),
             "header UWI": st.column_config.TextColumn(disabled=True, width="small",
-                                                      help="what the file carried")})
+                                                      help="what the file carried"),
+            "UWI from": st.column_config.TextColumn(
+                disabled=True, width="small",
+                help="file = extracted from the document · saved = you assigned it on a "
+                     "previous run")})
 
     if st.button("Validate & apply", type="primary"):
-        assigns = {r["file (log_id)"]: (r["assign UWI"] or "").strip() for _, r in edited.iterrows()}
-        skips = {r["file (log_id)"]: (str(r["action"]).upper() == "SKIP") for _, r in edited.iterrows()}
+        # Map edits back BY POSITION, not by the display string. The key is now INVENTORY_ID
+        # (a hash) while the grid shows a filename — and this directory has eight filenames
+        # that appear twice from different folders. data_editor preserves row order, so zip()
+        # is exact where a string lookup would be a guess.
+        rowlist = list(edited.to_dict("records"))
+        pairs = list(zip(unresolved, rowlist))
+        assigns = {v["log_id"]: (r.get("assign UWI") or "").strip() for v, r in pairs}
+        acts = {v["log_id"]: str(r.get("action") or "").upper() for v, r in pairs}
+        skips = {k: (a == "SKIP") for k, a in acts.items()}
+        forgets = [k for k, a in acts.items() if a == "FORGET"]
         good = _uwi_exists(eng, {u for lg, u in assigns.items() if u and not skips.get(lg)}, schema)
         invalid = []
         for lg, v in files.items():
@@ -1299,9 +1508,33 @@ def render_review_uwi(ss, server, database, schema="dataview"):
             if u and _desep(u) in good:
                 v["uwi"] = _desep(u); v["valid"] = True
             elif u:
-                invalid.append(lg)
+                invalid.append(v["label"])
+        # Remember the VALID assignments against the document's INVENTORY_ID — and erase the
+        # ones marked FORGET. Only ever UWI14; MATCHED_UWI / MATCH_METHOD / TRIAGE_* / PROC_*
+        # belong to the pipeline and are not touched.
+        try:
+            if _gate is not None:
+                _save = {lg: files[lg]["uwi"] for lg in assigns
+                         if files.get(lg, {}).get("valid") and not files[lg]["skip"]}
+                _save.update({lg: "" for lg in forgets})
+                for lg in forgets:                       # clear it here too, not just in the DB
+                    if lg in files:
+                        files[lg]["uwi"] = files[lg]["assigned"] = ""
+                        files[lg]["valid"] = False
+                        files[lg]["origin"] = "—"
+                if _save:
+                    _gate.set_identity(eng, _save)
+                    _n_f = len(forgets)
+                    st.caption(f"💾 remembered {len(_save) - _n_f} assignment(s)"
+                               + (f", forgot {_n_f}" if _n_f else "")
+                               + " — keyed to the document, so a re-run won't ask again.")
+        except Exception as e:
+            st.caption(f"⚠ couldn't save assignments to the file catalog: {e}  "
+                       f"(this run is unaffected — you'd just be asked again next time)")
         # rewrite each extract CSV: stamp assigned UWIs, DROP skipped files' rows (never stage)
-        paths = {v["path"] for v in files.values()}
+        paths = set()
+        for v in files.values():
+            paths |= v["paths"]
         # a log CSV and its curve CSV share the UWI/skip decision via log_id
         def _rewrite(path):
             try:
@@ -1339,10 +1572,15 @@ def render_review_uwi(ss, server, database, schema="dataview"):
                 if sp != p and sib.endswith(".csv"):
                     _rewrite(sp)
         ss["bdl_uwi_files"] = files
+        # st.rerun() RAISES — anything rendered here is discarded before it reaches the
+        # screen. So st.error("Not found in dv_well: ...") was written and never seen: you
+        # assigned a UWI, the gate correctly refused it, and the only symptom was the gate
+        # re-appearing with no explanation. Stash the outcome and render it after the rerun.
         if invalid:
-            st.error("Not found in dv_well (fix or SKIP): " + ", ".join(invalid))
+            ss["bdl_uwi_msg"] = ("error", "Not found in **dv_well** — fix or SKIP: "
+                                          + ", ".join(invalid))
         else:
-            st.success("Applied. All files resolved — you can Stage now.")
+            ss["bdl_uwi_msg"] = ("success", "Applied. All files resolved — you can Stage now.")
         st.rerun()
     return False                                               # unresolved files remain → gate stays
 
@@ -1362,9 +1600,19 @@ def render_match_map(ss, server, database, schema="dataview"):
         try:
             eng = get_engine(server, database)
             review = build_map_review(eng, scan["rows"], schema, with_data=True)
-            # silently auto-map tables where every column is an exact 1:1 match
-            maps = dict(ss.get("bdl_maps", {}))
-            meta = dict(ss.get("bdl_mapmeta", {}))            # skey → (target, stg_table)
+            # Carry forward what's still in the scan — and ONLY that. `maps` used to accumulate
+            # and never drop, so a table auto-mapped here BEFORE you ticked its skip in
+            # Files → tables stayed in the plan for the rest of the session. Phase 5 then tried
+            # to promote it and hit `Invalid object name 'stg.dv_well_stimulation'` — the table
+            # was never staged, because you skipped it. The decision outlived the thing it was
+            # about, which is the same failure as a stale dv_column_map rule.
+            _live = {r["skey"] for r in review}
+            _prev_maps = dict(ss.get("bdl_maps", {}))
+            maps = {k: v for k, v in _prev_maps.items() if k in _live}
+            meta = {k: v for k, v in dict(ss.get("bdl_mapmeta", {})).items() if k in _live}
+            _funcs_prev = dict(ss.get("bdl_functions", {}))
+            ss["bdl_functions"] = {k: v for k, v in _funcs_prev.items() if k in _live}
+            _dropped = [k for k in _prev_maps if k not in _live]
             auto_done = []
             for r in review:
                 meta[r["skey"]] = (r["target"], r["stg_table"])
@@ -1377,6 +1625,9 @@ def render_match_map(ss, server, database, schema="dataview"):
             ss["bdl_mapmeta"] = meta
             ss["bdl_auto"] = auto_done
             ss["bdl_review"] = review
+            if _dropped:
+                st.caption(f"Dropped {len(_dropped)} mapping(s) from a previous pass — those "
+                           f"files are no longer in the scan (skipped, re-targeted, or gone).")
         except Exception as e:
             st.error(f"Match & Map failed: {e}")
 
@@ -1410,9 +1661,27 @@ def render_match_map(ss, server, database, schema="dataview"):
     # Render the editor for EVERY table, not just the ones needing review: an exact match is
     # a good default, not a decision the operator is stuck with. Auto tables stay collapsed.
 
+    # Two scan rows landing on the SAME staging table would BCP into one physical table with
+    # two different column shapes. Name them here rather than let it surface as a bcp error
+    # three phases later — and the skip control below is how you resolve it without going back
+    # to the top of the page.
+    _by_stg = {}
+    for r in review:
+        _by_stg.setdefault(r["stg_table"], []).append(r)
+    _clash = {k: v for k, v in _by_stg.items() if len(v) > 1}
+    if _clash:
+        for stg, rs in _clash.items():
+            st.warning(
+                f"⚠ **{len(rs)} files both map to `{rs[0]['target']}`** and would stage into "
+                f"the same table `{stg}` with different column shapes:\n\n"
+                + "\n".join(f"- `{x.get('src_file') or '?'}` — {len(x['src_cols'])} cols"
+                            for x in rs)
+                + "\n\nRe-target one of them in **Files → tables**, or **⏭ skip** it below.")
+
     with st.form("bdl_phase2"):
         editors = {}
         fn_editors = {}
+        skip_tbl = {}
         for r in review:
             n_exc = len(r["exceptions"])
             flag = "⚠" if (n_exc or r["required_missing"] or r.get("dropped_cols")) else "✅"
@@ -1422,6 +1691,16 @@ def render_match_map(ss, server, database, schema="dataview"):
             with st.expander(f"{flag}  {slabel}  ·  {len(r['src_cols'])} cols, "
                              f"{n_exc} to review",
                              expanded=bool(n_exc or r["required_missing"] or r.get("dropped_cols"))):
+                # Skip HERE, not only in Files → tables at the top of the page. This is where
+                # you find out a table is wrong — a mis-matched target, a shape clash, a file
+                # you never meant to load — so this is where the decision belongs.
+                skip_tbl[r["skey"]] = st.checkbox(
+                    f"⏭ Skip **{r['target']}**"
+                    + (f"  ⟵ `{r.get('src_file')}`" if r.get("src_file") else "")
+                    + " — don't map, don't promote",
+                    key=f"bdlskip_{r['skey']}",
+                    help="The staged rows stay in the staging table; they just never reach "
+                         "dataview. Nothing is deleted.")
                 # ⚠ THE SILENT LOSS — a nullable target means nothing else will ever tell you
                 if r.get("dropped_cols"):
                     _d = r["dropped_cols"]
@@ -1505,7 +1784,14 @@ def render_match_map(ss, server, database, schema="dataview"):
         eng = get_engine(server, database)
         maps = dict(ss.get("bdl_maps", {}))          # keep the auto-mapped tables
         funcs_all = dict(ss.get("bdl_functions", {}))
+        _skipped = [k for k, v in (skip_tbl or {}).items() if v]
         for skey, (target, ed, src_cols) in editors.items():
+            if skey in _skipped:
+                # Skipped here — drop it from the plan entirely. Also remove any map saved on
+                # a previous pass, or an earlier decision would quietly outlive this one.
+                maps.pop(skey, None)
+                funcs_all.pop(skey, None)
+                continue
             cmap = {ed.iloc[i]["source"]: ed.iloc[i]["→ DB column"]
                     for i in range(len(src_cols))
                     if ed.iloc[i]["→ DB column"] not in ("— skip —", "", None)}
@@ -1542,6 +1828,12 @@ def render_match_map(ss, server, database, schema="dataview"):
         ss["bdl_functions"] = funcs_all
         st.success(f"Saved mappings + function rules for {len(maps)} staged tables to dv_column_map. "
                    "Next: FK analysis across the batch (Phase 3).")
+        if _skipped:
+            _lbl = {r["skey"]: (r.get("src_file") or r["target"]) for r in review}
+            st.info("⏭ Skipped (won't promote): "
+                    + ", ".join(f"`{_lbl.get(k, k)}`" for k in _skipped)
+                    + ".  Their staged rows are untouched — nothing was deleted. Clear the "
+                      "checkbox and Save again to put one back.")
 
 
 def stg_name(target, fp=None):
@@ -2360,6 +2652,17 @@ def render_promote(ss, server, database, schema="dataview"):
                 build_t = time.perf_counter() - tb
                 tc = time.perf_counter()
                 with eng.connect() as cx:
+                    # The staging table may not exist: the file was skipped in Files → tables,
+                    # so it never staged — but Build mappings had already auto-mapped it into
+                    # `maps` beforehand, and nothing removed it. Querying it raises a raw
+                    # "Invalid object name 'stg.x'" (208), which names the symptom and not the
+                    # cause. Say what actually happened.
+                    if not cx.execute(text("SELECT OBJECT_ID(:t)"),
+                                      {"t": stg_tbl}).scalar():
+                        raise ValueError(
+                            f"`{stg_tbl}` was never staged — this file is skipped in "
+                            f"**Files → tables**, so there is nothing to promote. Untick its "
+                            f"skip and re-stage to include it, or ignore this row.")
                     staged = cx.execute(text(f"SELECT COUNT(*) FROM {stg_tbl}")).scalar()
                 count_t = time.perf_counter() - tc
                 label = target if stg_tbl == stg_name(target) else f"{target} ⟵ {stg_tbl.split('.')[-1]}"
@@ -2728,6 +3031,49 @@ def run():
             st.caption(f"📇 File catalog: {bits}")
         if g.get("note"):
             st.caption(f"📇 {g['note']}")
+
+    # ── where the scan's time went ───────────────────────────────────────────────
+    tm = scan.get("timing")
+    if tm and tm.get("phases"):
+        _n = scan.get("n_files") or len(scan.get("rows") or [])
+        with st.expander(f"⏱ Scan took {tm['total']}s — where it went", expanded=False):
+            # Every column must hold ONE type. Mixing ints with "—" for the phases that have
+            # no file count makes pyarrow fail the whole table ("Could not convert '—' with
+            # type str: tried to convert to int64") — Streamlit then auto-fixes and renders
+            # anyway, so the only symptom is a traceback in the console. Same Arrow trap as
+            # file_viewer / file_header_store. Format to str here; these are for reading.
+            _df = pd.DataFrame([{
+                "phase": r["phase"],
+                "seconds": f"{r['seconds']:.2f}",
+                "% of scan": f"{r['pct']:.1f}",
+                "files": str(r["files"]) if r["files"] is not None else "—",
+                "s / file": (f"{r['seconds'] / r['files']:.3f}" if r["files"] else "—"),
+            } for r in tm["phases"]])
+            st.dataframe(_df, hide_index=True, use_container_width=True)
+            if tm["unaccounted"] > 0.05:
+                st.caption(
+                    f"**{tm['unaccounted']}s ({round(100*tm['unaccounted']/tm['total'],1)}%) "
+                    f"unaccounted**  — reference-table name matching, promote ordering, row "
+                    f"bookkeeping, and anything not yet measured. If this is the biggest "
+                    f"number on the list, the bottleneck is somewhere nobody has instrumented.")
+            st.caption(
+                "**s / file** is the number that predicts a bigger directory — the total "
+                "doesn't. A phase at 0.1 s/file costs 100s over 1,000 files.  ·  "
+                "**Parallelising:** hashing threads well (hashlib releases the GIL) but caps "
+                "out on disk bandwidth, not core count. DLIS/LIS extraction does **not** — "
+                "`frame.curves()` holds whole arrays in memory, so N workers means N times "
+                "the peak. Measure before threading, and watch memory when you do.")
+
+    _dfr = scan.get("pdf_deferred")
+    if _dfr:
+        _bucket = os.path.dirname(_dfr[0].get("copied_to") or "") or "the do-later bucket"
+        st.warning(
+            f"⏭ **{len(_dfr)} PDF(s) deferred — OCR over budget, NOT extracted.**\n\n"
+            + "\n".join(f"- `{os.path.basename(d['path'])}` — {d['reason']}" for d in _dfr)
+            + f"\n\nCopied to `{_bucket}`. These are scanned documents with no text layer; "
+              f"they may hold real data. Raise `OCR_PAGE_TIMEOUT_S` / `OCR_BUDGET_S` in "
+              f"`pdf_document_loader.py` and re-run the bucket on its own, or work them by "
+              f"hand. Nothing from these files has been loaded.")
 
     for label, n, modname, dep in (scan.get("missing_extractors") or []):
         st.error(f"❌ **{n} {label} file(s) found but not scanned** — the `{modname}` extractor "

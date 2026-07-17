@@ -331,6 +331,75 @@ def upsert(engine, decisions, source=None, root=None, schema=None, table=None,
     return len(rows), None
 
 
+def get_identity(engine, inventory_ids, schema=None, table=None):
+    """{INVENTORY_ID: UWI14} for ids that have a REMEMBERED operator assignment.
+
+    Read back at scan time so a UWI typed once is never typed again — the assignment is keyed
+    to INVENTORY_ID, so it survives re-runs, Reset, and a restart. It does NOT survive the
+    file being moved or renamed (INVENTORY_ID is path-derived); classify() spots that case as
+    `moved` via FILE_HASH_FULL, but re-linking the identity across a move is not wired.
+    """
+    from sqlalchemy import text
+    ids = [i for i in (inventory_ids or []) if i]
+    if not ids:
+        return {}
+    cat = _cat(schema, table)
+    out = {}
+    try:
+        with engine.connect() as cx:
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                ph = ",".join(f":i{j}" for j in range(len(chunk)))
+                rs = cx.execute(text(
+                    f"SELECT INVENTORY_ID, UWI14 FROM {cat} "
+                    f"WHERE UWI14 IS NOT NULL AND INVENTORY_ID IN ({ph})"),
+                    {f"i{j}": v for j, v in enumerate(chunk)})
+                for r in rs:
+                    if r[1] and str(r[1]).strip():
+                        out[str(r[0])] = str(r[1]).strip()
+    except Exception:
+        return {}                       # no saved identities is a valid answer; never fatal
+    return out
+
+
+def set_identity(engine, assignments, schema=None, table=None):
+    """Remember an OPERATOR'S UWI assignment: {inventory_id: uwi14}. Returns rows written.
+
+    Writes UWI14 AND NOTHING ELSE. Set-based, one temp table + one UPDATE JOIN.
+
+    This deliberately widens the loader's remit. _OWNED says the loader may write the
+    file-identity columns and nothing else, because clobbering a triage decision or a worker
+    claim from a directory scan would be worse than any bug it prevents. UWI14 is not in
+    _OWNED. It is written here anyway, on purpose, because an operator typing a UWI into the
+    gate is the strongest identity claim in the system — stronger than anything inferred —
+    and re-typing it on every run is how it gets typed wrong.
+
+    The boundary is kept narrow: MATCHED_UWI and MATCH_METHOD are score_file's inference and
+    are NOT touched; TRIAGE_*, PROC_*, VAULTED, PROMOTED_AT are the pipeline's and are NOT
+    touched. Two writers, one column, one rule: the operator wins over an extracted UWI14,
+    because they are looking at the document and the parser was guessing.
+
+    Pass uwi="" to FORGET an assignment — needed, because a UWI assigned while eyeballing how
+    the data flows would otherwise persist silently into every future run of that file.
+    """
+    from sqlalchemy import text
+    rows = [{"inventory_id": k, "uwi14": (v or "").strip()[:14] or None}
+            for k, v in (assignments or {}).items() if k]
+    if not rows:
+        return 0
+    cat = _cat(schema, table)
+    with engine.begin() as cx:
+        cx.execute(text("CREATE TABLE #idn (inventory_id nvarchar(40), uwi14 char(14))"))
+        cx.execute(text("INSERT INTO #idn (inventory_id, uwi14) VALUES (:inventory_id, :uwi14)"),
+                   rows)
+        cx.execute(text(f"""
+            UPDATE t SET t.UWI14 = s.uwi14, t.ROW_CHANGED_DATE = SYSUTCDATETIME()
+            FROM {cat} AS t
+            JOIN #idn AS s ON t.INVENTORY_ID = s.inventory_id"""))
+        cx.execute(text("DROP TABLE #idn"))
+    return len(rows)
+
+
 def mark_loaded(engine, inventory_ids, schema=None, catalog_table=None, table=None):
     """Record that a file's rows reached dataview. This table has no ppdm_loaded_ind — the
     equivalents are CATALOG_STATUS and PROMOTED_AT. Still only our own columns."""
