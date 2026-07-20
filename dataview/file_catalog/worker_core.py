@@ -556,194 +556,29 @@ def _do_las(engine, fpath, uwi, inv, say) -> FileResult:
 
 # ── stubs for the remaining formats (next build steps port them in) ──────────
 def _do_pdf(engine, fpath, uwi, inv, say, dialect="mssql") -> FileResult:
-    """PDF → classify, capture well header to cat_well, route to the detail
-    loader (formation tops / casing / scout / core / well-test / RFT / petro).
+    """PDF capture, consolidated onto the Directory Loader's extractor.
 
-    Ported from page_workbench._load_rows_to_catalog's PDF branch. Streamlit-free
-    (st.error → say). Directional surveys use the CORRECTED survey_loader path
-    when available, falling back to legacy load_to_ppdm — so it works on both the
-    pre- and post-survey_loader-refactor deployments.
+    Delegates to catalog_doc_capture.capture_document, which runs
+    pdf_document_loader.extract_file — self-resolving the UWI from the document
+    itself (18 label spellings), so a scout ticket whose UWI triage could not
+    read still captures — then maps its rows into the cat_* mirrors. Streamlit-
+    free, so it is safe inside a pool worker. (The former pdf_survey_catalog /
+    pdf_db_loader body is retired; _extract_pdf_rows / _load_directional below
+    are now unused but left in place to keep this change minimal.)
     """
-    import uuid as _uuid
-    from datetime import datetime as _dt
-    capture, reset_replace_state = _capture()
-    reset_replace_state()
-    _now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
-    res = FileResult("done", rt="PDF")
-    detail = res.detail
-    errors: list = []
-
-    def _safe_coord(v):
-        try:
-            f = float(str(v).strip())
-            return f if -180.0 <= f <= 180.0 else None
-        except (TypeError, ValueError):
-            return None
-
-    # ── classify (base + extended override), mirroring the legacy branch ─────
-    from dataview.file_catalog.pdf_survey_catalog import (
-        classify_pdf, RT_DIRECTIONAL, RT_SCOUT)
-    try:
-        from dataview.file_catalog.pdf_survey_catalog import extended_classify_pdf
-    except ImportError:
-        extended_classify_pdf = None
-    try:
-        from dataview.file_catalog.pdf_survey_catalog import (
-            RT_EOWR, RT_WELL_TEST, RT_DDR, RT_RFT, RT_CASING)
-    except ImportError:
-        RT_EOWR, RT_WELL_TEST = "EOW_REPORT", "WELL_TEST"
-        RT_DDR, RT_RFT, RT_CASING = "DAILY_DRILLING", "RFT_MDT", "CASING_CEMENTING"
-
-    cl = classify_pdf(fpath)
-    rt = cl.get("report_type", "UNKNOWN")
-    ex = {}
-    try:
-        ex = extended_classify_pdf(fpath) if extended_classify_pdf else {}
-        ex_rt = ex.get("report_type", "UNKNOWN")
-        _EXT_TYPES = {RT_SCOUT, RT_EOWR, RT_WELL_TEST, RT_DDR, RT_RFT, RT_CASING}
-        if ex_rt == RT_EOWR and ex.get("confidence", 0) >= 0.5:
-            rt = RT_EOWR
-        elif ex_rt in _EXT_TYPES and rt != RT_DIRECTIONAL:
-            rt = ex_rt
-        if rt == ex_rt:
-            for _k in ("well_name", "operator", "field", "state", "county",
-                       "country", "total_depth", "latitude", "longitude"):
-                if not cl.get(_k) and ex.get(_k):
-                    cl[_k] = ex.get(_k)
-    except Exception:
-        pass
-    res.rt = rt
-
-    # The crawl inserts files with MATCHED_UWI=NULL (it lists, doesn't parse), so
-    # `uwi` arrives empty here. classify_pdf already extracts the UWI from the
-    # document text (INFO_PATTERNS) — USE IT when we weren't handed one. Without
-    # this, curated, clearly-UWI'd documents error "No UWI provided" because the
-    # extracted UWI was being thrown away. Normalize to bare digits to match the
-    # rest of the pipeline.
-    if not uwi:
-        doc_uwi = cl.get("uwi") or (ex.get("uwi") if isinstance(ex, dict) else None)
-        if doc_uwi:
-            uwi = re.sub(r"[\-\s/]", "", str(doc_uwi)).strip() or None
-            if uwi:
-                say(f"[pdf] UWI from document: {uwi}")
-
-    well_info = {"uwi": uwi, "well_name": cl.get("well_name", ""),
-                 "operator": cl.get("operator", ""), "source_path": fpath,
-                 "inventory_id": inv}
-
-    # FILE_WELL_HEADER: the documents map / triage read THIS table (not cat_well),
-    # so populate it for ANY PDF that identifies a well — scout tickets, DDRs,
-    # surveys, completions alike. A scout ticket IS a document about a well, so it
-    # belongs on the documents map even though its detail loads go elsewhere.
-    if uwi:
-        _write_well_header(engine, inv, uwi, cl, rt, say)
-
-    # ── well header → cat_well (scout writes its own richer header) ──────────
-    if uwi and rt != RT_SCOUT:
-        try:
-            _hn = capture(engine, "cat_well", [{
-                "WELL_NAME":         cl.get("well_name") or uwi,
-                "OPERATOR_NAME":     cl.get("operator"),
-                "FIELD_NAME":        cl.get("field"),
-                "PROVINCE_STATE":    cl.get("state"),
-                "COUNTY":            cl.get("county"),
-                "COUNTRY":           cl.get("country"),
-                "SURFACE_LATITUDE":  _safe_coord(cl.get("latitude")),
-                "SURFACE_LONGITUDE": _safe_coord(cl.get("longitude")),
-                "FINAL_TD":          cl.get("total_depth"),
-                "ACTIVE_IND":        "Y",
-                "ROW_QUALITY":       "FINAL",
-                "PPDM_GUID":         str(_uuid.uuid4()),
-                "ROW_CREATED_BY":    "DataWrangler",
-                "ROW_CREATED_DATE":  _now,
-            }], uwi=uwi, inventory_id=inv, source_path=fpath, source="PDF_HEADER")
-            if _hn:
-                detail["cat_well"] = detail.get("cat_well", 0) + _hn
-        except Exception as _he:
-            errors.append(f"header capture: {_he}")
-
-    # ── extract the detail rows for this report type (the _do_extract step) ──
-    rows = _extract_pdf_rows(fpath, rt, say)
-
-    # ── route to the detail loader ──────────────────────────────────────────
-    if rt == RT_DIRECTIONAL:
-        r = _load_directional(engine, dialect, well_info, rows, say)
+    from dataview.file_catalog.catalog_doc_capture import capture_document
+    r = capture_document(engine, dialect, fpath, ".pdf", uwi, inv, log=say)
+    n = int(r.get("loaded", 0) or 0)
+    errs = r.get("errors") or []
+    if n:
+        status = "done"
+    elif errs:
+        status = "error"
     else:
-        from dataview.file_catalog.pdf_db_loader import (
-            load_formation_tops, load_casing, load_scout, load_core)
-        try:
-            from dataview.file_catalog.pdf_db_loader import load_well_test
-        except ImportError:
-            load_well_test = None
-        try:
-            from dataview.file_catalog.pdf_db_loader import load_rft
-        except ImportError:
-            load_rft = None
-        try:
-            from dataview.file_catalog.pdf_survey_catalog import (
-                RT_FORMATION as _RT_FORM, RT_PETRO as _RT_PET,
-                RT_CORE as _RT_CORE, RT_SCOUT as _RT_SCOUT)
-            RT_FORMATION, RT_PETRO, RT_CORE, RT_SCOUT2 = (
-                _RT_FORM, _RT_PET, _RT_CORE, _RT_SCOUT)
-        except ImportError:
-            RT_FORMATION, RT_PETRO = "FORMATION_TOPS", "PETROPHYSICAL"
-            RT_CORE, RT_SCOUT2 = "CORE_ANALYSIS", RT_SCOUT
-        kw = dict(engine=engine, dialect=dialect, well_info=well_info, rows=rows)
-        if rt in (RT_EOWR, RT_FORMATION):
-            r = load_formation_tops(**kw)
-        elif rt == RT_CASING:
-            r = load_casing(**kw)
-        elif rt == RT_CORE:
-            r = load_core(**kw)
-        elif rt in (RT_SCOUT, RT_SCOUT2):
-            r = load_scout(**kw)
-        elif rt == RT_WELL_TEST and load_well_test:
-            r = load_well_test(**kw)
-        elif rt == RT_RFT and load_rft:
-            r = load_rft(**kw)
-        elif rt in (RT_PETRO, "PETROPHYSICAL"):
-            from dataview.file_catalog.extract_petro import extract_petro, load_petro_zones
-            petro = extract_petro(fpath)
-            if not petro.get("ok"):
-                res.status = "done" if detail.get("cat_well") else "skip"
-                detail["note"] = f"petro_fail:{petro.get('error')}"
-                return res
-            r = load_petro_zones(engine, dialect, petro, uwi)
-        else:
-            # no detail loader (e.g. DDR) — header capture still counts
-            detail["note"] = f"not_impl:{rt}"
-            res.status = "done" if detail.get("cat_well") else "skip"
-            return res
-
-    res.rows_written = r.get("loaded", 0)
-    for _k, _v in (r.get("detail") or {}).items():
-        detail[_k] = detail.get(_k, 0) + _v
-    errors.extend(r.get("errors", []))
-    # Some loader "errors" are normal outcomes, not failures: an empty report
-    # (nothing to extract) or a report type with no catalog-mirror destination
-    # (RFT/MDT, well-test/DST). These are SKIPs — the original pipeline logged
-    # them as informational [x] lines, not failures. Don't mark the file error.
-    def _benign(msg):
-        m = str(msg).lower()
-        return ("header capture:" in m
-                or "no formation tops to load" in m
-                or "no stations to load" in m
-                or "no casing" in m
-                or "no core" in m
-                or "nothing to load" in m
-                or "not in the catalog mirror scope" in m
-                or "no target" in m)
-
-    real_errs = [e for e in errors if not _benign(e)]
-    if real_errs:
-        res.status = "error"
-        res.error = str(real_errs[0])[:400]
-    elif res.rows_written == 0 and not res.detail.get("cat_well"):
-        # nothing loaded and no header captured → a clean skip, not done
-        res.status = "skip"
-        if errors:
-            res.detail["note"] = str(errors[0])[:200]
-    return res
+        status = "skip"          # uwi_unresolved / no_rows -> nothing captured, not an error
+    return FileResult(status, rows_written=n, detail=r.get("detail", {}),
+                      error=(str(errs[0]) if errs else (r.get("note") or None)),
+                      rt=r.get("rt", "PDF"))
 
 
 def _extract_pdf_rows(fpath, rt, say):
@@ -1212,6 +1047,22 @@ def _do_office(engine, fpath, uwi, inv, say) -> FileResult:
     to the formation-tops / completion / production sub-loader. The loader now
     extracts the docx UWI from table cells itself (incl. label-value grids), so
     we just dispatch."""
+    import os as _os
+    if _os.path.splitext(fpath)[1].lower() == ".docx":
+        # Final Well Reports (well/core/survey) -> the loader's DOCX extractor via
+        # capture_document. If it captures nothing (e.g. a formation-tops or
+        # completion .docx it does not read), fall through to dv_office_loader below.
+        from dataview.file_catalog.catalog_doc_capture import (
+            capture_document, has_docx_extractor)
+        if has_docx_extractor():
+            _r = capture_document(engine, "mssql", fpath, ".docx", uwi, inv, log=say)
+            _n = int(_r.get("loaded", 0) or 0)
+            if _n:
+                _fr = FileResult("done", rows_written=_n,
+                                 detail=_r.get("detail", {}), rt=_r.get("rt", "DOCX"))
+                return _fr
+            # 0 rows -> not an FWR the loader reads; try dv_office_loader instead
+
     res = FileResult("done", rt="OFFICE")
     try:
         from dataview.file_catalog.dv_office_loader import dispatch as _office

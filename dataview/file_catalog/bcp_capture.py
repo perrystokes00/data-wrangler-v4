@@ -14,7 +14,7 @@ Pipeline use:  from bcp_capture import run_bcp_capture
                run_bcp_capture(engine_url, recs, workers=6, log=print)
   where recs = [{"FILE_PATH":..,"MATCHED_UWI":..,"INVENTORY_ID":..}, ...]
 """
-import os, sys, csv, time, subprocess, tempfile, argparse
+import os, sys, csv, time, subprocess, tempfile, argparse, re
 from datetime import datetime
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
@@ -102,7 +102,12 @@ def parse_las_rows(arg):
     if not uwi:
         return {"cat_well": [], "cat_well_log": [], "cat_well_log_curve": []}
 
-    logid = wv("LOG_ID", "LOGID") or (f"{uwi}-LAS" if uwi else None)
+    # log_id keyed to the Directory Loader's scheme (LOG_<uwi>) so a File-Catalog
+    # LAS keys IDENTICALLY to the loader's row — promote's NOT EXISTS then dedups
+    # instead of minting a parallel row. Header LOG_ID is ignored (the loader
+    # ignores it too). The per-well _2/_3 suffix for a well with multiple LAS is
+    # cross-file, so it is assigned later in _reconcile_log_ids, not here.
+    logid = ("LOG_" + re.sub(r"[^A-Za-z0-9]", "", uwi)) if uwi else None
 
     well = []
     log  = []
@@ -125,13 +130,17 @@ def parse_las_rows(arg):
             "row_created_by": "DataWrangler", "row_created_date": now,
         })
     curves = []
+    _seen_cv = {}
     try:
         for c in las.curves:
             mnem = (getattr(c, "mnemonic", "") or "").strip()
             if not mnem:
                 continue
+            _k = _seen_cv.get(mnem, 0) + 1          # repeated mnemonic in one LAS -> _2, _3
+            _seen_cv[mnem] = _k
+            _cid = (f"{logid}_{mnem}" + ("" if _k == 1 else f"_{_k}"))[:40]
             curves.append({
-                "uwi": uwi, "log_id": logid, "curve_id": mnem[:40], "mnemonic": mnem,
+                "uwi": uwi, "log_id": logid, "curve_id": _cid, "mnemonic": mnem,
                 "curve_description": _clean(getattr(c, "descr", "")) or None,
                 "curve_unit": (getattr(c, "unit", "") or "").strip() or None,
                 "top_depth": d_start, "base_depth": d_stop, "depth_ouom": d_uom,
@@ -251,6 +260,58 @@ def _load_table(cur, table, rows, log, upsert_key=None):
     cur.execute(f"DROP TABLE {stg}")
     return n
 
+def _reconcile_log_ids(buckets, log=print):
+    """Assign the Directory Loader's per-well log_id suffixes (_2, _3, ...) ACROSS
+    the whole batch -- the one thing a per-file parse cannot do. Each file is parsed
+    independently, so every log starts at the base key LOG_<uwi>; once all rows are
+    aggregated here, a well with more than one LAS gets its 2nd/3rd log keyed
+    LOG_<uwi>_2 / _3 (ordered by file path, matching las_header_loader), and that
+    log's curves are re-prefixed to match. Single-log wells are left untouched, so
+    this is a no-op for the common case."""
+    from collections import defaultdict
+    logs   = buckets.get("cat_well_log", []) or []
+    curves = buckets.get("cat_well_log_curve", []) or []
+    if not logs:
+        return
+
+    def _base(u):
+        return "LOG_" + re.sub(r"[^A-Za-z0-9]", "", str(u or ""))
+
+    paths_by_uwi = defaultdict(list)          # distinct source file per well (1 log each)
+    _seen = defaultdict(set)
+    for lg in logs:
+        u, sp = str(lg.get("uwi") or ""), (lg.get("SOURCE_PATH") or "")
+        if sp not in _seen[u]:
+            _seen[u].add(sp); paths_by_uwi[u].append(sp)
+
+    final, _multi = {}, 0                      # (uwi, source_path) -> final log_id
+    for u, paths in paths_by_uwi.items():
+        base = _base(u)
+        ordered = sorted(paths)
+        if len(ordered) > 1:
+            _multi += 1
+        for i, sp in enumerate(ordered, 1):
+            final[(u, sp)] = base if i == 1 else f"{base}_{i}"
+
+    for lg in logs:
+        nl = final.get((str(lg.get("uwi") or ""), lg.get("SOURCE_PATH") or ""))
+        if nl:
+            lg["log_id"] = nl
+    for cv in curves:
+        u, sp = str(cv.get("uwi") or ""), (cv.get("SOURCE_PATH") or "")
+        nl = final.get((u, sp))
+        if not nl:
+            continue
+        base, cid = _base(u), (cv.get("curve_id") or "")
+        cv["log_id"] = nl
+        if cid.startswith(base):               # re-prefix curve to its (suffixed) log
+            cv["curve_id"] = (nl + cid[len(base):])[:40]
+
+    if _multi:
+        log(f"[bcp-capture] reconciled log_id: {_multi:,} well(s) with multiple LAS "
+            f"-> _2/_3 keys assigned")
+
+
 def run_bcp_capture(recs, conn_str=None, workers=6, log=print, force_uwi=False):
     """Parallel-parse recs -> bulk-load cat_* via BULK INSERT. recs need FILE_PATH,
     MATCHED_UWI, INVENTORY_ID. conn_str is a pyodbc ODBC connection string (falls
@@ -310,6 +371,10 @@ def run_bcp_capture(recs, conn_str=None, workers=6, log=print, force_uwi=False):
     t_parse = time.time() - t0
     log(f"[bcp-capture] parsed {sum(len(v) for v in buckets.values()):,} rows "
         f"from {len(args):,} files in {t_parse:.1f}s")
+
+    # Cross-file keying: assign LOG_<uwi>_2/_3 for wells with multiple LAS,
+    # matching the loader, so multi-log wells key correctly (not per-file).
+    _reconcile_log_ids(buckets, log)
 
     cn = pyodbc.connect(conn_str)
     cn.autocommit = False
