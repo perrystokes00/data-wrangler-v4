@@ -1983,15 +1983,59 @@ def _stage_promote(engine, apply, log):
         except Exception:
             pass
     if apply:
-        # promote MOVES every eligible cat_* row up in FK order and halts on error
-        # with no partial commit — so if we reached here on a clean apply, every
-        # file that was CATALOGED has had its rows lifted into dv_*. Stamp them.
+        # STAMP FROM LINEAGE, NOT FROM CATALOG_READINESS.
+        #
+        # This was `WHERE PROMOTED_AT IS NULL AND CATALOG_READINESS='CATALOGED'`
+        # — a stamp driven by the STATE a file happened to be in when promote
+        # finished, rather than by evidence that its rows landed. It is wrong in
+        # both directions:
+        #
+        #   UNDER-stamps. A file only reaches 'CATALOGED' by going through
+        #   cat_*. LAS/DLIS/LIS write dv_well_log(_curve) directly and SEG-Y
+        #   merges into dv_seis_set, so those never carry that state and were
+        #   never stamped even though their data is in dv_*. report_md already
+        #   carries a paragraph apologising for exactly this. MEASURED on
+        #   DataView_Demo 16 Aug: 11 files stamped, 97 demonstrably present in
+        #   dv_ by lineage — the stamp knew about 11% of what had promoted.
+        #
+        #   OVER-stamps. Promote HOLDS a row it cannot lift rather than guessing
+        #   (that is the design law), and a held row stays in cat_*, so its file
+        #   stays 'CATALOGED' — and got stamped as promoted anyway. Zero such
+        #   rows on this database today, only because the queue happened to be
+        #   drained; the moment a gate holds anything the stamp records a
+        #   promotion that did not happen. A confident wrong timestamp is worse
+        #   than a missing one.
+        #
+        # The honest test is the one the reports use: is this INVENTORY_ID
+        # present in a dv_ table? promotion_lineage.available() narrows LINEAGE
+        # to what this database can answer, so a partially-built schema stamps
+        # what it can instead of failing.
         from sqlalchemy import text as _t
-        with engine.begin() as con:
-            con.execute(_t(
-                "UPDATE file_catalog.GLOBAL_FILE_CATALOG "
-                "SET PROMOTED_AT = SYSUTCDATETIME() "
-                "WHERE PROMOTED_AT IS NULL AND CATALOG_READINESS = 'CATALOGED'"))
+        try:
+            from dataview.file_catalog import promotion_lineage as _lin
+            with engine.begin() as con:
+                _dv = [d for _c, d, _l in _lin.available(con)]
+                if _dv:
+                    _u = "\nUNION ALL\n".join(
+                        f"SELECT INVENTORY_ID FROM dataview.{t} "
+                        f"WHERE INVENTORY_ID IS NOT NULL" for t in _dv)
+                    _n = con.execute(_t(
+                        f"UPDATE g SET g.PROMOTED_AT = SYSUTCDATETIME() "
+                        f"FROM file_catalog.GLOBAL_FILE_CATALOG g "
+                        f"WHERE g.PROMOTED_AT IS NULL AND EXISTS "
+                        f"(SELECT 1 FROM ({_u}) d "
+                        f" WHERE d.INVENTORY_ID = g.INVENTORY_ID)")).rowcount
+                    log(f"  [promote] PROMOTED_AT stamped on {max(_n, 0):,} "
+                        f"file(s) with rows in dv_ (lineage evidence)")
+                else:
+                    log("  [promote] PROMOTED_AT not stamped — no dv_ table in "
+                        "LINEAGE carries INVENTORY_ID in this database")
+        except Exception as _se:
+            # Reported, never swallowed. The promote itself has already
+            # committed; a failed stamp must not read as a failed promote, and
+            # must not be invisible either.
+            log(f"  [promote] PROMOTED_AT stamp FAILED ({type(_se).__name__}: "
+                f"{_se}) — rows are promoted, the stamp is not written")
     return {}
 
 
