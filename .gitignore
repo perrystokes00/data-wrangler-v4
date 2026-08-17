@@ -150,3 +150,23 @@ PPDM_Studio_5_PARKED/
 geojson/
 
 _scratch/
+
+# DuckDB — *.db above doesn't match this extension
+*.duckdb
+*.duckdb.wal
+
+# A full copy of the package inside itself, dated 31 July
+dataview/import_data/dvpath/
+
+# Dead-code holding pens — kept on disk, deliberately out of history.
+# The design law is "delete dead code"; _ARCHIVE_dead was purged 16 Aug and
+# committing these would just enshrine a replacement archive.
+_attic/
+_quarantine/
+
+# Generated output and runtime state, not source.
+# Scorecards/reports belong in C:\Bulk\reports per CLAUDE.md.
+/reports/
+.dev_pid
+loaded_modules.txt
+dataview/mapping/user_prefs.json
