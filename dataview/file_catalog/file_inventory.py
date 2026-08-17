@@ -633,15 +633,29 @@ def crawl_and_inventory(
         os.makedirs(bulk_dir, exist_ok=True)
         csv_path = os.path.join(bulk_dir, f"inv_stage_{uuid.uuid4().hex[:8]}.csv")
 
+        # bulk_csv_writer carries NO escapechar — see path_identity for why
+        # that is the whole fix. The escaped form doubled every separator in a
+        # Windows path and BULK INSERT stored it verbatim.
+        from dataview.core.path_identity import bulk_csv_writer, bulk_field
+
         try:
             # Write all records to local CSV
+            _sanitised = 0
             with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f, delimiter='\t', quoting=csv.QUOTE_NONE, escapechar='\\')
+                writer = bulk_csv_writer(f)
                 for rec in good:
-                    writer.writerow([
-                        rec.get(c, "") if rec.get(c) is not None else ""
-                        for c in COLS
-                    ])
+                    row = []
+                    for c in COLS:
+                        val, changed = bulk_field(rec.get(c, ""))
+                        row.append(val)
+                        if changed:
+                            _sanitised += 1
+                    writer.writerow(row)
+            if _sanitised:
+                errors.append(
+                    f"{_sanitised} field(s) contained a tab, quote or newline "
+                    f"and were rewritten to load — the stored value differs "
+                    f"from the value on disk")
 
             with engine.begin() as con:
                 # Create staging table

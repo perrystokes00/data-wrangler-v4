@@ -22,6 +22,7 @@ import os
 import sys
 import re
 import time
+import uuid          # _well_params/_seis_params use uuid.uuid5 for PPDM_GUID
 from pathlib import Path
 
 # ── Extension sets (canonical) ─────────────────────────────────────────────

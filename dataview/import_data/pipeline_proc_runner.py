@@ -75,6 +75,12 @@ def run(cfg: dict) -> dict:
         # tree, and wrong the moment the CODE changes, which is how 1,638 LAS
         # files sat "already done" while nothing had ever processed them.
         force=bool(cfg.get("force", False)),
+        # PATH SCOPE. Named here for the same reason as the two notes above.
+        # 'path' restricts every stage to files under root; 'queue' drains the
+        # whole pending inventory (the old behaviour, where only scan was
+        # scoped to the folder given). Default 'path' so a runner launched by
+        # an older UI gets the bounded behaviour rather than the surprising one.
+        scope=cfg.get("scope", "path"),
         # The database-wide rollup is off by default; a caller that
         # actually wants the markdown report can ask for it.
         deep_rollup=bool(cfg.get("deep_rollup", False)),

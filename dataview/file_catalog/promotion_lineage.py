@@ -155,8 +155,17 @@ EXTRACT_PENDING = (
 # CAPTURE-pending: extracted, but its rows have not been staged into cat_* at
 # this content hash. SKIPPED is an instruction, CATALOGED is a result; both stop
 # a re-capture. This is _already_done_filter's non-force branch.
+#
+# HEADER_EXTRACTED='M' is excluded: the file is no longer at the catalogued
+# path, so it cannot be captured, and without this the row is re-claimed and
+# re-failed on every run forever — capture logs the failure and writes no state,
+# so nothing would ever take it out of the queue. It is HELD, not dropped: the
+# row keeps its id and its reason and is reconciled by re-scanning the file
+# where it now lives. (EXTRACT_PENDING needs no such clause — it claims only
+# NULL and 'N', so 'M' already falls outside it.)
 CAPTURE_PENDING = (
     "ISNULL({a}CATALOG_READINESS,'') NOT IN ('SKIPPED','CATALOGED') "
+    "AND ISNULL({a}HEADER_EXTRACTED,'') <> 'M' "
     "AND ({a}CAPTURED_HASH IS NULL OR {a}CAPTURED_HASH <> {a}FILE_HASH)")
 
 # The RUN gate: is there any work at all for the processing stages? Extract-

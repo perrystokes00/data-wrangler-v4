@@ -542,6 +542,9 @@ def _extract_one_proc(arg):
     import os as _os, sys as _sys, time as _time
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
     _w0 = _time.monotonic()
+    # MOVED/DELETED, not broken — see _worker for why these are separated.
+    if not _os.path.exists(fpath):
+        return ("missing", iid, "no file at the catalogued path", 0.0, fext)
     try:
         from dataview.file_catalog import extract_core
         fields = extract_core._extract_fields(fpath, fext)
@@ -587,7 +590,8 @@ def _ex_report(log, files=0):
 
 
 def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
-                   exts=None, per_type_cap=None, parse_mode="thread"):
+                   exts=None, per_type_cap=None, parse_mode="thread",
+                   root=None):
     """Reuse extract_core._extract_fields + _write_enrichment_on on every
     pending file, parallel parse + sequential write, chunked.
 
@@ -598,6 +602,11 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
                     the stragglers, mark their files 'E' (quarantined, not
                     retried next run), and move on.
     exts          — restrict processing to these file extensions (format scope).
+    root          — restrict processing to files UNDER this folder (path scope),
+                    already canonical. None means the whole pending queue, which
+                    is what this stage always did: only `scan` was ever scoped to
+                    the folder you gave it, so a run pointed at one directory
+                    still extracted files anywhere in the catalog.
     per_type_cap  — TIMING-TEST knob. When set, process at most this many
                     pending files per FILE_EXT in a single sampling pass (e.g.
                     5 → 5 .sgy + 5 .las + 5 .pdf …), so a test run stays small
@@ -615,10 +624,13 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
     _PENDING_EXTRACT = pending_sql("extract")
 
     CHUNK = getattr(wb, "ENRICH_CHUNK", 300)
-    ok = skip = err = timeout = 0
+    ok = skip = err = timeout = missing = 0
     processed = 0
     per_ext: dict = {}                       # ext -> [count, total_parse_secs]
     _extf = _ext_filter(exts)
+    _rootf = _root_filter(root, "")          # '' -> bare FILE_PATH, unaliased
+    if _rootf:
+        log(f"[extract] path scope: files under {root}")
 
     _EX_TIMES.clear()
     _EX_COUNTS.clear()
@@ -632,6 +644,24 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
         iid, fpath, fext = r
         _ext = (fext or "").lower()
         _w0 = time.monotonic()
+        # THE FILE MOVED. Checked before the parser is handed the path, and
+        # reported as its own outcome rather than as an error, because they are
+        # different facts with different repairs: 'E' means this file is broken
+        # or unparseable and wants a look; 'M' means the CATALOG is stale and
+        # the row wants re-pointing or clearing. Folded together — which is what
+        # happened, since the parser raised FileNotFoundError straight into the
+        # 'err' bucket — a folder somebody reorganised reads as a corpus full of
+        # corrupt files, and the count that should prompt a rescan instead
+        # prompts a hunt for a parser bug.
+        #
+        # Held, not dropped: 'M' is outside EXTRACT_PENDING (which claims only
+        # NULL and 'N'), so the row stops being retried every run but stays in
+        # the catalog, named, with its reason in CATALOG_ISSUES. Rescanning the
+        # file where it now lives re-catalogues it; the stale row is still there
+        # to be reconciled, which a DELETE would have made impossible.
+        if not os.path.exists(fpath):
+            return ("missing", iid, "no file at the catalogued path",
+                    time.monotonic() - _w0, _ext)
         try:
             fields = wb._extract_fields(fpath, _ext)
             _sec = time.monotonic() - _w0
@@ -691,7 +721,7 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
                           -- NULL MATCHED_UWI: not loadable, unresolved in the assign grid,
                           -- invisible to UWI-keyed queries. Parse is header-only
                           -- (lasio ignore_data=True), so the extra pass is cheap.
-                          {_extf}
+                          {_extf}{_rootf}
                     ) q WHERE q._rn <= :cap
                     ORDER BY FILE_EXT, INVENTORY_ID
                 """), {"cap": int(per_type_cap)}).fetchall()
@@ -700,7 +730,7 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
                     SELECT TOP {top} INVENTORY_ID, FILE_PATH, FILE_EXT
                     FROM file_catalog.GLOBAL_FILE_CATALOG
                     WHERE {_PENDING_EXTRACT}
-                      -- .las intentionally NOT excluded - see note above.{_extf}
+                      -- .las intentionally NOT excluded - see note above.{_extf}{_rootf}
                     ORDER BY SCAN_DATE DESC
                 """)).fetchall()
         _ex_tick("claim_query", _t_chunk)
@@ -735,7 +765,7 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
             pool = _mk_pool()
 
         # bucket results, then write the whole chunk in batched round-trips
-        ok_items, skip_ids, err_items = [], [], []
+        ok_items, skip_ids, err_items, missing_items = [], [], [], []
         for outcome, iid, payload, _sec, _ext in results:
             pe = per_ext.setdefault(_ext or "?", [0, 0.0])
             pe[0] += 1
@@ -744,6 +774,9 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
                 ok_items.append((iid, payload))
             elif outcome == "skip" and iid is not None:
                 skip_ids.append({"id": iid})
+            elif outcome == "missing" and iid is not None:
+                missing_items.append({"id": iid, "e": str(payload)[:500]})
+                missing += 1
             elif iid is not None:                # 'err' or 'timeout' → quarantine
                 err_items.append({"id": iid, "e": str(payload)[:500]})
                 if outcome == "timeout":
@@ -757,12 +790,19 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
         _ERR_SQL = ("UPDATE file_catalog.GLOBAL_FILE_CATALOG "
                     "SET HEADER_EXTRACTED='E', CATALOG_ISSUES=:e, "
                     "ROW_CHANGED_DATE=GETUTCDATE() WHERE INVENTORY_ID=:id")
+        # 'M' — the file is gone from the catalogued path. Its own letter, not
+        # 'E', so the two can be told apart and counted apart afterwards.
+        _MISSING_SQL = ("UPDATE file_catalog.GLOBAL_FILE_CATALOG "
+                        "SET HEADER_EXTRACTED='M', CATALOG_ISSUES=:e, "
+                        "ROW_CHANGED_DATE=GETUTCDATE() WHERE INVENTORY_ID=:id")
 
         def _write_skip_err(con):
             if skip_ids:
                 con.execute(_t(_SKIP_SQL), skip_ids)        # executemany
             if err_items:
                 con.execute(_t(_ERR_SQL), err_items)        # executemany
+            if missing_items:
+                con.execute(_t(_MISSING_SQL), missing_items)
 
         _t_write = time.perf_counter()
         try:
@@ -784,7 +824,7 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
         skip += len(skip_ids)
         processed += len(rows)
         log(f"[extract] +{len(results)} (ok {ok:,} · skip {skip:,} · "
-            f"err {err:,} · timeout {timeout:,})")
+            f"err {err:,} · timeout {timeout:,} · missing {missing:,})")
 
         if per_type_cap:
             log(f"[extract] per-type cap {per_type_cap} — single sampling "
@@ -818,8 +858,20 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
         log("[extract] parse cost by type (avg s/file): " + " · ".join(
             f"{e} {d['avg']:.2f}s×{d['n']}" for e, d in worst))
 
+    if missing:
+        # Said plainly and separately: this number is not a parser problem and
+        # the repair is not a code change. The rows are HELD ('M'), not dropped
+        # — they keep their INVENTORY_ID and their reason, so re-scanning the
+        # files where they now live reconciles them.
+        log(f"[extract] {missing:,} file(s) HELD as missing — catalogued once "
+            f"but no longer at the recorded path. Nothing is wrong with these "
+            f"files; the catalog is stale. Re-scan wherever they live now, or "
+            f"clear the rows. They will not be retried "
+            f"(HEADER_EXTRACTED='M', reason in CATALOG_ISSUES).")
+
     return {"extract_ok": ok, "extract_skip": skip, "extract_err": err,
-            "extract_timeout": timeout, "extract_by_type": by_type}
+            "extract_timeout": timeout, "extract_missing": missing,
+            "extract_by_type": by_type}
 
 
 def _stage_triage(engine, ref, log):
@@ -927,7 +979,8 @@ def _extract_capture_proc(arg):
     return ("ok", iid, fields, _sec, fext, cap_rows, cap_err)
 
 
-def _stage_extract_capture(engine, workers, log, exts=None, do_capture=True):
+def _stage_extract_capture(engine, workers, log, exts=None, do_capture=True,
+                           root=None):
     """Single-pass EXTRACT+CAPTURE: parse each pending file once, writing both the
     GLOBAL_FILE_CATALOG header (parent, batched) and the cat_* mirrors (worker).
     Runs only from the detached multi-core process. Opt-in via single_pass=True."""
@@ -956,7 +1009,7 @@ def _stage_extract_capture(engine, workers, log, exts=None, do_capture=True):
         rows = con.execute(_t(f"""
             SELECT INVENTORY_ID, FILE_PATH, FILE_EXT
             FROM file_catalog.GLOBAL_FILE_CATALOG
-            WHERE {pending_sql('extract')}{_ext_filter(exts, 'FILE_EXT')}
+            WHERE {pending_sql('extract')}{_ext_filter(exts, 'FILE_EXT')}{_root_filter(root, '')}
             ORDER BY SCAN_DATE DESC
         """)).fetchall()
     total = len(rows)
@@ -1066,13 +1119,28 @@ def _root_filter(root, alias="g"):
     claim queries. Callers pass an ALREADY-CANONICAL root — see
     path_identity.canon_root.
     """
+    pred = _root_predicate(root, alias)
+    return f"\n               AND {pred}" if pred else ""
+
+
+def _root_predicate(root, alias="g"):
+    r"""Just the bracketed OR of LIKEs — no leading AND, or '' for no root.
+
+    Split out from _root_filter so a caller that AND-joins a list of predicates
+    (_unprocessed_count) can use the same one clause, rather than string-surgery
+    on the fragment or a second spelling that drifts. Two spellings of 'pending'
+    already cost this file six different answers to one question.
+    """
     likes = _root_likes(root)
     if not likes:
         return ""
+    # alias='' -> bare column, the same convention pending_sql uses. Without
+    # this an unaliased claim query (extract's) would build '.FILE_PATH'.
+    col = (alias + "." if alias else "") + "FILE_PATH"
     ors = " OR ".join(
-        f"{alias}.FILE_PATH LIKE '{p.replace(chr(39), chr(39) * 2)}' ESCAPE '\\'"
+        f"{col} LIKE '{p.replace(chr(39), chr(39) * 2)}' ESCAPE '\\'"
         for p in likes)
-    return f"\n               AND ({ors})"
+    return f"({ors})"
 
 
 def _already_done_filter(force=False, alias="g", root=None):
@@ -1100,11 +1168,21 @@ def _already_done_filter(force=False, alias="g", root=None):
 
     The root clause is emitted by THIS function, next to the clause it bounds,
     rather than added at each call site — a fourth claim query that forgets it
-    would silently re-acquire the old behaviour. It is applied ONLY on the force
-    path: the normal path is already bounded by CATALOGED + hash, and scoping it
-    would change what a plain re-run processes, which is a different decision.
-    A blank root (a catalog-wide run with no folder given) yields no clause, so
-    forcing still means the whole catalog when that is genuinely what was asked.
+    would silently re-acquire the old behaviour. A blank root (a catalog-wide
+    run with no folder given) yields no clause, so a run still means the whole
+    catalog when that is genuinely what was asked.
+
+    BOTH PATHS ARE NOW SCOPED, and that is a deliberate reversal.
+    ------------------------------------------------------------
+    This applied the root clause only when forcing. The reasoning was that the
+    normal path is already bounded by CATALOGED + hash, so scoping it "would
+    change what a plain re-run processes, which is a different decision".
+    It IS a different decision, and it has now been taken: a plain run pointed
+    at a folder processed pending files from every other tree ever scanned,
+    because CATALOGED + hash bounds by STATE, never by PLACE. Moving files out
+    of a folder and rescanning it still processed them, from their old rows.
+    The caller chooses with scope= ('path', the default, or 'queue'); by the
+    time root arrives here, None already means "the whole queue was asked for".
     """
     if force:
         return (f"AND ISNULL({alias}.CATALOG_READINESS, '') NOT IN ('SKIPPED')"
@@ -1112,7 +1190,7 @@ def _already_done_filter(force=False, alias="g", root=None):
     # THE definition of capture-pending, imported rather than re-spelled —
     # the same fragment the run gate and every report use.
     from dataview.file_catalog.promotion_lineage import pending_sql
-    return "AND " + pending_sql("capture", alias)
+    return "AND " + pending_sql("capture", alias) + _root_filter(root, alias)
 
 
 def _stage_capture(engine, dialect, log, exts=None, workers=8, parallel=False,
@@ -1190,8 +1268,22 @@ def _stage_capture(engine, dialect, log, exts=None, workers=8, parallel=False,
     log(f"[capture] {total:,} document(s) with a UWI → cat_* mirrors …")
     ok = rows_total = 0
 
-    def _capture_one(fpath, fext, uwi, fname):
+    # Files claimed by capture that are no longer on disk. Collected rather than
+    # written per file so the whole set goes back in one executemany, and marked
+    # AFTER the loops so a mid-run failure cannot leave half of them stamped.
+    _missing_caps = []
+
+    def _capture_one(fpath, fext, uwi, fname, iid=None):
         nonlocal ok, rows_total
+        # MOVED/DELETED. Without this the parser raises, the exception handler
+        # below logs '[x] name: ...' and writes NO state — so the row stays
+        # capture-pending and is re-claimed, re-opened and re-failed on every
+        # run, indefinitely. Recorded here and held as 'M' after the loop.
+        if not os.path.exists(fpath):
+            if iid is not None:
+                _missing_caps.append({"id": iid,
+                                      "e": "no file at the catalogued path"})
+            return
         reset_replace_state()          # idempotent re-capture, scoped per file
         try:
             rows, _label = _do_extract(fpath, fext)
@@ -1365,7 +1457,8 @@ def _stage_capture(engine, dialect, log, exts=None, workers=8, parallel=False,
     if not _did_parallel:
         for r in files:
             _muwi = "" if r[2] is None else str(r[2]).strip()
-            _capture_one(r[0], str(r[1] or "").lower(), _muwi, r[3])
+            _capture_one(r[0], str(r[1] or "").lower(), _muwi, r[3],
+                         iid=(r[4] if len(r) > 4 else None))
 
     # ── pass 2: OSDU master records (Field / Reservoir) have no well UWI, so
     # the UWI-gated pass above skips them. Pick up catalogued .json files with
@@ -1392,7 +1485,8 @@ def _stage_capture(engine, dialect, log, exts=None, workers=8, parallel=False,
     if masters:
         log(f"[capture] {len(masters):,} master JSON (no UWI) → field/reservoir …")
         for m in masters:
-            _capture_one(m[0], str(m[1] or "").lower(), "", m[2])
+            _capture_one(m[0], str(m[1] or "").lower(), "", m[2],
+                         iid=(m[3] if len(m) > 3 else None))
             if len(m) > 3 and m[3] is not None:
                 _cap_invs.append(m[3])
 
@@ -1442,10 +1536,36 @@ def _stage_capture(engine, dialect, log, exts=None, workers=8, parallel=False,
                 _con.execute(_t("DROP TABLE #cap_ids"))
         except Exception as _e:
             log(f"[capture] fingerprint stamp skipped: {str(_e)[:160]}")
+    # HOLD the files that were not on disk. One executemany after the loops, so
+    # a mid-run failure cannot leave part of the set stamped. 'M' takes them out
+    # of CAPTURE_PENDING (see promotion_lineage) — without it these rows are
+    # re-claimed and re-failed on every run, forever, because the exception path
+    # logs and writes nothing.
+    _missing_caps_n = 0
+    if _missing_caps:
+        _uniq = {d["id"]: d for d in _missing_caps if d.get("id") is not None}
+        if _uniq:
+            try:
+                with engine.begin() as _mc:
+                    _mc.execute(_t(
+                        "UPDATE file_catalog.GLOBAL_FILE_CATALOG "
+                        "SET HEADER_EXTRACTED='M', CATALOG_ISSUES=:e, "
+                        "ROW_CHANGED_DATE=GETUTCDATE() "
+                        "WHERE INVENTORY_ID=:id"), list(_uniq.values()))
+                _missing_caps_n = len(_uniq)
+                log(f"[capture] {_missing_caps_n:,} file(s) HELD as missing — "
+                    f"catalogued once but no longer at the recorded path. The "
+                    f"catalog is stale, not the files. Re-scan where they live "
+                    f"now, or clear the rows; they will not be retried.")
+            except Exception as _me:
+                # Reported, never swallowed: if the hold does not land, these
+                # rows come back next run and the reason must be visible.
+                log(f"[capture] could not hold {len(_uniq):,} missing file(s) "
+                    f"({type(_me).__name__}: {_me}) — they will be retried.")
     grand = total + len(masters)
     log(f"[capture] captured {rows_total:,} row(s) from {ok:,}/{grand:,} file(s)")
     return {"capture_files": grand, "capture_rows": rows_total,
-            "capture_ok": ok}
+            "capture_ok": ok, "capture_missing": _missing_caps_n}
 
 
 def _stage_recognise(engine, log, exts=None, pack="petroleum", apply=True, force=False,
@@ -1525,7 +1645,37 @@ def _stage_recognise(engine, log, exts=None, pack="petroleum", apply=True, force
     #
     # parse_many falls back to a serial generator when workers <= 1 or the
     # pool cannot start, so this path is safe on a host that cannot spawn.
-    _paths = [fp for fp, _fe, _iv in files if fp and os.path.exists(fp)]
+    # HELD, NOT DROPPED. This was a plain filter — files that had moved were
+    # silently removed from the parse list, so they were never parsed, never
+    # counted, never reported, and never taken out of the queue: invisible work
+    # that reappeared on every run. Partition instead, and mark the absent ones
+    # 'M' with their reason, which is what takes them out of CAPTURE_PENDING.
+    _paths, _gone = [], []
+    for fp, _fe, _iv in files:
+        if not fp:
+            continue
+        (_paths if os.path.exists(fp) else _gone).append((fp, _iv))
+    _paths = [fp for fp, _iv in _paths]
+    _recog_missing = 0
+    if _gone:
+        _rows_gone = [{"id": iv, "e": "no file at the catalogued path"}
+                      for fp, iv in _gone if iv is not None]
+        if _rows_gone:
+            try:
+                with engine.begin() as _mg:
+                    _mg.execute(_t(
+                        "UPDATE file_catalog.GLOBAL_FILE_CATALOG "
+                        "SET HEADER_EXTRACTED='M', CATALOG_ISSUES=:e, "
+                        "ROW_CHANGED_DATE=GETUTCDATE() "
+                        "WHERE INVENTORY_ID=:id"), _rows_gone)
+                _recog_missing = len(_rows_gone)
+            except Exception as _mge:
+                log(f"[recognise] could not hold {len(_rows_gone):,} missing "
+                    f"file(s) ({type(_mge).__name__}: {_mge}) — they will be "
+                    f"retried.")
+        log(f"[recognise] {len(_gone):,} file(s) HELD as missing — catalogued "
+            f"once but no longer at the recorded path. Re-scan where they live "
+            f"now, or clear the rows.")
     _inv_by_path = {fp: iv for fp, _fe, iv in files}
     _pw = max(1, int(workers or 1)) if parse_mode == "process" else 1
     if _pw > 1:
@@ -1651,7 +1801,7 @@ def _stage_recognise(engine, log, exts=None, pack="petroleum", apply=True, force
 
     log(f"[recognise] captured {rows_total:,} row(s) from {ok:,}/{total:,} file(s)")
     return {"capture_files": total, "capture_rows": rows_total,
-            "capture_ok": ok}
+            "capture_ok": ok, "capture_missing": _recog_missing}
 
 
 def _stage_vault(engine, schema, vault_root, mode, apply, log):
@@ -2004,7 +2154,7 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
                  do_promote=False, promote_apply=False,
                  max_files=None, inventory_only=False, stall_timeout=180,
                  per_type_cap=None, parse_mode="thread", single_pass=False,
-                 should_abort=None,
+                 should_abort=None, scope="path",
                  ref="WELL_REF.well_ref.WELL_MASTER", report_root=None,
                  do_report=True, log=print):
     t0 = time.monotonic()
@@ -2021,16 +2171,40 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
     if vault_root is None:
         vault_root = os.path.join(os.getcwd(), "vault")
 
-    # The root a FORCED capture/recognise is scoped to. Canonicalised once here,
-    # not per stage: the scan writes FILE_PATH from a walk of the canonical root,
-    # so a pasted `"C:\\a\\b"` has to be collapsed to `C:\a\b` before it can
-    # prefix-match anything. Same helper the Scan root box uses, from the
-    # streamlit-free module so the CLI and the detached child can import it.
+    # The root every path-scoped stage is restricted to. Canonicalised once
+    # here, not per stage: the scan writes FILE_PATH from a walk of the
+    # canonical root, so a pasted `"C:\\a\\b"` has to be collapsed to `C:\a\b`
+    # before it can prefix-match anything. Same helper the Scan root box uses,
+    # from the streamlit-free module so the CLI and the detached child can
+    # import it.
+    #
+    # SCOPE — this used to read `_canon(root) if force else None`, which tied
+    # the path filter to FORCE. Only `scan` is scoped to the folder you give
+    # it; every later stage claims from the whole catalog's pending queue, so
+    # an ordinary run pointed at one folder still processed files anywhere.
+    # The filter to prevent that was already built (_root_filter/_root_likes)
+    # and simply never reached on a non-forced run.
+    #
+    #   scope="path"   restrict every stage to files under `root` (default —
+    #                  it is what pointing a run at a folder already means)
+    #   scope="queue"  the old behaviour: drain the whole pending inventory
+    #                  regardless of root, for finishing work already scanned
+    #
+    # force is now orthogonal: it decides whether ALREADY-DONE files are
+    # redone, not which files are in scope.
     from dataview.core.path_identity import canon_root as _canon
-    _force_root = _canon(root) if force else None
-    if force and not _force_root:
-        log("[pipeline] force ON with no scan root — every catalogued file is "
-            "in scope, not just one folder.")
+    if scope not in ("path", "queue"):
+        raise ValueError(f"scope must be 'path' or 'queue', got {scope!r}")
+    _scope_root = _canon(root) if scope == "path" else None
+    s["scope"] = scope
+    s["scope_root"] = _scope_root
+    if scope == "path" and not _scope_root:
+        log("[pipeline] scope=path with no scan root — nothing to restrict to, "
+            "so every catalogued file is in scope. Pass a root, or scope='queue' "
+            "to say you meant the whole queue.")
+    elif scope == "queue":
+        log("[pipeline] scope=queue — every pending file is in scope, including "
+            f"files outside {root or 'the scan root'}.")
 
     from contextlib import contextmanager as _cm
 
@@ -2112,7 +2286,8 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
             with _timed("extract+capture"):
                 try:
                     s.update(_stage_extract_capture(engine, workers, log,
-                                                    exts=exts, do_capture=True))
+                                                    exts=exts, do_capture=True,
+                                                    root=_scope_root))
                 except Exception as e:
                     s["errors"]["extract"] = str(e)
                     log(f"[extract+capture] FAILED: {e}")
@@ -2123,7 +2298,8 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
                                             max_files=max_files,
                                             stall_timeout=stall_timeout,
                                             exts=exts, per_type_cap=per_type_cap,
-                                            parse_mode=parse_mode))
+                                            parse_mode=parse_mode,
+                                            root=_scope_root))
                 except Exception as e:
                     s["errors"]["extract"] = str(e)
                     log(f"[extract] FAILED: {e}")
@@ -2181,7 +2357,7 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
                                                      workers=workers,
                                                      parallel=True,
                                                      force=force,
-                                                     root=_force_root)
+                                                     root=_scope_root)
                             # ADD, never update() — the recogniser writes the
                             # same keys and would silently drop these counts.
                             for _k, _v in (_binres or {}).items():
@@ -2194,16 +2370,24 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
                     # Same stage, different implementation. Everything before
                     # it (scan, inventory, enrich, triage) and after it
                     # (vault, deep, promote) is untouched.
-                    s.update(_stage_recognise(engine, log, exts=exts,
-                                              pack=pack, apply=True,
-                                              workers=workers,
-                                              parse_mode=parse_mode,
-                                              force=force, root=_force_root))
+                    # capture_missing is carried over the update() the same way
+                    # the binary lane's counts are ADDED above: both lanes hold
+                    # missing files, and a plain update() would drop whichever
+                    # ran first — the precise failure the note above records.
+                    _recres = _stage_recognise(engine, log, exts=exts,
+                                               pack=pack, apply=True,
+                                               workers=workers,
+                                               parse_mode=parse_mode,
+                                               force=force, root=_scope_root)
+                    _prev_missing = int(s.get("capture_missing", 0) or 0)
+                    s.update(_recres)
+                    s["capture_missing"] = _prev_missing + int(
+                        (_recres or {}).get("capture_missing", 0) or 0)
                 else:
                     s.update(_stage_capture(engine, dialect, log, exts=exts,
                                             workers=workers,
                                             parallel=(parse_mode == "process"),
-                                            force=force, root=_force_root))
+                                            force=force, root=_scope_root))
             except Exception as e:
                 s["errors"]["capture"] = str(e)
                 log(f"[capture] FAILED: {e}")
@@ -2398,14 +2582,21 @@ def _engine_spec(engine):
     return {"server": server, "database": database, "driver": driver}
 
 
-def _unprocessed_count(engine, exts=None):
+def _unprocessed_count(engine, exts=None, root=None):
     """Files still awaiting extract — the same predicate _stage_extract selects
     on (pending, not skipped, not a duplicate). Drives batch-loop termination.
-    The ext filter is best-effort; the no-progress guard is the real safety net."""
+    The ext filter is best-effort; the no-progress guard is the real safety net.
+
+    root MUST match the scope the batches actually run under. This gauge decides
+    when the queue is clear, so counting files the batches cannot claim reports
+    work remaining that no batch will ever do — the loop then runs until the
+    no-progress guard trips and calls a completed run stuck."""
     from sqlalchemy import text as _t
     from dataview.file_catalog.promotion_lineage import pending_sql
     where = [pending_sql("extract")]      # the SAME predicate _stage_extract claims on
     params = {}
+    if root:
+        where.append(_root_predicate(root, ""))   # '' -> bare FILE_PATH
     if exts:
         ph = []
         for i, e in enumerate(sorted(exts)):
@@ -2443,6 +2634,12 @@ def run_pipeline_batched(engine, root, *, batch_size=1000, max_batches=None,
     for _k in ("do_scan", "max_files", "do_report", "inventory_only"):
         kw.pop(_k, None)
 
+    # The queue gauge must be scoped exactly as the batches are, or the loop
+    # counts work no batch can claim and stops on the no-progress guard while
+    # reporting files "stuck". Same canonicalisation run_pipeline applies.
+    from dataview.core.path_identity import canon_root as _canon
+    _batch_root = _canon(root) if kw.get("scope", "path") == "path" else None
+
     if scan_first:
         log(f"[batch] inventory pass — scanning {root}")
         run_pipeline(engine, root, exts=exts, do_scan=True, inventory_only=True,
@@ -2457,7 +2654,7 @@ def run_pipeline_batched(engine, root, *, batch_size=1000, max_batches=None,
         if should_abort and should_abort():
             log("[batch] abort requested — stopping between batches")
             break
-        remaining = _unprocessed_count(engine, exts)
+        remaining = _unprocessed_count(engine, exts, _batch_root)
         if remaining <= 0:
             log("[batch] queue clear — all files processed")
             break
@@ -2488,7 +2685,7 @@ def run_pipeline_batched(engine, root, *, batch_size=1000, max_batches=None,
         "batches": batches,
         "batch_size": batch_size,
         "scanned": _catalog_total(engine),
-        "unprocessed_left": _unprocessed_count(engine, exts),
+        "unprocessed_left": _unprocessed_count(engine, exts, _batch_root),
         "vault_apply": kw.get("vault_apply", False),
         "vault_mode": kw.get("vault_mode", "copy"),
     })
@@ -2547,6 +2744,11 @@ def main():
     ap.add_argument("--per-type-cap", type=int, default=None,
                     help="TIMING TEST: process at most N pending files per "
                          "FILE_EXT in one sampling pass (e.g. 5 = 5 of each type)")
+    ap.add_argument("--scope", choices=["path", "queue"], default="path",
+                    help="path (default): process only files under ROOT. "
+                         "queue: process the whole pending inventory, wherever "
+                         "it lives — the old behaviour, where only the scan was "
+                         "ever scoped to the folder you gave it.")
     ap.add_argument("--ref", default="WELL_REF.well_ref.well_master_gold")
     ap.add_argument("--no-enrich", action="store_true",
                     help="skip the enrich (UWI resolve / attr fill) stage")
@@ -2592,7 +2794,7 @@ def main():
     eng = _engine(a.server, a.database)
     _common = dict(
         workers=a.workers, schema=a.schema, parse_mode=a.parse_mode,
-        single_pass=a.single_pass,
+        single_pass=a.single_pass, scope=a.scope,
         do_enrich=not a.no_enrich, do_capture=not a.no_capture,
         recognise=a.recognise, pack=a.pack,
         do_vault=not a.no_vault, vault_root=a.vault_root,

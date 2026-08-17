@@ -665,21 +665,33 @@ def _run_scan(engine, dialect, root: str, exts: set):
         newline="", encoding="utf-8"
     )
     csv_path = tmp.name
-    writer = csv.writer(tmp, delimiter="\t",
-                        quoting=csv.QUOTE_NONE, escapechar="\\")
+    # NO escapechar — it doubled every separator in a Windows path and BULK
+    # INSERT stored the doubled form. The id below is hashed from the CLEAN
+    # fpath, so the escaped write left INVENTORY_ID and FILE_PATH describing
+    # different strings. See path_identity.bulk_csv_writer.
+    from dataview.core.path_identity import bulk_csv_writer, bulk_field
+    writer = bulk_csv_writer(tmp)
     n_bad = 0   # files skipped because they're on the bad-file blocklist
+    n_sanitised = 0
     for (fpath, fname, fext, size_kb, mod_dt, grp, rpath, fhash) in found:
         inv_id = hashlib.sha1(
             fpath.upper().encode("utf-8")).hexdigest().upper()
         if inv_id in bad_set:
             n_bad += 1
             continue
-        writer.writerow([
-            inv_id, fpath[:900], fname[:260], fext[:20],
-            grp[:50], size_kb if size_kb else "",
-            fhash, "", "UNCATALOGED", "",
-            rpath[:900], now, now, now,
-        ])
+        row = []
+        for v in (inv_id, fpath[:900], fname[:260], fext[:20],
+                  grp[:50], size_kb if size_kb else "",
+                  fhash, "", "UNCATALOGED", "",
+                  rpath[:900], now, now, now):
+            val, changed = bulk_field(v)
+            row.append(val)
+            n_sanitised += bool(changed)
+        writer.writerow(row)
+    if n_sanitised:
+        st.warning(f"{n_sanitised} field(s) contained a tab, quote or newline "
+                   f"and were rewritten to load — the stored value differs "
+                   f"from the value on disk.")
     tmp.close()
 
     prog.progress(0.7, text="Bulk inserting...")
@@ -4423,9 +4435,27 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
                      "ever processed them, and the only way back in was a "
                      "hand-written DELETE. Files you explicitly SKIPPED stay "
                      "skipped: this ignores 'already processed', not 'leave "
-                     "this alone'. SCOPED TO THE SCAN ROOT above — forcing "
-                     "re-processes that folder, not every tree the catalog "
-                     "has ever seen.")
+                     "this alone'. Bounded by the scope below, like every "
+                     "other stage — forcing decides WHETHER done files are "
+                     "redone, not WHICH files are in scope.")
+            fp_scope = ccol.radio(
+                "Which files does this run process?",
+                options=["path", "queue"],
+                index=0 if st.session_state.get("fp_scope", "path") == "path"
+                        else 1,
+                key="fp_scope",
+                horizontal=True,
+                format_func=lambda v: ("Only under the scan root"
+                                       if v == "path"
+                                       else "The whole pending inventory"),
+                help="Only the SCAN stage was ever scoped to the folder you "
+                     "give it. Every stage after it claimed from the whole "
+                     "catalog's pending queue, so a run pointed at one folder "
+                     "still extracted and captured files from every other tree "
+                     "ever scanned — including rows for files you have since "
+                     "moved away. 'Only under the scan root' bounds the whole "
+                     "run to that folder. 'The whole pending inventory' is the "
+                     "old behaviour, kept for finishing work already scanned.")
             fp_multicore = ccol.checkbox(
                 "⚡ Use all CPU cores (multi-core parse)",
                 value=bool(st.session_state.get("fp_multicore", True)),  # default: multi-core ON
@@ -4550,6 +4580,7 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
                     "recognise": bool(fp_recognise),
                     "pack": "petroleum",
                     "force": bool(fp_force),
+                    "scope": str(fp_scope or "path"),
                     "inventory_only": not bool(fp_capture),
                     "do_vault": bool(fp_vaulton),
                     "vault_root": fp_vault.strip(),
@@ -4609,7 +4640,8 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
                             _batch=(int(fp_batch_size) if fp_batch else None),
                             _dialect=dialect,
                             _rec=bool(fp_recognise),
-                            _force=bool(fp_force)):
+                            _force=bool(fp_force),
+                            _scope=str(fp_scope or "path")):
                     try:
                         _common = dict(
                             workers=_workers, do_enrich=True,
@@ -4620,7 +4652,7 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
                             per_type_cap=None, stall_timeout=_STALL_TIMEOUT,
                             should_abort=_ev.is_set, ref=REF,
                             parse_mode=("process" if fp_multicore else "thread"),
-                            force=_force,
+                            force=_force, scope=_scope,
                             report_root=_report, log=_log_buf.append)
                         if _batch:
                             _state = _pl.run_pipeline_batched(

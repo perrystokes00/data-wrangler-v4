@@ -68,6 +68,34 @@ own column).
 look like an empty result twice in one evening. If a diagnostic is discarded,
 the next failure is undiagnosable.
 
+**A csv `escapechar` doubles every separator in a Windows path, and BULK
+INSERT stores it.** Third instance of the identifier-as-text failure, found
+16 Aug. `csv.writer(delimiter='\t', quoting=QUOTE_NONE, escapechar='\\')`
+escapes the escape character itself, so `C:\a\b` is written `C:\\a\\b`;
+BULK INSERT has no escape concept and stores that verbatim. `INVENTORY_ID` is
+a SHA1 of the path, so one file took two identities — 2,094 of 3,876 rows
+doubled, 1,301 of them duplicates, and 1,317 `dv_well` rows left citing a
+source nothing could resolve. Two of the three writers hashed the id from the
+CLEAN path and wrote the ESCAPED one, so id and `FILE_PATH` described
+different strings. `canon_root()` does NOT protect against this: it cleans the
+pasted root on the way in, and the doubling happens on the way out. One writer
+now: `path_identity.bulk_csv_writer` (+ `bulk_field`), no escapechar,
+`lineterminator` pinned to `\r\n` to match `ROWTERMINATOR = '0x0D0A'`.
+
+**An invariant keyed on the wrong column can never pass.** "No file catalogued
+under two path spellings" grouped by `FILE_NAME`, which is not unique — the
+same filename legitimately lives in several folders (194 did). It reported
+1,394 where the truth was 1,301, and would have failed on a clean catalog
+forever. `FILE_PATH` is the FULL path; that is the identity the hash is a
+function of, so that is the key.
+
+**A module-level import missing under a bare name fails only when the line
+runs.** `extract_core` used `uuid.uuid5` in `_well_params`/`_seis_params` with
+no module-level `import uuid` (only a local alias in a different function), so
+every enrichment write — batch AND the per-row fallback — raised
+`NameError`. It surfaced only because a test read the log; the stage reported
+completion.
+
 **`COL_LENGTH` returns NULL for a missing TABLE and a missing COLUMN alike.**
 Pair it with `OBJECT_ID` or a guard silently skips.
 
@@ -190,10 +218,34 @@ The honest test is `INVENTORY_ID` lineage into `dv_*` — which is what
 
 ## Pipeline scope (a live source of confusion)
 
-**Only the `scan` stage is scoped to the folder you give it.** Every stage after
-it works on the whole catalog's pending queue. Point a run at a document folder
-and it will process LAS files elsewhere — this is not a bug but nothing says so.
-`Formats to scan` DOES reach extract and capture; use it to scope a run.
+~~**Only the `scan` stage is scoped to the folder you give it.**~~ **FIXED
+16 Aug — `scope='path'` is now the default.** Every stage used to work on the
+whole catalog's pending queue, so a run pointed at a document folder processed
+LAS files elsewhere. The filter to prevent it (`_root_filter`/`_root_likes`)
+was already built and simply never reached: `_force_root = _canon(root) if
+force else None` tied path scope to FORCE. `force` is now orthogonal — it
+decides whether already-done files are REDONE, not which files are in SCOPE.
+`scope='queue'` restores the old whole-queue behaviour.
+
+Threading it took five changes, and three would have failed silently:
+`_stage_extract`/`_stage_extract_capture` took no `root` at all;
+`_already_done_filter` applied the root clause only when forcing (its docstring
+said scoping the normal path was "a different decision" — it was, and it has
+now been taken); `_unprocessed_count`, the batch loop's gauge, would have
+counted work no batch could claim and called a finished run "stuck"; and
+`pipeline_proc_runner` spells `_common` out key by key, so a new toggle reaches
+`run_pipeline` ONLY if named there — the multicore path is the default, so
+missing it makes a new control do nothing in the common case.
+
+**A file that has moved is HELD as `'M'`, not dropped.** Its own letter, not
+`'E'`: broken-file and stale-catalog are different facts with different
+repairs, and folded together a reorganised folder reads as a corpus full of
+corrupt files. Capture used to log the failure and write NO state, so those
+rows were re-claimed and re-failed every run forever; recognise silently
+FILTERED them out of the parse list, so they were never parsed, counted, or
+reported. `'M'` is outside both pending predicates, so the row stops being
+retried but keeps its id and its reason in `CATALOG_ISSUES` — recoverable by
+re-scanning where the file now lives.
 
 **"Run pipeline" does one pass and reports "done" with work remaining.**
 `run_pipeline_batched` loops until the queue is clear and already exists —

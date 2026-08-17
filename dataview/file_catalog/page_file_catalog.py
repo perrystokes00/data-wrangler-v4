@@ -276,16 +276,28 @@ def _run_phase1(engine, dialect, root: str, exts: set):
         newline="", encoding="utf-8"
     )
     csv_path = tmp.name
-    writer = csv.writer(tmp, delimiter="\t",
-                        quoting=csv.QUOTE_NONE, escapechar="\\")
+    # NO escapechar — it doubled every separator in a Windows path and BULK
+    # INSERT stored the doubled form. Worse here than in file_inventory: the id
+    # is hashed from the CLEAN fpath while the escaped one was written, so the
+    # row's INVENTORY_ID and its FILE_PATH described different strings.
+    from dataview.core.path_identity import bulk_csv_writer, bulk_field
+    writer = bulk_csv_writer(tmp)
+    n_sanitised = 0
     for (fpath, fname, fext, size_kb, mod_dt, grp, rpath) in found:
         inv_id = _make_id(fpath)
-        writer.writerow([
-            inv_id, fpath[:900], fname[:260], fext[:20],
-            grp[:50], size_kb if size_kb else "",
-            "", "", "UNCATALOGED", "",
-            rpath[:900], now, now, now,
-        ])
+        row = []
+        for v in (inv_id, fpath[:900], fname[:260], fext[:20],
+                  grp[:50], size_kb if size_kb else "",
+                  "", "", "UNCATALOGED", "",
+                  rpath[:900], now, now, now):
+            val, changed = bulk_field(v)
+            row.append(val)
+            n_sanitised += bool(changed)
+        writer.writerow(row)
+    if n_sanitised:
+        st.warning(f"{n_sanitised} field(s) contained a tab, quote or newline "
+                   f"and were rewritten to load — the stored value differs "
+                   f"from the value on disk.")
     tmp.close()
 
     prog.progress(0.7, text="Bulk inserting to catalog...")

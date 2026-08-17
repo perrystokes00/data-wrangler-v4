@@ -70,6 +70,58 @@ def canon_root(p):
     return out
 
 
+# Characters a QUOTE_NONE writer cannot emit without an escapechar. None of
+# the four is legal in a Windows path; a value carrying one is already damaged.
+_BULK_UNSAFE = {"\t": " ", "\r": " ", "\n": " ", '"': "'"}
+
+
+def bulk_field(v):
+    r"""(text, was_changed) — a value safe to write through bulk_csv_writer.
+
+    Returns was_changed=True when a character had to be substituted, so the
+    caller can REPORT it. A silent repair here writes a value that differs from
+    the file on disk, and a wrong value outlives a missing one.
+    """
+    s = "" if v is None else str(v)
+    if not any(b in s for b in _BULK_UNSAFE):
+        return s, False
+    for bad, repl in _BULK_UNSAFE.items():
+        s = s.replace(bad, repl)
+    return s, True
+
+
+def bulk_csv_writer(fh):
+    r"""A csv.writer whose output BULK INSERT stores VERBATIM.
+
+    NO escapechar, and that is the whole point. Every catalog staging writer
+    here once carried escapechar='\\', and with QUOTE_NONE the csv module
+    escapes the escape character itself — so each separator in a Windows path
+    was doubled on the way out:
+
+        C:\Users\perry\x   ->   C:\\Users\\perry\\x
+
+    BULK INSERT has no escape concept, so the doubled form was stored as-is.
+    INVENTORY_ID is a SHA1 of the path, so the same file catalogued under both
+    spellings takes two ids and provenance stops resolving. Measured on the
+    16 Aug database: 2,094 of 3,876 rows doubled, 1,301 of them a duplicate of
+    a file already in the catalog, and 1,317 dv_well rows left citing a source
+    nothing could find.
+
+    canon_root() cannot prevent this. It cleans the pasted root on the way IN;
+    the doubling happens afterwards, on the way OUT.
+
+    lineterminator is pinned to \r\n because the BULK INSERT statements specify
+    ROWTERMINATOR = '0x0D0A'. It matched only by relying on the csv default —
+    the coupling is real, so it is stated here rather than assumed.
+
+    Pair with bulk_field(); without an escapechar the writer RAISES on TAB,
+    '"', CR and LF, and one bad value would otherwise fail the whole batch.
+    """
+    import csv
+    return csv.writer(fh, delimiter="\t", quoting=csv.QUOTE_NONE,
+                      lineterminator="\r\n")
+
+
 def norm_uwi14(s):
     """Normalize any UWI-ish string to a 14-char API key, or None.
     Strip -_./ and spaces, require all-numeric and 10-14 digits, pad to 14.

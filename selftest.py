@@ -519,12 +519,24 @@ INVARIANTS = [
      "the same path catalogued twice — INVENTORY_ID should make that "
      "impossible, so a duplicate means the id is not a function of the path"),
 
+    # KEYED ON THE PATH, NOT THE NAME. This grouped by FILE_NAME, which is not
+    # unique and was never meant to be: the same filename legitimately lives in
+    # several folders (194 do on the 16 Aug database — synth50\las_files and
+    # synthetic_data\synth_docs hold copies of the same LAS names). Counting
+    # those as violations meant the check could never reach zero, and a check
+    # that always fails is a check nobody reads. FILE_PATH is the FULL path
+    # including the filename, so the normalised path alone is the identity the
+    # INVENTORY_ID hash is supposed to be a function of. Name-keyed: 1,394.
+    # Path-keyed: 1,301 — and the 1,301 are real.
     ("no file catalogued under two path spellings",
-     """SELECT COUNT(*) FROM (
-            SELECT FILE_NAME FROM file_catalog.GLOBAL_FILE_CATALOG
-            GROUP BY FILE_NAME HAVING COUNT(DISTINCT INVENTORY_ID) > 1) q""",
-     "one file, two ids — a doubled-separator scan root. Every count that "
-     "touches these files is inflated and provenance cannot resolve"),
+     r"""SELECT COUNT(*) FROM (
+            SELECT REPLACE(FILE_PATH, '\\', '\') AS p
+            FROM file_catalog.GLOBAL_FILE_CATALOG
+            GROUP BY REPLACE(FILE_PATH, '\\', '\')
+            HAVING COUNT(DISTINCT INVENTORY_ID) > 1) q""",
+     "one file, two ids — the same path stored both doubled and clean, so the "
+     "INVENTORY_ID hash produced two identities for one file. Every count that "
+     "touches them is inflated and provenance cannot resolve"),
 
     ("no stored path has a doubled separator",
      r"""SELECT COUNT(*) FROM file_catalog.GLOBAL_FILE_CATALOG
