@@ -13,6 +13,7 @@ import uuid
 import streamlit as st
 import pandas as pd
 from pathlib import Path
+from datetime import datetime
 
 # ── Extension sets ─────────────────────────────────────────────────────────
 # Canonical definitions live in extract_core (shared with the process-pool
@@ -24,56 +25,67 @@ from dataview.file_catalog.extract_core import (
     _extract_fields,
 )
 
+# TABULAR_EXTS — delimited and spreadsheet tables. NOT scanned by the File
+# Catalog at all: they belong to the Bulk Tabular Loader, which loads them into
+# dv_* with mapping and FK resolution. There is no extractor for them here, so
+# inventorying one creates a row that can never drain — it sits in "pending"
+# forever and makes a finished run look unfinished. Single source of truth is
+# promotion_lineage so the pipeline's default_exts() agrees with this page.
+from dataview.file_catalog.promotion_lineage import TABULAR_EXTS
+
+# Canonicalising a pasted scan root is shared with the pipeline (which scopes a
+# forced re-extract to that root) and must stay importable without streamlit.
+from dataview.core.path_identity import canon_root as _pi_canon_root
+
 # ALL_EXTS is the DEFAULT scan universe — what a BLANK Formats-to-scan box
-# walks. CSV/TSV are deliberately excluded: too generic to crawl blindly
-# (every export, log dump and config is a CSV). They scan only when a user
-# hand-enters '.csv'/'.tsv' in the box.
+# walks. Tabular types are subtracted rather than never-added, because
+# OFFICE_EXTS legitimately carries .xlsx alongside .docx and only the
+# spreadsheet half is the loader's job.
 ALL_EXTS = (PDF_EXTS | LOG_EXTS | SEGY_EXTS | P190_EXTS |
             SHP_EXTS | OFFICE_EXTS | IMAGE_EXTS |
-            WITSML_EXTS | JSON_LOG_EXTS)
+            WITSML_EXTS | JSON_LOG_EXTS) - TABULAR_EXTS
 
-# KNOWN_EXTS is everything the run will RECOGNIZE if typed — ALL_EXTS plus the
-# opt-in types. Use this (not ALL_EXTS) for the "unknown extension" warning and
-# for validating an explicit override, so '.csv' is honored, not rejected.
-KNOWN_EXTS = ALL_EXTS | CSV_EXTS
+# KNOWN_EXTS is everything the run will RECOGNIZE if typed. Tabular types are
+# NOT in it: they used to be opt-in via the Formats-to-scan box, which is
+# exactly how 167 dead .csv rows got inventoried. Typing one now gets an
+# explicit redirect to the Bulk Tabular Loader instead of silently arming a
+# scan that cannot finish.
+KNOWN_EXTS = ALL_EXTS
 
-EXT_GROUP = {}
-for e in PDF_EXTS:      EXT_GROUP[e] = "PDF"
-for e in LOG_EXTS:      EXT_GROUP[e] = "Well Log"
-for e in SEGY_EXTS:     EXT_GROUP[e] = "Seismic"
-for e in P190_EXTS:     EXT_GROUP[e] = "Seismic"
-for e in SHP_EXTS:      EXT_GROUP[e] = "Shapefile"
-for e in OFFICE_EXTS:   EXT_GROUP[e] = "Office"
-for e in CSV_EXTS:      EXT_GROUP[e] = "CSV / Table"
-for e in IMAGE_EXTS:    EXT_GROUP[e] = "Image"
-for e in WITSML_EXTS:   EXT_GROUP[e] = "WITSML"
-for e in JSON_LOG_EXTS: EXT_GROUP[e] = "OSDU / JSON Well Log"
+# The capture path lives in extract_core (streamlit-free) so pipeline_run
+# can import it without dragging the UI into the CLI or the process pool.
+# Imported back here under the same names every call site already uses.
+from dataview.file_catalog.extract_core import (
+    EXT_GROUP, ENRICH_CHUNK, SELF_PARSING_EXTS,
+    _norm_uwi, _safe_num, _safe_coord, _safe_int, _trunc,
+    _safe_sample_interval, _safe_trace_count, _safe_epsg,
+    _valid_date, _score, _issues, _clamp_well,
+    _SQL_GFC_UPDATE, _SQL_WELL_MERGE, _SQL_SEIS_MERGE,
+    _gfc_params, _well_params, _seis_params,
+    _write_enrichment_on, _write_enrichment_batch,
+    _set_readiness_cataloged, _load_rows_to_catalog,
+    _do_extract as _ec_do_extract,
+)
 
-# Extensions whose loader parses the file itself (it resolves the well +
-# INVENTORY_ID internally and writes cat_* via capture()), so _do_extract
-# returns nothing for them and the capture loops must NOT skip them on an
-# empty row list. Office is wired today; WITSML / OSDU join as their loaders
-# land in _load_rows_to_catalog.
-# Extensions whose capture path (_load_rows_to_catalog) re-parses the file
-# itself and does NOT depend on the pre-extracted `rows` arg. The pipeline's
-# capture stage skips a file when _do_extract yields no rows UNLESS its ext is
-# here — so self-parsing formats must be listed or they silently no-op.
-# PDF belongs here: scout/EOW/well-test tickets carry header/section data, not
-# the tabular "rows" a directional survey yields, so _do_extract returns empty
-# for them; _load_rows_to_catalog re-classifies and extracts internally. Before
-# PDF was added, only directional surveys (which DO yield station rows) passed
-# the gate — hence "7 of 40 cataloged".
-SELF_PARSING_EXTS = (set(OFFICE_EXTS) | set(WITSML_EXTS)
-                     | set(JSON_LOG_EXTS) | set(LAS_EXTS)
-                     | set(SHP_EXTS)
-                     | set(PDF_EXTS))
 
-ENRICH_CHUNK = 50   # files processed per rerun cycle
+def _do_extract(fpath: str, fext: str) -> tuple:
+    """UI wrapper — the extractor with page-visible errors."""
+    return _ec_do_extract(fpath, fext, log=st.error)
+
+
 
 
 # =============================================================================
 # Entry point
 # =============================================================================
+
+# MOVED to dataview.core.path_identity, aliased here so this page, selftest and
+# every existing caller keep working. The pipeline needs the same
+# canonicalisation to scope a forced re-extract to the scan root, and it cannot
+# import this module — page_workbench pulls in streamlit, which the CLI and the
+# detached pipeline child must never load. One definition, two importers.
+_canon_root = _pi_canon_root
+
 
 def run(engine=None, dialect: str = "mssql"):
     st.title("🗂️ File Catalog & Workbench")
@@ -1197,101 +1209,10 @@ def _write_enrichment(engine, inv_id: str, fields: dict):
         _write_enrichment_on(con, inv_id, fields)
 
 
-# ── Header-write SQL (shared by the per-row and batched writers) ───────────
-# Executed one row at a time by _write_enrichment_on (manual review path) and
-# as a single executemany batch per chunk by _write_enrichment_batch (the
-# pipeline extract loop). fast_executemany on the engine collapses the batch
-# into a few round-trips instead of two per file — that write phase was ~90%
-# of extract wall-clock on SQL Express.
-_SQL_GFC_UPDATE = """
-    UPDATE file_catalog.GLOBAL_FILE_CATALOG SET
-        CATALOG_SCORE     = :score,
-        CATALOG_READINESS = :readiness,
-        MATCHED_UWI       = :uwi,
-        CATALOG_ISSUES    = :issues,
-        SPATIAL_OUTLINE   = :spatial_outline,
-        CATALOG_TABLE     = :catalog_table,
-        HEADER_EXTRACTED  = 'Y',
-        ROW_CHANGED_DATE  = GETUTCDATE()
-    WHERE INVENTORY_ID = :id
-"""
-
-_SQL_WELL_MERGE = """
-    MERGE file_catalog.FILE_WELL_HEADER AS tgt
-    USING (SELECT :hid AS WELL_HEADER_ID) src
-    ON tgt.WELL_HEADER_ID = src.WELL_HEADER_ID
-    WHEN MATCHED THEN UPDATE SET
-        UWI=:uwi, WELL_NAME=:wn, OPERATOR=:op,
-        WELL_FIELD=:fld, STATE=:st, COUNTY=:co,
-        LATITUDE=:lat, LONGITUDE=:lon,
-        TOTAL_DEPTH=:td, SPUD_DATE=:spud,
-        RIG_RELEASE=:rig, REPORT_TYPE=:rt,
-        SURVEY_TYPE=:stype, CONTRACTOR=:contr,
-        CONFIDENCE=:conf, EXTRACTED_DATE=GETUTCDATE()
-    WHEN NOT MATCHED THEN INSERT (
-        WELL_HEADER_ID,INVENTORY_ID,
-        UWI,WELL_NAME,OPERATOR,WELL_FIELD,
-        STATE,COUNTY,LATITUDE,LONGITUDE,
-        TOTAL_DEPTH,SPUD_DATE,RIG_RELEASE,
-        REPORT_TYPE,SURVEY_TYPE,CONTRACTOR,CONFIDENCE,
-        EXTRACTED_DATE,EXTRACTED_BY
-    ) VALUES (
-        :hid,:inv_id,
-        :uwi,:wn,:op,:fld,
-        :st,:co,:lat,:lon,
-        :td,:spud,:rig,
-        :rt,:stype,:contr,:conf,
-        GETUTCDATE(),'DataWrangler'
-    );
-"""
-
-_SQL_SEIS_MERGE = """
-    MERGE file_catalog.FILE_SEIS_HEADER AS tgt
-    USING (SELECT :hid AS SEIS_HEADER_ID) src
-    ON tgt.SEIS_HEADER_ID = src.SEIS_HEADER_ID
-    WHEN MATCHED THEN UPDATE SET
-        SURVEY_NAME=:sn, LINE_NAME=:ln,
-        SEIS_SET_TYPE=:stype, SURVEY_DATE=:sd,
-        CONTRACTOR=:contr,
-        BBOX_MIN_LAT=:bmin_lat, BBOX_MAX_LAT=:bmax_lat,
-        BBOX_MIN_LON=:bmin_lon, BBOX_MAX_LON=:bmax_lon,
-        EPSG_CODE=:epsg, SAMPLE_INTERVAL=:si,
-        TRACE_COUNT=:tc, SHOT_FIRST=:sf, SHOT_LAST=:sl,
-        IL_MIN=:il_min, IL_MAX=:il_max,
-        XL_MIN=:xl_min, XL_MAX=:xl_max,
-        SURVEY_OUTLINE=:outline,
-        EXTRACTED_DATE=GETUTCDATE()
-    WHEN NOT MATCHED THEN INSERT (
-        SEIS_HEADER_ID,INVENTORY_ID,
-        SURVEY_NAME,LINE_NAME,SEIS_SET_TYPE,SURVEY_DATE,
-        CONTRACTOR,BBOX_MIN_LAT,BBOX_MAX_LAT,
-        BBOX_MIN_LON,BBOX_MAX_LON,EPSG_CODE,
-        SAMPLE_INTERVAL,TRACE_COUNT,SHOT_FIRST,SHOT_LAST,
-        IL_MIN,IL_MAX,XL_MIN,XL_MAX,SURVEY_OUTLINE,
-        EXTRACTED_DATE,EXTRACTED_BY
-    ) VALUES (
-        :hid,:inv_id,
-        :sn,:ln,:stype,:sd,
-        :contr,:bmin_lat,:bmax_lat,
-        :bmin_lon,:bmax_lon,:epsg,
-        :si,:tc,:sf,:sl,
-        :il_min,:il_max,:xl_min,:xl_max,:outline,
-        GETUTCDATE(),'DataWrangler'
-    );
-"""
 
 
-def _gfc_params(inv_id, fields):
-    """GLOBAL_FILE_CATALOG update params. Caller normalizes fields['uwi'] first."""
-    score, readiness = _score(fields)
-    _cat = fields.get("file_category")
-    # only stamp CATALOG_TABLE for the spatial feature types promote_X reads
-    _cat_tbl = _cat if _cat in ("FIELD","LAND_TRACT","BOUNDARY","PIPELINE") else None
-    return {"score": score, "readiness": readiness,
-            "uwi": _trunc(fields.get("uwi"), 40),
-            "issues": "; ".join(_issues(fields)), "id": inv_id,
-            "spatial_outline": fields.get("spatial_outline"),
-            "catalog_table": _cat_tbl}
+
+
 
 
 def _date_only(v):
@@ -1306,198 +1227,304 @@ def _date_only(v):
     return s.replace("T", " ").split(" ", 1)[0][:20]
 
 
-def _valid_date(v):
-    """Return the date as mm/dd/yyyy if v parses as a real date in a known
-    format; else None. Nulls out mis-parsed junk ('Wed', 'Fri', '', long text)."""
-    if v is None:
-        return None
-    s = str(v).strip()
+
+
+
+
+
+
+
+
+
+
+# The 17 bind names one header row needs, in the order the VALUES list
+# below emits them.
+_WELL_MERGE_COLS = ("hid", "inv_id", "uwi", "wn", "op", "fld", "st", "co",
+                    "lat", "lon", "td", "spud", "rig", "rt", "stype",
+                    "contr", "conf")
+
+# SQL Server allows 2,100 parameters per statement; 17 per row means 123 is
+# the ceiling. 100 leaves room and keeps the statement readable in a trace.
+_WELL_MERGE_CHUNK = 100
+
+
+def _sql_well_merge_many(n):
+    """One MERGE that handles n header rows instead of one.
+
+    WHY NOT executemany, which is what everything else here uses: the
+    single-row form is `USING (SELECT :hid AS WELL_HEADER_ID)`, and that
+    subquery defeats pyodbc's fast_executemany column sizing — it sizes
+    string buffers from the FIRST row, under-sizes them, and silently
+    truncates a later longer value. That is why this write has always been
+    per row, and it was the right call: correctness over speed.
+
+    Measured cost of that choice: header_write 136.4s of a 181.7s extract
+    stage, 22 chunks of 50 files, ~124ms per file — about a thousand
+    round trips.
+
+    `USING (VALUES (...),(...),…)` keeps every value a SEPARATELY BOUND
+    parameter, sized individually exactly as the per-row path does, so the
+    truncation cannot come back — while collapsing a hundred round trips
+    into one statement. Same MERGE body, same semantics, same clamping.
+    """
+    rows = ", ".join(
+        "(" + ", ".join(f":{c}{i}" for c in _WELL_MERGE_COLS) + ")"
+        for i in range(n))
+    cols = ", ".join(_WELL_MERGE_COLS)
+    return f"""
+    MERGE file_catalog.FILE_WELL_HEADER AS tgt
+    USING (VALUES {rows}) AS src ({cols})
+    ON tgt.WELL_HEADER_ID = src.hid
+    WHEN MATCHED THEN UPDATE SET
+        UWI=src.uwi, WELL_NAME=src.wn, OPERATOR=src.op,
+        WELL_FIELD=src.fld, STATE=src.st, COUNTY=src.co,
+        LATITUDE=src.lat, LONGITUDE=src.lon,
+        TOTAL_DEPTH=src.td, SPUD_DATE=src.spud,
+        RIG_RELEASE=src.rig, REPORT_TYPE=src.rt,
+        SURVEY_TYPE=src.stype, CONTRACTOR=src.contr,
+        CONFIDENCE=src.conf, EXTRACTED_DATE=GETUTCDATE()
+    WHEN NOT MATCHED THEN INSERT (
+        WELL_HEADER_ID,INVENTORY_ID,
+        UWI,WELL_NAME,OPERATOR,WELL_FIELD,
+        STATE,COUNTY,LATITUDE,LONGITUDE,
+        TOTAL_DEPTH,SPUD_DATE,RIG_RELEASE,
+        REPORT_TYPE,SURVEY_TYPE,CONTRACTOR,CONFIDENCE,
+        EXTRACTED_DATE,EXTRACTED_BY
+    ) VALUES (
+        src.hid,src.inv_id,
+        src.uwi,src.wn,src.op,src.fld,
+        src.st,src.co,src.lat,src.lon,
+        src.td,src.spud,src.rig,
+        src.rt,src.stype,src.contr,src.conf,
+        GETUTCDATE(),'DataWrangler'
+    );
+    """
+
+
+def _merge_wells_chunked(con, wells):
+    """MERGE header rows in chunks, falling back to per-row on any failure.
+
+    DEDUPED BY hid, LAST WINS: a MERGE raises if the source offers two rows
+    matching the same target row, and two entries for one file in a single
+    chunk would do exactly that. The per-row loop never had to care because
+    each statement saw one row.
+    """
+    from sqlalchemy import text as _t
+    seen = {}
+    for w in wells:
+        seen[w.get("hid")] = w
+    rows = list(seen.values())
+
+    for i in range(0, len(rows), _WELL_MERGE_CHUNK):
+        chunk = rows[i:i + _WELL_MERGE_CHUNK]
+        binds = {}
+        for n, w in enumerate(chunk):
+            for c in _WELL_MERGE_COLS:
+                binds[f"{c}{n}"] = w.get(c)
+        try:
+            con.execute(_t(_sql_well_merge_many(len(chunk))), binds)
+        except Exception:
+            # One bad row must not cost the chunk. The per-row statement is
+            # still here and still correct; this is the same fallback shape
+            # the capture batch uses.
+            for w in chunk:
+                con.execute(_t(_SQL_WELL_MERGE), w)
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _xl_file_uri(p):
+    """Turn a filesystem path into a file:// URI Excel will open as a hyperlink.
+    Handles Windows drive paths (C:\\x → file:///C:/x), UNC shares
+    (\\\\srv\\share → file://srv/share) and POSIX paths (/mnt/x → file:///mnt/x).
+    Returns None for blanks or anything too long for an Excel hyperlink target."""
+    s = str(p or "").strip()
     if not s:
         return None
-    from datetime import datetime as _dtm
-    cands = [s]
-    if " " in s:
-        cands.append(s.split(" ", 1)[0])      # drop a trailing time
-    fmts = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%d-%b-%Y", "%d-%b-%y",
-            "%m-%d-%Y", "%d/%m/%Y", "%Y/%m/%d", "%b %d, %Y", "%d %b %Y",
-            "%B %d, %Y", "%d.%m.%Y", "%m.%d.%Y", "%Y%m%d", "%b-%d-%Y",
-            "%d-%B-%Y", "%m/%d/%Y %H:%M:%S")
-    for c in cands:
-        for f in fmts:
-            try:
-                return _dtm.strptime(c, f).strftime("%m/%d/%Y")
-            except ValueError:
-                continue
-    return None
+    if s.startswith("\\\\"):                       # UNC \\server\share\...
+        uri = "file:" + s.replace("\\", "/")       #   → file://server/share/...
+    else:
+        f = s.replace("\\", "/")
+        uri = ("file://" + f) if f.startswith("/") else ("file:///" + f)
+    return uri if len(uri) <= 2000 else None       # Excel hyperlink target cap
 
 
-def _well_params(inv_id, fields):
-    return {
-        "hid":    uuid.uuid5(uuid.NAMESPACE_URL, inv_id).hex.upper(),
-        "inv_id": inv_id,
-        "uwi":    _trunc(fields.get("uwi"), 40),
-        "wn":     _trunc(fields.get("well_name"), 255),
-        "op":     _trunc(fields.get("operator"), 255),
-        "fld":    _trunc(fields.get("well_field"), 100),
-        "st":     _trunc(fields.get("state"), 50),
-        "co":     _trunc(fields.get("county"), 100),
-        "lat":    _trunc(fields.get("latitude"), 30),
-        "lon":    _trunc(fields.get("longitude"), 30),
-        "td":     _trunc(fields.get("total_depth"), 20),
-        "spud":   _valid_date(fields.get("spud_date")),
-        "rig":    _valid_date(fields.get("rig_release")),
-        "rt":     _trunc(fields.get("report_type"), 50),
-        "stype":  _trunc(fields.get("survey_type"), 50),
-        "contr":  _trunc(fields.get("contractor"), 255),
-        "conf":   _safe_num(fields.get("confidence")),
-    }
+def _scorecard_xlsx(df):
+    """Stage-scorecard DataFrame -> xlsx bytes, FILE NAME cell hyperlinked.
 
+    Mirrors the Browse & View exports: the name is the link, the path column
+    stays plain text so it can still be copied, and a UWI is written as TEXT so
+    Excel can't render a 14-digit API as 1.50012E+13 and destroy it on save.
 
-def _seis_params(inv_id, fields):
-    return {
-        "hid":      uuid.uuid5(uuid.NAMESPACE_URL, inv_id + "_s").hex.upper(),
-        "inv_id":   inv_id,
-        "sn":       _trunc(fields.get("survey_name"), 255),
-        "ln":       _trunc(fields.get("line_name"), 255),
-        "stype":    _trunc(fields.get("seis_set_type"), 40),
-        "sd":       _valid_date(fields.get("survey_date")),
-        "contr":    _trunc(fields.get("contractor"), 255),
-        "bmin_lat": _safe_coord(fields.get("bbox_min_lat")),
-        "bmax_lat": _safe_coord(fields.get("bbox_max_lat")),
-        "bmin_lon": _safe_coord(fields.get("bbox_min_lon")),
-        "bmax_lon": _safe_coord(fields.get("bbox_max_lon")),
-        "epsg":     _safe_epsg(fields.get("epsg_code")),
-        "si":       _safe_sample_interval(fields.get("sample_interval")),
-        "tc":       _safe_trace_count(fields.get("trace_count")),
-        "sf":       _trunc(fields.get("shot_first"), 20),
-        "sl":       _trunc(fields.get("shot_last"), 20),
-        "il_min":   fields.get("il_min"),
-        "il_max":   fields.get("il_max"),
-        "xl_min":   fields.get("xl_min"),
-        "xl_max":   fields.get("xl_max"),
-        "outline":  fields.get("survey_outline"),
-    }
-
-
-def _write_enrichment_on(con, inv_id: str, fields: dict):
-    """Write extracted header fields for ONE file on a caller-provided
-    connection (inside an active engine.begin(); does not commit). Used by the
-    manual review path. The pipeline extract loop uses _write_enrichment_batch."""
-    from sqlalchemy import text as _t
-    fields["uwi"] = _norm_uwi(fields.get("uwi"))      # canonicalize once
-    category = fields.get("file_category", "UNKNOWN")
-    con.execute(_t(_SQL_GFC_UPDATE), _gfc_params(inv_id, fields))
-    if category == "WELL":
-        con.execute(_t(_SQL_WELL_MERGE), _well_params(inv_id, fields))
-    elif category == "SEIS":
-        con.execute(_t(_SQL_SEIS_MERGE), _seis_params(inv_id, fields))
-
-
-def _clamp_well(rows):
-    """Clamp each string well-param to its column width so no value overflows
-    (defends against mis-parsed dates/fields and fast_executemany under-sizing)."""
-    _w = {"uwi": 40, "wn": 255, "op": 255, "fld": 100, "st": 50, "co": 100,
-          "spud": 20, "rig": 20, "rt": 50, "stype": 50, "contr": 255,
-          "lat": 30, "lon": 30, "td": 20}
-    for r in rows:
-        for k, n in _w.items():
-            v = r.get(k)
-            if isinstance(v, str) and len(v) > n:
-                r[k] = v[:n]
-    return rows
-
-
-def _write_enrichment_batch(con, items):
-    """Write extracted header fields for MANY files in one batched round-trip
-    per statement instead of two per file. items = [(inv_id, fields), …].
-
-    Same proven UPDATE/MERGE SQL as the per-row path, run via executemany so
-    fast_executemany collapses ~2 round-trips/file into ~3 calls per chunk —
-    the write phase was ~90% of extract time on Express. Connection must be in
-    an active engine.begin(); does not commit. Raises on failure so the caller
-    can fall back to the per-row path in a fresh transaction."""
-    from sqlalchemy import text as _t
-    if not items:
-        return
-    for _iid, _f in items:                            # canonicalize UWI once each
-        _f["uwi"] = _norm_uwi(_f.get("uwi"))
-    gfc  = [_gfc_params(iid, f) for iid, f in items]
-    well = [_well_params(iid, f) for iid, f in items
-            if f.get("file_category") == "WELL"]
-    seis = [_seis_params(iid, f) for iid, f in items
-            if f.get("file_category") == "SEIS"]
-    con.execute(_t(_SQL_GFC_UPDATE), gfc)             # executemany
-    # per-row MERGE: the USING(SELECT ?) subquery defeats pyodbc fast_executemany
-    # column sizing, under-sizing string buffers and truncating a later long
-    # value; per-row binds each at its true size (still one transaction).
-    for _w in _clamp_well(well):
-        con.execute(_t(_SQL_WELL_MERGE), _w)
-    for _sp in seis:
-        con.execute(_t(_SQL_SEIS_MERGE), _sp)
-
-
-def _score(fields: dict) -> tuple:
-    score = 0
-    if fields.get("uwi"):       score += 40
-    if fields.get("well_name"): score += 20
-    if fields.get("operator"):  score += 10
-    if fields.get("latitude") and fields.get("longitude"): score += 20
-    if fields.get("total_depth"): score += 10
-    if score >= 80:  return score, "READY"
-    if score >= 60:  return score, "REVIEW"
-    if score >= 30:  return score, "NEEDS_UWI"
-    return score, "ATTENTION"
-
-
-def _issues(fields: dict) -> list:
-    out = []
-    if fields.get("extract_error"):
-        out.append(str(fields["extract_error"])[:200])
-    if not fields.get("uwi"):       out.append("No UWI")
-    if not fields.get("well_name"): out.append("No well name")
-    if not (fields.get("latitude") and fields.get("longitude")):
-        out.append("No coordinates")
-    return out
-
-
-def _trunc(v, n):
-    return str(v)[:n] if v is not None else None
-
-def _norm_uwi(v):
-    """Canonicalize any UWI/API string to bare-14 before it is written to the
-    catalog. Reuses path_identity.norm_uwi14 (the same recipe the manual-review
-    and FK paths use) so a display-formatted API from a PDF — e.g. a scout
-    ticket's '42-999-00001-00-00' — collapses to '42999000010000' and matches
-    dv_well at the FK gate instead of false-failing as an unmatched UWI.
-
-    Falls back to a digit-strip if path_identity is unavailable; returns None
-    for empty input so the 'extracted - no UWI' path is preserved.
+    Raises ImportError when openpyxl isn't installed — the caller turns that
+    into a one-line hint rather than losing the CSV path as well.
     """
-    if v is None or str(v).strip() == "":
-        return None
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    from openpyxl.utils import get_column_letter
+
+    cols = [c for c in df.columns if c != "path"] + (
+        ["path"] if "path" in df.columns else [])
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "scorecard"
+
+    hdr = Font(bold=True)
+    for j, c in enumerate(cols, start=1):
+        cell = ws.cell(row=1, column=j, value=c)
+        cell.font = hdr
+
+    link = Font(color="0563C1", underline="single")
+    name_i = cols.index("file") + 1 if "file" in cols else None
+    uwi_i = cols.index("uwi") + 1 if "uwi" in cols else None
+
+    for i, rec in enumerate(df.to_dict("records"), start=2):
+        for j, c in enumerate(cols, start=1):
+            v = rec.get(c)
+            cell = ws.cell(row=i, column=j,
+                           value="" if v is None else str(v))
+            if j == uwi_i:
+                cell.number_format = "@"      # keep 14-digit UWIs as text
+        if name_i:
+            target = _xl_file_uri(rec.get("path"))
+            if target:
+                c = ws.cell(row=i, column=name_i)
+                c.hyperlink = target
+                c.font = link
+
+    for j, c in enumerate(cols, start=1):
+        width = max([len(c)] + [len(str(r.get(c) or ""))
+                                for r in df.to_dict("records")[:200]])
+        ws.column_dimensions[get_column_letter(j)].width = min(60, max(9, width + 2))
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = (f"A1:{get_column_letter(len(cols))}"
+                          f"{max(2, len(df) + 1)}")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ── Manual survey-name assignment (single owner) ───────────────────────────
+# Assigning a SURVEY_NAME has to touch TWO tables, and writing only the first
+# one is a silent dead end:
+#   * GLOBAL_FILE_CATALOG.SURVEY_NAME — display/override only. Nothing in the
+#     promote path reads it.
+#   * FILE_SEIS_HEADER.SURVEY_NAME    — what promote actually joins on
+#     (seis_done: dv_seis_set.seis_set_name = FILE_SEIS_HEADER.SURVEY_NAME),
+#     so a survey assigned only in GFC would flip readiness to READY and then
+#     never be credited.
+# The seis header row is upserted on the SAME derived key extraction uses
+# (uuid5(NAMESPACE_URL, inventory_id + "_s")), so this updates the extracted
+# row when one exists and creates a matching one when it doesn't — extraction
+# re-running later updates that same row rather than duplicating it.
+_SQL_SURVEY_GFC = """
+    UPDATE file_catalog.GLOBAL_FILE_CATALOG SET
+        SURVEY_NAME       = :sn,
+        MATCH_METHOD      = 'MANUAL',
+        CATALOG_READINESS = 'READY',
+        ROW_CHANGED_DATE  = GETUTCDATE()
+    WHERE INVENTORY_ID = :iid
+"""
+
+_SQL_SURVEY_SEIS = """
+    MERGE file_catalog.FILE_SEIS_HEADER AS tgt
+    USING (SELECT :hid AS SEIS_HEADER_ID) src
+    ON tgt.SEIS_HEADER_ID = src.SEIS_HEADER_ID
+    WHEN MATCHED THEN UPDATE SET
+        SURVEY_NAME=:sn, EXTRACTED_DATE=GETUTCDATE()
+    WHEN NOT MATCHED THEN INSERT (
+        SEIS_HEADER_ID, INVENTORY_ID, SURVEY_NAME,
+        EXTRACTED_DATE, EXTRACTED_BY
+    ) VALUES (
+        :hid, :iid, :sn, GETUTCDATE(), 'DataWrangler'
+    );
+"""
+
+
+def _normalize_uwi14(raw):
+    """Canonicalize a hand-entered UWI to bare-14, or None if it doesn't.
+
+    Returning None (rather than a truncated/padded string) lets callers report
+    the value as bad instead of writing a malformed key that would fail the
+    dv_well FK later — the '070009' DLIS case is what a missing guard looks
+    like downstream.
+    """
     try:
         from dataview.core import path_identity as _pi
-        u = _pi.norm_uwi14(str(v))
-        if u:
-            return u
     except Exception:
-        pass
-    d = re.sub(r"\D", "", str(v))
-    return d if len(d) == 14 else (d or None)
-
-def _safe_num(v):
-    """Convert to float or None. Silently swallows bad input."""
-    try:
-        return float(str(v).replace(",","").strip()) if v is not None else None
-    except (ValueError, TypeError):
+        _pi = None
+    s = str(raw or "").strip()
+    if not s:
         return None
+    u = (_pi.norm_uwi14(s) if _pi
+         else "".join(ch for ch in s if ch.isalnum()))
+    u = (u or "")[:14]
+    return u if len(u) == 14 else None
 
-def _safe_int(v):
-    """Convert to int or None. Silently swallows bad input."""
+
+# Manual UWI assignment. CAPTURED_HASH is deliberately cleared here: capture
+# skips a file when CAPTURED_HASH = FILE_HASH, and that stamp keys on file
+# CONTENT. Assigning a UWI doesn't change the file, so without this the very
+# next run considers the file already captured and silently skips it — the
+# recurring "+0 captured" false alarm. Clearing the stamp makes the assignment
+# re-arm capture by itself, which is what the Apply toggle is (reasonably)
+# expected to do.
+#
+# NOTE the asymmetry with _assign_survey_name, which does NOT clear it: the
+# SEG-Y capture path re-parses the file into FILE_SEIS_HEADER, so re-arming a
+# seismic file would overwrite a manually assigned SURVEY_NAME with whatever
+# the header holds (nothing, for the files that needed assigning).
+#
+# Re-capture is safe to repeat: capture() replaces a file's rows scoped to
+# INVENTORY_ID, so it refreshes rather than duplicates.
+_SQL_ASSIGN_UWI = """
+    UPDATE file_catalog.GLOBAL_FILE_CATALOG SET
+        MATCHED_UWI       = :uwi,
+        UWI14             = :uwi,
+        MATCH_METHOD      = 'MANUAL',
+        CATALOG_READINESS = 'READY',
+        CAPTURED_HASH     = NULL,
+        ROW_CHANGED_DATE  = GETUTCDATE()
+    WHERE INVENTORY_ID = :iid
+"""
+
+
+def _assign_uwi(con, iid, uwi14):
+    """Write a normalized 14-char UWI on an open connection and re-arm capture.
+    Returns the rowcount (0 = no such INVENTORY_ID)."""
+    from sqlalchemy import text as _t
+    return con.execute(_t(_SQL_ASSIGN_UWI),
+                       {"uwi": uwi14, "iid": str(iid)}).rowcount
+
+
+def _assign_survey_name(con, iid, sn):
+    """Write a manually assigned survey name to BOTH tables on an open
+    connection. Returns the GFC rowcount (0 = no such INVENTORY_ID, so the
+    caller can report a miss). The seis-header upsert is best-effort: a DB
+    without FILE_SEIS_HEADER shouldn't break the GFC assignment."""
+    from sqlalchemy import text as _t
+    import uuid as _uuid
+    _sn = str(sn or "").strip()[:255]
+    _iid = str(iid)
+    res = con.execute(_t(_SQL_SURVEY_GFC), {"sn": _sn, "iid": _iid})
     try:
-        return int(float(str(v).strip())) if v is not None else None
-    except (ValueError, TypeError):
-        return None
+        _hid = _uuid.uuid5(_uuid.NAMESPACE_URL, _iid + "_s").hex.upper()
+        con.execute(_t(_SQL_SURVEY_SEIS),
+                    {"hid": _hid, "iid": _iid, "sn": _sn})
+    except Exception:
+        pass          # display write already landed; promote join is best-effort
+    return res.rowcount
 
 
 # ── Bounded variants ────────────────────────────────────────────────────
@@ -1506,50 +1533,15 @@ def _safe_int(v):
 # These helpers clamp values to known-safe ranges, dropping outliers to
 # NULL rather than letting them poison the batch.
 
-def _safe_coord(v):
-    """Latitude or longitude. Returns float in [-180, 180] or None."""
-    n = _safe_num(v)
-    if n is None or not (-180.0 <= n <= 180.0):
-        return None
-    return n
 
-def _safe_sample_interval(v):
-    """Seismic sample interval (microseconds). Positive, sane upper bound."""
-    n = _safe_num(v)
-    # SEGY interval is in microseconds; legitimate values are 250-16000.
-    # Anything outside [0, 1_000_000] is garbage from a bad header read.
-    if n is None or n < 0 or n > 1_000_000:
-        return None
-    return n
 
-def _safe_trace_count(v):
-    """Seismic trace count. Positive int, sane upper bound."""
-    n = _safe_int(v)
-    if n is None or n < 0 or n > 100_000_000:
-        return None
-    return n
 
-def _safe_epsg(v):
-    """EPSG code. 4 to 6 digit positive int."""
-    n = _safe_int(v)
-    if n is None or n < 1000 or n > 999_999:
-        return None
-    return n
 
 
 # =============================================================================
 # Tab 2 -- Browse & View
 # =============================================================================
 
-def _set_readiness_cataloged(engine, inv_id):
-    """DEPRECATED no-op. Readiness on the catalog/promote axis is now DERIVED
-    from row reality by catalog_readiness.reconcile_readiness — the single owner
-    — not asserted in-flow. This used to optimistically stamp CATALOGED before
-    the cat_* rows were proven to persist, which let a row-less capture mark a
-    file done so promote had nothing to lift (the stranded-file bug). Kept as a
-    stub so existing call sites compile; it intentionally writes nothing. The
-    capture and promote stages call reconcile_readiness at end of pass."""
-    return
 
 
 def _backfill_cataloged(engine):
@@ -1581,6 +1573,83 @@ def _backfill_cataloged(engine):
     return updated
 
 
+def _wb_run_search(engine):
+    """Run the Browse & View query and refresh st.session_state['wb_results'].
+
+    Extracted so the SAME query backs the Search button, the Refresh button and
+    the post-action refresh after a batch load or reject. Previously the query
+    lived inline under the Search button, so anything that changed a file's
+    readiness left the on-screen list stale with no way to update it short of
+    searching again.
+
+    Filters are read from the widgets' session keys rather than passed in, so
+    a refresh always reproduces exactly what the user last searched for.
+    """
+    import pandas as pd
+    from sqlalchemy import text as _t
+
+    grp = st.session_state.get("wb_grp") or []
+    rd = st.session_state.get("wb_rd", "All")
+    srch = st.session_state.get("wb_srch", "")
+    flagged = st.session_state.get("wb_flagged", False)
+
+    conditions = ["1=1"]
+    params = {}
+    if grp:
+        _ph = ",".join(f":grp{i}" for i in range(len(grp)))
+        conditions.append(f"FILE_TYPE_GROUP IN ({_ph})")
+        for i, _g in enumerate(grp):
+            params[f"grp{i}"] = _g
+    if rd != "All":
+        conditions.append("CATALOG_READINESS=:rd")
+        params["rd"] = rd
+    if srch:
+        conditions.append("FILE_NAME LIKE :srch")
+        params["srch"] = f"%{srch}%"
+    if flagged:
+        conditions.append("ISNULL(FLAG_DELETE,'N')='Y'")
+    try:
+        with engine.connect() as con:
+            rows = con.execute(_t(f"""
+                SELECT TOP 500
+                    g.INVENTORY_ID, g.FILE_PATH, g.FILE_NAME, g.FILE_EXT,
+                    g.FILE_TYPE_GROUP, g.FILE_SIZE_KB,
+                    g.CATALOG_READINESS, g.CATALOG_SCORE,
+                    g.MATCHED_UWI,
+                    (SELECT TOP 1 h.WELL_NAME
+                       FROM file_catalog.FILE_WELL_HEADER h
+                      WHERE h.INVENTORY_ID = g.INVENTORY_ID) AS WELL_NAME,
+                    -- Survey name for seismic. The pipeline writes it ONLY to
+                    -- FILE_SEIS_HEADER (that's the column promote joins on),
+                    -- so reading GFC alone showed blank for every resolved
+                    -- SEG-Y. Prefer a manual GFC override if one was set,
+                    -- else fall back to the extracted seis header.
+                    ISNULL(NULLIF(LTRIM(RTRIM(g.SURVEY_NAME)), ''),
+                           (SELECT TOP 1 s.SURVEY_NAME
+                              FROM file_catalog.FILE_SEIS_HEADER s
+                             WHERE s.INVENTORY_ID = g.INVENTORY_ID)) AS SURVEY_NAME,
+                    g.CATALOG_ISSUES,
+                    ISNULL(g.FLAG_DELETE,'N') FLAG_DELETE,
+                    g.HEADER_EXTRACTED
+                FROM file_catalog.GLOBAL_FILE_CATALOG g
+                WHERE {" AND ".join(conditions)}
+                ORDER BY g.CATALOG_SCORE DESC, g.FILE_NAME
+            """), params).fetchall()
+        df = pd.DataFrame(rows, columns=[
+            "INVENTORY_ID","FILE_PATH","FILE_NAME","FILE_EXT",
+            "FILE_TYPE_GROUP","FILE_SIZE_KB",
+            "CATALOG_READINESS","CATALOG_SCORE",
+            "MATCHED_UWI","WELL_NAME","SURVEY_NAME","CATALOG_ISSUES",
+            "FLAG_DELETE","HEADER_EXTRACTED",
+        ])
+        st.session_state["wb_results"] = df
+        st.session_state.pop("wb_nav_idx", None)
+    except Exception as e:
+        st.error(f"Search failed: {e}")
+
+    return st.session_state.get("wb_results")
+
+
 def _tab_browse(engine, dialect):
     from sqlalchemy import text as _t
 
@@ -1603,51 +1672,19 @@ def _tab_browse(engine, dialect):
                           placeholder="partial name...")
     flagged = f4.checkbox("Flagged only", key="wb_flagged")
 
-    if st.button("🔍 Search", type="primary", key="wb_search_btn"):
-        conditions = ["1=1"]
-        params = {}
-        if grp:
-            _ph = ",".join(f":grp{i}" for i in range(len(grp)))
-            conditions.append(f"FILE_TYPE_GROUP IN ({_ph})")
-            for i, _g in enumerate(grp):
-                params[f"grp{i}"] = _g
-        if rd != "All":
-            conditions.append("CATALOG_READINESS=:rd")
-            params["rd"] = rd
-        if srch:
-            conditions.append("FILE_NAME LIKE :srch")
-            params["srch"] = f"%{srch}%"
-        if flagged:
-            conditions.append("ISNULL(FLAG_DELETE,'N')='Y'")
-        try:
-            with engine.connect() as con:
-                rows = con.execute(_t(f"""
-                    SELECT TOP 500
-                        g.INVENTORY_ID, g.FILE_PATH, g.FILE_NAME, g.FILE_EXT,
-                        g.FILE_TYPE_GROUP, g.FILE_SIZE_KB,
-                        g.CATALOG_READINESS, g.CATALOG_SCORE,
-                        g.MATCHED_UWI,
-                        (SELECT TOP 1 h.WELL_NAME
-                           FROM file_catalog.FILE_WELL_HEADER h
-                          WHERE h.INVENTORY_ID = g.INVENTORY_ID) AS WELL_NAME,
-                        g.CATALOG_ISSUES,
-                        ISNULL(g.FLAG_DELETE,'N') FLAG_DELETE,
-                        g.HEADER_EXTRACTED
-                    FROM file_catalog.GLOBAL_FILE_CATALOG g
-                    WHERE {" AND ".join(conditions)}
-                    ORDER BY g.CATALOG_SCORE DESC, g.FILE_NAME
-                """), params).fetchall()
-            df = pd.DataFrame(rows, columns=[
-                "INVENTORY_ID","FILE_PATH","FILE_NAME","FILE_EXT",
-                "FILE_TYPE_GROUP","FILE_SIZE_KB",
-                "CATALOG_READINESS","CATALOG_SCORE",
-                "MATCHED_UWI","WELL_NAME","CATALOG_ISSUES",
-                "FLAG_DELETE","HEADER_EXTRACTED",
-            ])
-            st.session_state["wb_results"] = df
-            st.session_state.pop("wb_nav_idx", None)
-        except Exception as e:
-            st.error(f"Search failed: {e}")
+    b1, b2 = st.columns([1, 1])
+    if b1.button("🔍 Search", type="primary", key="wb_search_btn",
+                 use_container_width=True):
+        _wb_run_search(engine)
+    # Re-runs the same query. Readiness changes as files are captured and
+    # rejected, so a result set goes stale the moment you act on it.
+    if b2.button("↻ Refresh list", key="wb_refresh_btn",
+                 use_container_width=True,
+                 disabled=st.session_state.get("wb_results") is None,
+                 help="Re-run the current search — picks up readiness changes "
+                      "from loading or rejecting files."):
+        _wb_run_search(engine)
+        st.rerun()
 
     if st.button("🗂 Refresh cataloged status", key="wb_backfill_cat",
                  help="Reconcile every file's readiness to row reality: CATALOGED "
@@ -1672,13 +1709,321 @@ def _tab_browse(engine, dialect):
         return
 
     st.caption(f"{len(df):,} files (max 500)")
-    st.dataframe(
-        df[["FILE_NAME","FILE_EXT","FILE_TYPE_GROUP",
-            "CATALOG_READINESS","CATALOG_SCORE",
-            "MATCHED_UWI","FLAG_DELETE"]].rename(
-                columns={"CATALOG_READINESS": "Readiness"}),
-        hide_index=True, use_container_width=True,
-    )
+
+    # ── Selectable results grid ──────────────────────────────────────────────
+    # Checkbox column so a review pass is one screen: tick the doubtful files,
+    # open any of them in the viewer below to confirm, then reject the batch.
+    # Everything except Select is read-only — this grid is for choosing files,
+    # not editing them; UWI/SURVEY_NAME assignment has its own editor.
+    _grid = df[["FILE_NAME", "FILE_EXT", "FILE_TYPE_GROUP",
+                "CATALOG_READINESS", "CATALOG_SCORE",
+                "FLAG_DELETE"]].rename(columns={"CATALOG_READINESS": "Readiness"})
+    _grid.insert(0, "Select", False)
+    # The editor and the confirm box are keyed with a NONCE rather than a fixed
+    # name. Streamlit refuses any write to a widget's key once that widget has
+    # been instantiated, so "reset the checkbox after rejecting" cannot be done
+    # by assigning to session_state — it raises. Bumping the nonce retires the
+    # old widgets and mints fresh ones, which default to unticked. It also
+    # discards stale row-index edits, which matters because rejecting changes
+    # the result set and a leftover tick would point at a different file.
+    _nonce = st.session_state.get("wb_sel_nonce", 0)
+    _ed = st.data_editor(
+        _grid, hide_index=True, use_container_width=True,
+        key=f"wb_sel_editor_{_nonce}",
+        disabled=[c for c in _grid.columns if c != "Select"],
+        column_config={
+            "Select": st.column_config.CheckboxColumn(
+                "✓", help="Tick files to view or reject", width="small"),
+        })
+    try:
+        _picked = [i for i, v in enumerate(_ed["Select"].tolist()) if bool(v)]
+    except Exception:
+        _picked = []
+
+    v1, v2, v3 = st.columns([1, 1, 2])
+    if v1.button(f"👁 View ({len(_picked)})", key="wb_sel_view",
+                 disabled=not _picked, use_container_width=True,
+                 help="Open the first ticked file in the viewer below. "
+                      "Use Prev/Next there to walk the rest."):
+        st.session_state["wb_nav_idx"] = _picked[0]
+        st.rerun()
+
+    _reason = v3.text_input(
+        "Reason", key="wb_sel_reason", label_visibility="collapsed",
+        placeholder="why are these bad? (stored on the blocklist)")
+    _confirm = v2.checkbox("Confirm", key=f"wb_sel_confirm_{_nonce}",
+                           help="Rejecting removes the file from the catalog. "
+                                "Tick to enable the button.")
+
+    # Rejecting DELETES catalog rows, so it needs both a selection and an
+    # explicit confirm — a stray click on a 500-row result set would otherwise
+    # empty most of the inventory. Failures are collected per file rather than
+    # aborting, so one unreadable file doesn't strand the rest half-done.
+    if st.button(f"🚫 Reject checked ({len(_picked)}) — blocklist + remove",
+                 key=f"wb_sel_reject_{_nonce}", type="secondary",
+                 disabled=not (_picked and _confirm),
+                 use_container_width=True):
+        _ok, _fail = 0, []
+        for _i in _picked:
+            _r = df.iloc[_i]
+            try:
+                _mark_bad(engine, _r["INVENTORY_ID"], _r["FILE_PATH"],
+                          _r.get("FILE_NAME"), _r.get("FILE_SIZE_KB"),
+                          _reason or "rejected on review")
+                _ok += 1
+            except Exception as _be:
+                _fail.append(f"{_r.get('FILE_NAME','?')}: "
+                             f"{type(_be).__name__}: {_be}")
+        if _ok:
+            st.success(f"Rejected {_ok:,} file(s) — blocklisted and removed "
+                       f"from the catalog. The next crawl will skip them.")
+        for _m in _fail[:5]:
+            st.warning(_m)
+        if len(_fail) > 5:
+            st.warning(f"…and {len(_fail) - 5:,} more failed.")
+        st.session_state.pop("wb_results", None)
+        st.session_state.pop("wb_nav_idx", None)
+        # Retire this round's widgets (see the nonce comment above) — never
+        # assign to wb_sel_confirm_* itself.
+        st.session_state["wb_sel_nonce"] = _nonce + 1
+        st.rerun()
+
+    # ── Export / Import assignments (Excel) ───────────────────────────────────
+    # Round-trip the whole result grid through Excel so UWI / SURVEY_NAME can be
+    # assigned in bulk offline (fill-down, VLOOKUP against a master, etc.) then
+    # imported back in one pass. INVENTORY_ID is the join key, so the export
+    # writes it AND the UWI column as TEXT ('@' number format) — otherwise Excel
+    # silently turns a 14-digit API into 4.2999E+13 or drops a leading zero and
+    # the round trip corrupts every UWI. Import matches on INVENTORY_ID (the PK,
+    # so it works regardless of what's currently searched), ignores blank cells,
+    # normalizes UWI with the same norm_uwi14 recipe as the inline editor, and
+    # flips readiness to READY — identical to a manual Save.
+    with st.expander("📤 Export / 📥 Import assignments (Excel)", expanded=False):
+        try:
+            from dataview.core import path_identity as _pi
+        except Exception:
+            _pi = None
+
+        # ---- Export -----------------------------------------------------------
+        _exp = df.copy()
+        if "SURVEY_NAME" not in _exp.columns:
+            _exp["SURVEY_NAME"] = ""          # search SELECT omits it; blank to fill
+        _cols = ["INVENTORY_ID", "FILE_NAME", "FILE_PATH", "FILE_TYPE_GROUP",
+                 "FILE_EXT", "CATALOG_READINESS", "CATALOG_SCORE", "WELL_NAME",
+                 "CATALOG_ISSUES", "MATCHED_UWI", "SURVEY_NAME"]
+        _exp = _exp[[c for c in _cols if c in _exp.columns]].copy()
+        for _c in _exp.columns:               # clean strings, no literal 'None'/'nan'
+            _exp[_c] = (_exp[_c].fillna("").astype(str)
+                        .replace({"None": "", "nan": ""}))
+        try:
+            import io
+            from openpyxl.utils import get_column_letter
+            _buf = io.BytesIO()
+            with pd.ExcelWriter(_buf, engine="openpyxl") as _xw:
+                _exp.to_excel(_xw, index=False, sheet_name="assignments")
+                _ws = _xw.sheets["assignments"]
+                _text_cols = {"INVENTORY_ID", "MATCHED_UWI", "SURVEY_NAME"}
+                for _i, _name in enumerate(_exp.columns, start=1):
+                    _letter = get_column_letter(_i)
+                    _wid = _exp[_name].str.len().max()
+                    _wid = 12 if pd.isna(_wid) else int(_wid)
+                    _ws.column_dimensions[_letter].width = min(max(12, _wid + 2), 60)
+                    if _name in _text_cols:          # keep IDs/UWIs verbatim
+                        for _cell in _ws[_letter]:
+                            _cell.number_format = "@"
+                # make the FILE_NAME cell a clickable link to the file (target
+                # built from FILE_PATH; the path column stays plain text).
+                _cl = list(_exp.columns)
+                if "FILE_NAME" in _cl and "FILE_PATH" in _cl:
+                    from openpyxl.styles import Font as _Font
+                    _nlet = get_column_letter(_cl.index("FILE_NAME") + 1)
+                    _plet = get_column_letter(_cl.index("FILE_PATH") + 1)
+                    _lfont = _Font(color="0563C1", underline="single")
+                    for _nc, _pc in zip(_ws[_nlet][1:], _ws[_plet][1:]):  # data rows
+                        _u = _xl_file_uri(_pc.value)
+                        if _u:
+                            _nc.hyperlink = _u
+                            _nc.font = _lfont
+                _ws.freeze_panes = "A2"
+            st.download_button(
+                "📤 Export grid to Excel",
+                data=_buf.getvalue(),
+                file_name=f"assignments_{datetime.now():%Y%m%d_%H%M}.xlsx",
+                mime=("application/vnd.openxmlformats-officedocument"
+                      ".spreadsheetml.sheet"),
+                use_container_width=True,
+                help="Every row in the current results grid. Fill MATCHED_UWI "
+                     "(wells) or SURVEY_NAME (seismic); leave a row blank to skip "
+                     "it. Do NOT edit INVENTORY_ID — it's how import finds the row.")
+        except Exception as _xx:
+            st.error(f"Excel export unavailable ({type(_xx).__name__}: {_xx}). "
+                     "Needs openpyxl — `pip install openpyxl`.")
+
+        st.divider()
+
+        # ---- Import -----------------------------------------------------------
+        _up = st.file_uploader("Import filled Excel", type=["xlsx"],
+                               key="wb_assign_xlsx",
+                               help="Matches rows by INVENTORY_ID; applies every "
+                                    "non-blank MATCHED_UWI / SURVEY_NAME cell.")
+        if _up is not None and st.button("📥 Apply assignments from file",
+                                         type="primary", key="wb_assign_import"):
+            try:
+                _imp = pd.read_excel(_up, dtype=str)          # dtype=str: no coercion
+            except Exception as _rx:
+                st.error(f"Could not read workbook: {_rx}")
+                _imp = None
+            if _imp is not None:
+                _imp.columns = [str(_c).strip() for _c in _imp.columns]
+                if "INVENTORY_ID" not in _imp.columns:
+                    st.error("Workbook has no INVENTORY_ID column — export a fresh "
+                             "template above and fill that one.")
+                else:
+                    # UWI + survey both go through the shared module-level
+                    # helpers (_assign_uwi / _assign_survey_name) so the inline
+                    # panel and this importer can't drift apart.
+
+                    def _clean_uwi(v):
+                        """Strip the trailing '.0' a number-typed cell can pick up
+                        (lossless — 14-digit UWIs are exact as doubles). Anything
+                        genuinely malformed is left as-is so norm_uwi14 rejects it
+                        rather than a lossy reconstruction applying a wrong UWI."""
+                        s = str(v or "").strip()
+                        if not s or s.lower() == "nan":
+                            return ""
+                        if s.endswith(".0") and s[:-2].isdigit():
+                            s = s[:-2]
+                        return s
+
+                    n_uwi = n_srv = notfound = 0
+                    bad = []
+                    try:
+                        with engine.begin() as con:
+                            for _, r in _imp.iterrows():
+                                iid = str(r.get("INVENTORY_ID", "") or "").strip()
+                                if not iid or iid.lower() == "nan":
+                                    continue
+                                raw_uwi = _clean_uwi(r.get("MATCHED_UWI", ""))
+                                raw_srv = str(r.get("SURVEY_NAME", "") or "").strip()
+                                if raw_srv.lower() == "nan":
+                                    raw_srv = ""
+                                fname = str(r.get("FILE_NAME", iid) or iid)
+                                if raw_uwi:
+                                    u = _normalize_uwi14(raw_uwi)
+                                    if not u:
+                                        bad.append(f"{fname}: '{raw_uwi}' → not 14 chars")
+                                        continue
+                                    if _assign_uwi(con, iid, u):
+                                        n_uwi += 1
+                                    else:
+                                        notfound += 1
+                                elif raw_srv:
+                                    if _assign_survey_name(con, iid, raw_srv):
+                                        n_srv += 1
+                                    else:
+                                        notfound += 1
+                        _msg = []
+                        if n_uwi: _msg.append(f"{n_uwi} UWI")
+                        if n_srv: _msg.append(f"{n_srv} survey name")
+                        if _msg:
+                            st.success("Imported " + " + ".join(_msg) +
+                                       " → readiness READY. Re-run capture to load them.")
+                        else:
+                            st.info("No non-blank UWI / SURVEY_NAME cells to apply.")
+                        if notfound:
+                            st.caption(f"{notfound} row(s) had no matching "
+                                       f"INVENTORY_ID in the catalog (skipped).")
+                        if bad:
+                            st.warning("Skipped (fix and re-import): " + "; ".join(bad))
+                        st.session_state.pop("wb_results", None)
+                        st.rerun()
+                    except Exception as _ex:
+                        st.error(f"Import failed: {_ex}")
+
+    # ── Assign UWI (well data) / SURVEY_NAME (seismic) to unresolved files ─────────
+    # Edit MATCHED_UWI or SURVEY_NAME inline for NEEDS_UWI/REVIEW files, then Save.
+    # UWI is normalized to the canonical 14 (path_identity.norm_uwi14) — the same
+    # recipe the pipeline uses — and readiness flips to READY so capture picks it up.
+    _assignable = df[df["CATALOG_READINESS"].isin(["NEEDS_UWI", "REVIEW", "ATTENTION"])]
+    if not _assignable.empty:
+        with st.expander(f"✏️ Assign UWI / Survey — {len(_assignable)} unresolved file(s)",
+                         expanded=False):
+            try:
+                from dataview.core import path_identity as _pi
+            except Exception:
+                _pi = None
+
+            _edit_src = _assignable[[
+                "INVENTORY_ID", "FILE_NAME", "FILE_TYPE_GROUP",
+                "CATALOG_READINESS", "MATCHED_UWI", "SURVEY_NAME"
+            ]].copy() if "SURVEY_NAME" in _assignable.columns else \
+                _assignable[["INVENTORY_ID", "FILE_NAME", "FILE_TYPE_GROUP",
+                             "CATALOG_READINESS", "MATCHED_UWI"]].copy()
+            if "SURVEY_NAME" not in _edit_src.columns:
+                _edit_src["SURVEY_NAME"] = ""
+            _edit_src["MATCHED_UWI"] = _edit_src["MATCHED_UWI"].fillna("").astype(str).str.strip()
+            _edit_src["SURVEY_NAME"] = _edit_src["SURVEY_NAME"].fillna("").astype(str).str.strip()
+
+            st.caption("Well data → set **assign UWI** (14 digits, dashes ok — normalized on "
+                       "save). Seismic → set **assign SURVEY_NAME**. Blank rows are left "
+                       "untouched. Saving flips readiness to READY.")
+            # Keep the editable column named MATCHED_UWI so it matches the field the
+            # user knows; only SURVEY_NAME gets a friendlier label. No decoy read-only
+            # UWI column: it's dropped from the summary table above (see st.dataframe).
+            _grid = _edit_src.rename(columns={"SURVEY_NAME": "assign SURVEY_NAME"})
+            # Lock the identity/status columns; leave ONLY 'assign UWI' and
+            # 'assign SURVEY_NAME' editable. `disabled` as a column-name LIST is the
+            # reliable way to do this — per-column disabled=True in column_config can
+            # render the whole grid read-only when combined with renamed columns.
+            edited = st.data_editor(
+                _grid,
+                key="wb_assign_editor",
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed",
+                disabled=["INVENTORY_ID", "FILE_NAME", "FILE_TYPE_GROUP",
+                          "CATALOG_READINESS"],
+                column_config={
+                    "MATCHED_UWI": st.column_config.TextColumn(
+                        "MATCHED_UWI ✏️", help="14-char UWI; dashes/spaces stripped, padded to 14"),
+                    "assign SURVEY_NAME": st.column_config.TextColumn(
+                        "assign SURVEY_NAME", help="seismic survey name (nvarchar 255)"),
+                },
+            )
+
+            if st.button("💾 Save assignments", type="primary", key="wb_assign_save"):
+                # UWI + survey both go through the shared module-level helpers
+                # (_assign_uwi / _assign_survey_name) — one owner each.
+                n_uwi = n_srv = 0
+                bad = []
+                try:
+                    with engine.begin() as con:
+                        for _, r in edited.iterrows():
+                            iid = str(r["INVENTORY_ID"])
+                            raw_uwi = str(r.get("MATCHED_UWI", "") or "").strip()
+                            raw_srv = str(r.get("assign SURVEY_NAME", "") or "").strip()
+                            if raw_uwi:
+                                u = _normalize_uwi14(raw_uwi)
+                                if not u:
+                                    bad.append(f"{r['FILE_NAME']}: '{raw_uwi}' → not 14 chars")
+                                    continue
+                                _assign_uwi(con, iid, u)
+                                n_uwi += 1
+                            elif raw_srv:
+                                _assign_survey_name(con, iid, raw_srv)
+                                n_srv += 1
+                    msg = []
+                    if n_uwi: msg.append(f"{n_uwi} UWI")
+                    if n_srv: msg.append(f"{n_srv} survey name")
+                    if msg:
+                        st.success("Assigned " + " + ".join(msg) +
+                                   " → readiness READY. Re-run capture to load them.")
+                    if bad:
+                        st.warning("Skipped (fix and re-save): " + "; ".join(bad))
+                    st.session_state.pop("wb_results", None)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Assignment save failed: {e}")
 
     if df.empty:
         return
@@ -1915,599 +2260,8 @@ def _extract_and_load(engine, dialect, fpath, fext, inv_id, row):
         _do_load(engine, dialect, fpath, fext, _resolved, rows)
 
 
-def _do_extract(fpath: str, fext: str) -> tuple:
-    """Extract structured data rows. Returns (rows, label)."""
-    try:
-        if fext == ".pdf":
-            from dataview.file_catalog.pdf_survey_catalog import (
-                classify_pdf, extract_stations,
-                extract_eowr, extract_rft_data,
-                extract_well_test, extract_petrophysical,
-                extract_casing_cement, extract_ddr,
-                extract_scout_ticket,
-                RT_DIRECTIONAL, RT_EOWR, RT_FORMATION, RT_RFT,
-                RT_WELL_TEST, RT_PETRO, RT_CASING,
-                RT_DDR, RT_SCOUT,
-            )
-            # extract_core / RT_CORE are not present in all builds — guard them
-            # so a missing symbol can't break the whole PDF preview path.
-            try:
-                from dataview.file_catalog.pdf_survey_catalog import extract_core, RT_CORE
-            except ImportError:
-                extract_core, RT_CORE = None, "CORE_ANALYSIS"
-            cl = classify_pdf(fpath)
-            rt = cl.get("report_type","UNKNOWN")
-
-            if rt == RT_DIRECTIONAL:
-                r = extract_stations(fpath)
-                return r.get("stations",[]), "Stations"
-            elif rt in (RT_EOWR, RT_FORMATION):
-                r = extract_eowr(fpath)
-                return r.get("strat",[]), "Strat tops"
-            elif rt == RT_RFT:
-                return extract_rft_data(fpath).get("rows",[]), "RFT rows"
-            elif rt == RT_WELL_TEST:
-                return extract_well_test(fpath).get("flow_rows",[]), "Flow periods"
-            elif rt in (RT_PETRO,"PETROPHYSICAL"):
-                from dataview.file_catalog.extract_petro import extract_petro
-                r = extract_petro(fpath)
-                if r.get("ok"):
-                    zones = r.get("zones", [])
-                    return zones, f"Petro zones ({len(zones)})"
-                else:
-                    # Fallback to old extractor
-                    r2 = extract_petrophysical(fpath)
-                    return r2.get("zones") or r2.get("interval") or [], "Zones"
-            elif rt == RT_CASING:
-                r = extract_casing_cement(fpath)
-                return r.get("casing",[]) + r.get("cement",[]), "Casing"
-            elif rt == RT_CORE:
-                if extract_core:
-                    return extract_core(fpath).get("samples",[]), "Core samples"
-                return [], "Core (no extractor)"
-            elif rt == RT_DDR:
-                return extract_ddr(fpath).get("ops",[]), "Operations"
-            elif rt == RT_SCOUT:
-                sc = extract_scout_ticket(fpath)
-                summary = []
-                if sc.get("header"):
-                    summary.append({"Section": "Well header",
-                                    "Items": len(sc["header"])})
-                for _k, _lbl in (("tops", "Formation tops"),
-                                 ("dst", "DST tests"),
-                                 ("frac", "Frac stages"),
-                                 ("core", "Core samples"),
-                                 ("ip_rows", "IP / production")):
-                    _n = len(sc.get(_k) or [])
-                    if _n:
-                        summary.append({"Section": _lbl, "Items": _n})
-                return summary, "Scout sections"
-            else:
-                return [], "Records"
-
-        elif fext == ".las":
-            import lasio
-            las = lasio.read(fpath)
-            df  = las.df().reset_index()
-            return df.to_dict("records"), "Curve rows"
-
-        elif fext in SEGY_EXTS:
-            from dataview.file_catalog.segy_header import sample_trace_rows
-            return sample_trace_rows(fpath, limit=100), "Trace headers"
-
-        elif fext in SHP_EXTS:
-            import geopandas as gpd
-            gdf = gpd.read_file(fpath)
-            return gdf.drop(
-                columns=["geometry"], errors="ignore"
-            ).to_dict("records"), "Features"
-
-    except Exception as e:
-        st.error(f"Extraction error: {e}")
-    return [], "Records"
 
 
-def _load_rows_to_catalog(engine, dialect, fpath, fext, uwi, rows):
-    """Capture extracted rows into the file_catalog.cat_* mirrors.
-
-    Pure logic — performs NO Streamlit output, so the same path drives both
-    the interactive viewer and the batch loader. Returns:
-        {ok, loaded, errors:[...], rt, note}
-    note is one of "", "petro_fail:<msg>", "not_impl:<rt>",
-    "shapefile", "unsupported".  header-capture problems are recorded in
-    errors with a "header capture: " prefix (non-fatal).
-    """
-    from sqlalchemy import text as _t
-    res = {"ok": False, "loaded": 0, "errors": [], "rt": "", "note": "",
-           "detail": {}}
-
-    well_info = {"uwi": uwi, "well_name": "", "operator": "",
-                 "source_path": fpath}
-    # resolve INVENTORY_ID for provenance (the cat_* mirrors record it)
-    try:
-        with engine.connect() as _c:
-            _r = _c.execute(_t(
-                "SELECT TOP 1 INVENTORY_ID FROM file_catalog.GLOBAL_FILE_CATALOG "
-                "WHERE FILE_PATH = :p"), {"p": fpath}).fetchone()
-        well_info["inventory_id"] = _r[0] if _r else None
-    except Exception:
-        well_info["inventory_id"] = None
-
-    try:
-        if fext == ".pdf":
-            from dataview.file_catalog.pdf_survey_catalog import (
-                classify_pdf, load_to_ppdm, RT_DIRECTIONAL, RT_SCOUT)
-            # Newer symbols — tolerate an older deployed pdf_survey_catalog by
-            # falling back to the known string values if the constants/function
-            # aren't exported yet (prevents a partial deploy from breaking ALL
-            # PDF cataloging on an ImportError).
-            try:
-                from dataview.file_catalog.pdf_survey_catalog import (
-                    extended_classify_pdf, RT_EOWR as _RT_EOWR,
-                    RT_WELL_TEST as _RT_WT, RT_DDR as _RT_DDR,
-                    RT_RFT as _RT_RFT, RT_CASING as _RT_CAS)
-                RT_EOWR, RT_WELL_TEST = _RT_EOWR, _RT_WT
-                RT_DDR, RT_RFT, RT_CASING = _RT_DDR, _RT_RFT, _RT_CAS
-            except ImportError:
-                extended_classify_pdf = None
-                RT_EOWR, RT_WELL_TEST = "END_OF_WELL", "WELL_TEST"
-                RT_DDR = "DAILY_DRILLING_REPORT"
-                RT_RFT, RT_CASING = "RFT_MDT", "CASING_CEMENTING"
-            cl = classify_pdf(fpath)
-            rt = cl.get("report_type", "UNKNOWN")
-            # The base classifier only knows 5 types and mis-routes the rest:
-            # scout tickets fall under its COMPLETION keyword, EOW reports under
-            # its survey keywords. Consult the extended classifier, which detects
-            # scout / EOW / well-test / DDR / RFT / casing, and let it OVERRIDE
-            # for those documents (a real directional survey still wins, since
-            # the extended classifier won't claim it). Merge well-header fields
-            # from whichever classifier found them.
-            try:
-                ex = extended_classify_pdf(fpath) if extended_classify_pdf else {}
-                ex_rt = ex.get("report_type", "UNKNOWN")
-                _EXT_TYPES = {RT_SCOUT, RT_EOWR, RT_WELL_TEST,
-                              RT_DDR, RT_RFT, RT_CASING}
-                # EOW reports carry survey-like depth/TVD tables, so the base
-                # classifier often mislabels them DIRECTIONAL. A confident EOW
-                # detection (≥0.5) overrides even DIRECTIONAL; the other extended
-                # types only override non-DIRECTIONAL base results.
-                if (ex_rt == RT_EOWR and ex.get("confidence", 0) >= 0.5):
-                    rt = RT_EOWR
-                elif ex_rt in _EXT_TYPES and rt != RT_DIRECTIONAL:
-                    rt = ex_rt
-                if rt == ex_rt:
-                    for _k in ("well_name", "operator", "field", "state",
-                               "county", "country", "total_depth",
-                               "latitude", "longitude"):
-                        if not cl.get(_k) and ex.get(_k):
-                            cl[_k] = ex.get(_k)
-            except Exception:
-                pass
-            res["rt"] = rt
-            well_info.update({
-                "well_name": cl.get("well_name", ""),
-                "operator":  cl.get("operator", ""),
-            })
-            # capture the well header into cat_well so promote_catalog can
-            # create the dv_well record downstream from the document header.
-            # Scout tickets are skipped here — load_scout writes a richer
-            # cat_well header (county, lease, lat/long, dates) itself.
-            if uwi and rt != RT_SCOUT:
-                try:
-                    import uuid as _uuid
-                    from datetime import datetime as _dt
-                    try:
-                        from dataview.file_catalog.catalog_capture import capture as _cap
-                    except ImportError:
-                        from dataview.file_catalog.catalog_capture import capture as _cap
-                    _now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
-                    _hn = _cap(engine, "cat_well", [{
-                        "WELL_NAME":        cl.get("well_name") or uwi,
-                        "OPERATOR_NAME":    cl.get("operator"),
-                        "FIELD_NAME":       cl.get("field"),
-                        "PROVINCE_STATE":   cl.get("state"),
-                        "COUNTY":           cl.get("county"),
-                        "COUNTRY":          cl.get("country"),
-                        "SURFACE_LATITUDE":  _safe_coord(cl.get("latitude")),
-                        "SURFACE_LONGITUDE": _safe_coord(cl.get("longitude")),
-                        "FINAL_TD":         cl.get("total_depth"),
-                        "ACTIVE_IND":       "Y",
-                        "ROW_QUALITY":      "FINAL",
-                        "PPDM_GUID":        str(_uuid.uuid4()),
-                        "ROW_CREATED_BY":   "DataWrangler",
-                        "ROW_CREATED_DATE": _now,
-                    }], uwi=uwi, inventory_id=well_info.get("inventory_id"),
-                       source_path=fpath, source="PDF_HEADER")
-                    if _hn:
-                        res["detail"]["cat_well"] = (
-                            res["detail"].get("cat_well", 0) + _hn)
-                except Exception as _he:
-                    res["errors"].append(f"header capture: {_he}")
-
-            if rt == RT_DIRECTIONAL:
-                r = load_to_ppdm(well_info=well_info, stations=rows,
-                                 engine=engine, dialect=dialect)
-            else:
-                from dataview.file_catalog.pdf_db_loader import (
-                    load_formation_tops, load_casing, load_scout, load_core,
-                )
-                # load_well_test / load_rft are newer; if a deployed
-                # pdf_db_loader predates them, degrade gracefully (header-only
-                # capture still marks the file cataloged) instead of breaking
-                # the entire PDF branch on an ImportError.
-                try:
-                    from dataview.file_catalog.pdf_db_loader import load_well_test
-                except ImportError:
-                    load_well_test = None
-                try:
-                    from dataview.file_catalog.pdf_db_loader import load_rft
-                except ImportError:
-                    load_rft = None
-                # RT_EOWR/RT_WELL_TEST/RT_DDR/RT_RFT/RT_CASING are already in
-                # scope from the defensive block at the top of this branch.
-                # Resolve the remaining ones with literal fallbacks so a missing
-                # constant in an older pdf_survey_catalog can't ImportError and
-                # kill the whole capture (this was the RT_CORE failure).
-                try:
-                    from dataview.file_catalog.pdf_survey_catalog import (
-                        RT_FORMATION as _RT_FORM, RT_PETRO as _RT_PET,
-                        RT_CORE as _RT_CORE, RT_SCOUT as _RT_SCOUT)
-                    RT_FORMATION, RT_PETRO = _RT_FORM, _RT_PET
-                    RT_CORE = _RT_CORE
-                except ImportError:
-                    RT_FORMATION, RT_PETRO = "FORMATION_TOPS", "PETROPHYSICAL"
-                    RT_CORE = "CORE_ANALYSIS"
-                kw = dict(engine=engine, dialect=dialect,
-                          well_info=well_info, rows=rows)
-                if rt in (RT_EOWR, RT_FORMATION):
-                    r = load_formation_tops(**kw)
-                elif rt == RT_CASING:
-                    r = load_casing(**kw)
-                elif rt == RT_CORE:
-                    r = load_core(**kw)
-                elif rt == RT_SCOUT:
-                    r = load_scout(**kw)
-                elif rt == RT_WELL_TEST and load_well_test:
-                    r = load_well_test(**kw)
-                elif rt == RT_RFT and load_rft:
-                    r = load_rft(**kw)
-                elif rt in (RT_PETRO, "PETROPHYSICAL"):
-                    from dataview.file_catalog.extract_petro import (
-                        extract_petro, load_petro_zones)
-                    petro = extract_petro(fpath)
-                    if not petro.get("ok"):
-                        res["note"] = f"petro_fail:{petro.get('error')}"
-                        # header may still have been captured above → mark it
-                        if res["detail"].get("cat_well"):
-                            res["ok"] = True
-                            _set_readiness_cataloged(
-                                engine, well_info.get("inventory_id"))
-                        return res
-                    r = load_petro_zones(engine, dialect, petro, uwi)
-                else:
-                    # No detail loader for this type (e.g. DDR) — but if we
-                    # captured the well header above, that IS a catalog result.
-                    res["note"] = f"not_impl:{rt}"
-                    if res["detail"].get("cat_well"):
-                        res["ok"] = True
-                        _set_readiness_cataloged(
-                            engine, well_info.get("inventory_id"))
-                    return res
-
-            res["loaded"] = r.get("loaded", 0)
-            for _k, _v in (r.get("detail") or {}).items():
-                res["detail"][_k] = res["detail"].get(_k, 0) + _v
-            res["errors"].extend(r.get("errors", []))
-            res["ok"] = not [e for e in res["errors"]
-                             if not str(e).startswith("header capture:")]
-            # Mark cataloged if EITHER detail rows OR a well header landed.
-            if res["loaded"] or res["detail"].get("cat_well"):
-                _set_readiness_cataloged(engine, well_info.get("inventory_id"))
-            return res
-
-        elif fext in SHP_EXTS:
-            # Classify first (gives feature_type + column_map), then route WELL
-            # point features through the CATALOG-aware loader so rows land in
-            # file_catalog.cat_well keyed by INVENTORY_ID — promote_catalog lifts
-            # them into dataview.dv_well. (load_to_ppdm writes dbo.WELL directly
-            # and bypasses the cat_* → dv_* pipeline, so it is NOT used here.)
-            from dataview.mapping.shapefile_catalog import (
-                classify_shapefile, capture_wells_to_catalog,
-                capture_features_to_catalog, FT_WELL)
-            cl = classify_shapefile(fpath)
-            ft = cl.get("feature_type")
-            _FEAT_CAT = {"FIELD": "FIELD", "LEASE": "LAND_TRACT",
-                         "BOUNDARY": "BOUNDARY", "PIPELINE": "PIPELINE"}
-            if ft == FT_WELL:
-                r = capture_wells_to_catalog(
-                    file_path=fpath, column_map=cl.get("column_map") or {},
-                    engine=engine, well_info=well_info,
-                    dialect=dialect, source="SHAPEFILE")
-                res["loaded"] = r.get("loaded", 0)
-                res["detail"]["cat_well"] = (
-                    res["detail"].get("cat_well", 0) + r.get("loaded", 0))
-                res["errors"].extend(r.get("errors", []))
-                res["ok"] = not [e for e in res["errors"]
-                                 if not str(e).startswith("header capture:")]
-                res["note"] = "shapefile"
-                if res["loaded"]:
-                    _set_readiness_cataloged(engine,
-                                             well_info.get("inventory_id"))
-            elif ft in _FEAT_CAT:
-                # FIELD/LEASE/BOUNDARY/PIPELINE — per-feature capture, one cat_*
-                # row per polygon/line with geometry; promote_* builds geography.
-                r = capture_features_to_catalog(
-                    file_path=fpath, feature_category=_FEAT_CAT[ft],
-                    engine=engine, well_info=well_info,
-                    dialect=dialect, source="SHAPEFILE")
-                n = r.get("loaded", 0)
-                res["loaded"] = n
-                res["detail"].update(r.get("detail", {}))
-                res["errors"].extend(r.get("errors", []))
-                res["ok"] = not [e for e in res["errors"]
-                                 if not str(e).startswith("header capture:")]
-                res["note"] = "shapefile"
-                if n:
-                    _set_readiness_cataloged(engine,
-                                             well_info.get("inventory_id"))
-            else:
-                # SEISMIC handled via header→dv_seis_set; anything else skips.
-                res["ok"] = True
-                res["note"] = f"shapefile_skip:{ft}"
-            return res
-
-        elif fext in WITSML_EXTS:
-            # WITSML self-parses (well header / trajectory / log curves), so the
-            # pre-extracted `rows` arg is unused. load_witsml stamps INVENTORY_ID
-            # / SOURCE_PATH via capture(), and gates non-WITSML .xml itself.
-            try:
-                from dataview.file_catalog.witsml_catalog import load_witsml as _witsml
-            except ImportError:
-                from dataview.file_catalog.witsml_catalog import load_witsml as _witsml
-            _w = _witsml(engine, fpath, uwi=uwi,
-                         inventory_id=well_info.get("inventory_id"),
-                         source_path=fpath, well_info=well_info)
-            res["loaded"] = int(_w.get("loaded", 0) or 0)
-            res["rt"] = _w.get("rt") or "WITSML"
-            res["detail"].update(_w.get("detail") or {})
-            res["note"] = _w.get("note", "")
-            res["errors"].extend(_w.get("errors") or [])
-            if res["loaded"]:
-                res["ok"] = True
-                _set_readiness_cataloged(engine, well_info.get("inventory_id"))
-            return res
-
-        elif fext in JSON_LOG_EXTS:
-            # OSDU WKS / JSON-Well-Log self-parses (well header, trajectory,
-            # markers, DST, SCAL, log curves), routing by the `kind` field.
-            # Non-well kinds (Field/Reservoir/Seismic*) return a no_target note.
-            try:
-                from dataview.file_catalog.json_well_log_catalog import load_json_well_log as _jwl
-            except ImportError:
-                from dataview.file_catalog.json_well_log_catalog import load_json_well_log as _jwl
-            _j = _jwl(engine, fpath, uwi=uwi,
-                      inventory_id=well_info.get("inventory_id"),
-                      source_path=fpath, well_info=well_info)
-            res["loaded"] = int(_j.get("loaded", 0) or 0)
-            res["rt"] = _j.get("rt") or "OSDU"
-            res["detail"].update(_j.get("detail") or {})
-            res["note"] = _j.get("note", "")
-            res["errors"].extend(_j.get("errors") or [])
-            if res["loaded"]:
-                res["ok"] = True
-                _set_readiness_cataloged(engine, well_info.get("inventory_id"))
-            return res
-
-        elif fext in OFFICE_EXTS:
-            # Office docs parse themselves inside dv_office_loader (it resolves
-            # the well + INVENTORY_ID from the file), so the pre-extracted
-            # `rows` arg is unused here. dispatch() routes xlsx/docx to the
-            # formation-tops / completion / production sub-loader by filename
-            # + hint, and each sub-loader stamps INVENTORY_ID/SOURCE_PATH via
-            # capture() — same provenance the other branches carry.
-            try:
-                from dataview.file_catalog.dv_office_loader import dispatch as _office
-            except ImportError:
-                from dataview.file_catalog.dv_office_loader import dispatch as _office
-            _r = _office(engine, fpath, source="OFFICE")
-            res["loaded"] = int(_r.get("loaded", 0) or 0)
-            res["rt"] = "OFFICE"
-            _errs = [str(e) for e in (_r.get("errors") or [])]
-            if res["loaded"]:
-                res["ok"] = True
-                res["detail"]["office"] = res["loaded"]
-                _set_readiness_cataloged(engine, well_info.get("inventory_id"))
-            elif any("No loader found" in e for e in _errs):
-                # recognised office type but no matching sub-loader for this
-                # file — report as ⚠ no-loader, not a hard error
-                res["note"] = "not_impl:OFFICE"
-            else:
-                res["errors"].extend(_errs)
-            return res
-
-        elif fext in LAS_EXTS:
-            # LAS self-parses here (one lasio.read → well header + per-curve
-            # metadata), so the pre-extracted `rows` arg is unused. We capture
-            # the WELL HEADER into cat_well (so promote can build dv_well) and
-            # one row per curve into cat_log_curve — curve *metadata* only
-            # (mnemonic / unit / description / API code / depth frame / sample
-            # count), never the bulk sample arrays. Those stay the deep stage's
-            # job; this is the cheap catalog-level mirror.
-            res["rt"] = "WELL_LOG"
-            try:
-                import lasio, uuid as _uuid
-                from datetime import datetime as _dt
-                try:
-                    from dataview.file_catalog.catalog_capture import capture as _cap
-                except ImportError:
-                    from dataview.file_catalog.catalog_capture import capture as _cap
-                _now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
-                inv = well_info.get("inventory_id")
-                las = lasio.read(fpath)
-
-                def _wv(*keys):
-                    for k in keys:
-                        try:
-                            v = str(las.well[k].value).strip()
-                            if v and v.lower() not in (
-                                    "", "unknown", "none", "--"):
-                                return v
-                        except Exception:
-                            pass
-                    return None
-
-                def _wnum(*keys):
-                    """Numeric LAS well value (lat/long) -> float in range, else None."""
-                    return _safe_coord(_wv(*keys))
-
-                # The LAS header carries the authoritative UWI in ~WELL
-                # (UWI. 17-031-10035-0000). Read and normalize it, and PREFER it
-                # over the caller's filename-derived uwi (which can be an FN_
-                # fallback). Mirrors worker_core._do_las so the pool path and this
-                # in-page path agree. Only keep the passed-in uwi if the header
-                # has none.
-                _hdr_uwi = _norm_uwi(_wv("UWI", "API", "APINUM", "APINO",
-                                         "API_NO", "WELLID"))
-                if _hdr_uwi:
-                    uwi = _hdr_uwi      # header UWI wins — real well identity
-
-                # 1) well header → cat_well (promote builds dv_well from this)
-                if uwi:
-                    try:
-                        _hn = _cap(engine, "cat_well", [{
-                            "WELL_NAME":        _wv("WELL") or uwi,
-                            "OPERATOR_NAME":    _wv("COMP", "PROV"),
-                            "FIELD_NAME":       _wv("FLD", "FIELD"),
-                            "PROVINCE_STATE":   _wv("STAT", "STATE"),
-                            "COUNTY":           _wv("CNTY", "COUNTY"),
-                            "COUNTRY":          _wv("CTRY", "CTRY.", "COUNTRY"),
-                            "SURFACE_LATITUDE":  _wnum("LATI", "LAT"),
-                            "SURFACE_LONGITUDE": _wnum("LONG", "LON"),
-                            "FINAL_TD":         _wv("STOP", "TD"),
-                            "ACTIVE_IND":       "Y",
-                            "ROW_QUALITY":      "FINAL",
-                            "PPDM_GUID":        str(_uuid.uuid4()),
-                            "ROW_CREATED_BY":   "DataWrangler",
-                            "ROW_CREATED_DATE": _now,
-                        }], uwi=uwi, inventory_id=inv,
-                           source_path=fpath, source="LAS_HEADER")
-                        if _hn:
-                            res["detail"]["cat_well"] = (
-                                res["detail"].get("cat_well", 0) + _hn)
-                    except Exception as _he:
-                        res["errors"].append(f"header capture: {_he}")
-
-                # depth frame from the LAS index (cheap; no arrays retained)
-                try:
-                    _idx = las.index
-                    d_start = float(_idx[0])  if len(_idx) else None
-                    d_stop  = float(_idx[-1]) if len(_idx) else None
-                    s_count = int(len(_idx))
-                except Exception:
-                    d_start = d_stop = None
-                    s_count = 0
-                d_step = _wv("STEP")
-                try:
-                    d_uom = (las.curves[0].unit or "").strip() or None
-                except Exception:
-                    d_uom = None
-
-                # Shared log identity for this LAS — both the log header
-                # (cat_well_log) and its curves (cat_well_log_curve) key on it,
-                # so curves resolve their FK to dv_well_log.log_id on promote.
-                _logid = _wv("LOG_ID", "LOGID") or f"{uwi}-LAS"
-
-                # 2) per-curve metadata → cat_well_log_curve (one row per curve,
-                # linked to the log run via log_id). PPDM well_log_curve grain:
-                # curves belong to a log run (dv_well_log) which belongs to a well.
-                # In a LAS ~Curve line `MNEM.UNIT  API_CODE : DESCRIPTION`, lasio
-                # maps API_CODE to curve.value and DESCRIPTION to .descr.
-                curve_rows = []
-                for i, c in enumerate(las.curves):
-                    mnem = (getattr(c, "mnemonic", "") or "").strip()
-                    if not mnem:
-                        continue
-                    curve_rows.append({
-                        "UWI":               uwi or None,
-                        "LOG_ID":            _logid,
-                        "CURVE_ID":          mnem[:40],
-                        "MNEMONIC":          mnem,
-                        "CURVE_DESCRIPTION": (getattr(c, "descr", "")
-                                              or "").strip() or None,
-                        "CURVE_UNIT":        (getattr(c, "unit", "")
-                                              or "").strip() or None,
-                        "TOP_DEPTH":         _safe_num(d_start),
-                        "BASE_DEPTH":        _safe_num(d_stop),
-                        "DEPTH_OUOM":        d_uom,
-                        "NULL_VALUE":        _safe_num(_wv("NULL")),
-                        "ACTIVE_IND":        "Y",
-                        "ROW_CREATED_BY":    "DataWrangler",
-                        "ROW_CREATED_DATE":  _now,
-                    })
-                if curve_rows:
-                    _cn = _cap(engine, "cat_well_log_curve", curve_rows,
-                               uwi=uwi, inventory_id=inv,
-                               source_path=fpath, source="LAS")
-                    res["loaded"] = res.get("loaded", 0) + (_cn or 0)
-                    if _cn:
-                        res["detail"]["cat_well_log_curve"] = _cn
-
-                # 3) log-file header → cat_well_log (one row per LAS). Reuses the
-                # depth frame / uom already computed for the curves and the same
-                # _logid the curves carry, so header and curves share one key.
-                if uwi:
-                    try:
-                        _logdt = _wv("DATE", "LOGDATE", "DATE_LOG")
-                        # Service company arrives as a raw name (e.g. HALLIBURTON)
-                        # from the LAS SRVC mnemonic. dv_well_log.service_company_ba_id
-                        # is an FK to dv_business_associate.ba_id, so a raw name would
-                        # 547 on promote. Until BA-seeding is wired (SHA1 ba_id, matching
-                        # entity_seeder), leave the FK NULL and keep the name in remark
-                        # so the provenance is preserved and auditable.
-                        _srvc = _wv("SRVC", "SERVICE", "COMP")
-                        _wlrow = {
-                            "LOG_ID":                _logid,
-                            "LOG_TYPE":              _wv("TYPE", "LOGTYPE"),
-                            "RUN_NUM":               _wv("RUN", "RUN_NUMBER"),
-                            "LOG_DATE":              _logdt,
-                            "SERVICE_COMPANY_BA_ID": None,
-                            "TOP_DEPTH":             _safe_num(d_start),
-                            "BASE_DEPTH":            _safe_num(d_stop),
-                            "DEPTH_OUOM":            d_uom,
-                            "NULL_VALUE":            _safe_num(_wv("NULL")),
-                            "FILE_PATH":             fpath,
-                            "FILE_FORMAT":           "LAS",
-                            "ACTIVE_IND":            "Y",
-                            "REMARK":                (f"service_company={_srvc}"
-                                                      if _srvc else None),
-                            "ROW_CREATED_BY":        "DataWrangler",
-                            "ROW_CREATED_DATE":      _now,
-                        }
-                        _wln = _cap(engine, "cat_well_log", [_wlrow],
-                                    uwi=uwi, inventory_id=inv,
-                                    source_path=fpath, source="LAS")
-                        if _wln:
-                            res["detail"]["cat_well_log"] = (
-                                res["detail"].get("cat_well_log", 0) + _wln)
-                    except Exception as _wle:
-                        res["errors"].append(f"well_log capture: {_wle}")
-
-                if res.get("loaded") or res["detail"]:
-                    res["ok"] = True
-                    _set_readiness_cataloged(engine, inv)
-                else:
-                    res["note"] = "las_empty"
-            except Exception as e:
-                res["errors"].append(str(e))
-            return res
-
-        else:
-            res["note"] = "unsupported"
-            return res
-
-    except Exception as e:
-        res["errors"].append(str(e))
-        return res
 
 
 def _do_load(engine, dialect, fpath, fext, uwi, rows):
@@ -2598,7 +2352,12 @@ def _wb_batch(engine, dialect, df):
             "_path": None,
             "_size": None,
         },
-        key="wb_batch_editor",
+        # Nonced: st.data_editor remembers ticks by row index, so after a load
+        # or a reject the boxes stayed checked against rows that had moved or
+        # gone. Bumping the nonce mints a fresh editor with everything cleared.
+        # (It also can't be reset by writing to the key — Streamlit forbids
+        # assigning to a widget key once the widget exists.)
+        key=f"wb_batch_editor_{st.session_state.get('wb_batch_nonce', 0)}",
     )
 
     _checked = _edited[_edited["Load"] == True].copy()
@@ -2616,22 +2375,38 @@ def _wb_batch(engine, dialect, df):
             type="primary", key="wb_batch_go",
             disabled=_loadable.empty):
         _run_batch_load(engine, dialect, _loadable)
-
-    # Per-file results report (persists across reruns until cleared / next load).
-    _render_batch_report()
+        # Capture changes readiness, so the list on screen is now stale and the
+        # ticks refer to work already done. Re-query and retire the editor —
+        # the per-file report is held in session state and survives the rerun.
+        st.session_state["wb_batch_nonce"] = (
+            st.session_state.get("wb_batch_nonce", 0) + 1)
+        _wb_run_search(engine)
+        st.rerun()
 
     # ── Mark checked files as bad ─────────────────────────────────────────────
+    # Sits directly under the Load button because both act on the SAME grid
+    # ticks — it used to render below the results report and the Excel
+    # expander, so ticking Bad appeared to do nothing until you scrolled
+    # past two other sections to find its button.
     # Fingerprint the rows ticked "Bad" so the next crawl skips them, and drop
     # them from the catalog now (shares _mark_bad with the interactive viewer).
     _bad = _edited[_edited["Bad"] == True].copy()
     if not _bad.empty:
         if "wb_batch_bad_reason" not in st.session_state:
             st.session_state["wb_batch_bad_reason"] = "junk / bad format"
-        rcol, bcol = st.columns([3, 1])
+        _bnonce = st.session_state.get("wb_batch_nonce", 0)
+        rcol, ccol, bcol = st.columns([3, 1, 1])
         rcol.text_input("Reason", key="wb_batch_bad_reason",
                         label_visibility="collapsed",
                         placeholder="why are these files bad?")
+        # Confirm gate: this deletes catalog rows and blocklists the files, and
+        # the batch grid can hold 500 of them. Nonced with the editor so it
+        # resets after each action without an illegal write to a widget key.
+        _bconfirm = ccol.checkbox("Confirm", key=f"wb_batch_bad_confirm_{_bnonce}",
+                                  help="Rejecting removes these files from the "
+                                       "catalog. Tick to enable.")
         if bcol.button(f"🚫 Mark {len(_bad)} bad", key="wb_batch_bad_btn",
+                       disabled=not _bconfirm,
                        help="Fingerprint these files as bad and remove them "
                             "from the catalog — the next crawl will skip them."):
             reason = st.session_state.get("wb_batch_bad_reason")
@@ -2649,8 +2424,173 @@ def _wb_batch(engine, dialect, df):
             if errs:
                 st.error("Some files could not be marked:\n- "
                          + "\n- ".join(errs[:10]))
-            st.session_state.pop("wb_results", None)
+            # Re-query rather than dropping the result set: the rejected rows
+            # are gone from the catalog so they vanish from the list, and
+            # everything else stays on screen instead of sending you back to
+            # the search form.
+            st.session_state["wb_batch_nonce"] = _bnonce + 1
+            _wb_run_search(engine)
             st.rerun()
+
+    # Per-file results report (persists across reruns until cleared / next load).
+    _render_batch_report()
+
+    # ── Export / Import batch selection (Excel) ───────────────────────────────
+    # Round-trip the batch candidate list through Excel: export every file in the
+    # current grid with Load / Bad flag columns (plus its UWI), curate offline,
+    # then import to drive the batch. Bad-flagged rows are marked bad + dropped;
+    # Load-flagged rows that carry a UWI are captured into cat_* via the SAME
+    # _run_batch_load path the button uses, so the per-file results report above
+    # is identical to a manual run. INVENTORY_ID / UWI export as TEXT so Excel
+    # can't reformat a 14-digit API into scientific notation.
+    with st.expander("📤 Export / 📥 Import batch selection (Excel)", expanded=False):
+        _bexp = _pd.DataFrame({
+            "INVENTORY_ID": df["INVENTORY_ID"].astype(str).values,
+            "FILE_NAME":    df["FILE_NAME"].astype(str).values,
+            "FILE_EXT":     df["FILE_EXT"].astype(str).values,
+            "WELL_NAME":    df.get("WELL_NAME", _pd.Series([""] * n))
+                              .fillna("").astype(str).values,
+            "MATCHED_UWI":  df["MATCHED_UWI"].fillna("").astype(str).values,
+            "FILE_PATH":    df["FILE_PATH"].astype(str).values,
+            "FILE_SIZE_KB": df.get("FILE_SIZE_KB", _pd.Series([""] * n))
+                              .fillna("").astype(str).values,
+            # Pre-fill Load for rows that already have a UWI (mirrors "Select ALL
+            # with a UWI"); Bad starts blank — tick the ones to discard.
+            "Load": ["Y" if str(u).strip() else ""
+                     for u in df["MATCHED_UWI"].fillna("")],
+            "Bad":  [""] * n,
+        })
+        try:
+            import io
+            from openpyxl.utils import get_column_letter
+            _bbuf = io.BytesIO()
+            with _pd.ExcelWriter(_bbuf, engine="openpyxl") as _bxw:
+                _bexp.to_excel(_bxw, index=False, sheet_name="batch")
+                _bws = _bxw.sheets["batch"]
+                _btext = {"INVENTORY_ID", "MATCHED_UWI"}
+                for _bi, _bname in enumerate(_bexp.columns, start=1):
+                    _bl = get_column_letter(_bi)
+                    _bw = _bexp[_bname].str.len().max()
+                    _bw = 12 if _pd.isna(_bw) else int(_bw)
+                    _bws.column_dimensions[_bl].width = min(max(10, _bw + 2), 60)
+                    if _bname in _btext:
+                        for _bc in _bws[_bl]:
+                            _bc.number_format = "@"
+                # make the FILE_NAME cell a clickable link to the file (target
+                # built from FILE_PATH; the path column stays plain text).
+                _bcl = list(_bexp.columns)
+                if "FILE_NAME" in _bcl and "FILE_PATH" in _bcl:
+                    from openpyxl.styles import Font as _Font
+                    _bnlet = get_column_letter(_bcl.index("FILE_NAME") + 1)
+                    _bplet = get_column_letter(_bcl.index("FILE_PATH") + 1)
+                    _blfont = _Font(color="0563C1", underline="single")
+                    for _bnc, _bpc in zip(_bws[_bnlet][1:], _bws[_bplet][1:]):
+                        _bu = _xl_file_uri(_bpc.value)
+                        if _bu:
+                            _bnc.hyperlink = _bu
+                            _bnc.font = _blfont
+                _bws.freeze_panes = "A2"
+            st.download_button(
+                "📤 Export batch grid to Excel",
+                data=_bbuf.getvalue(),
+                file_name=f"batch_selection_{datetime.now():%Y%m%d_%H%M}.xlsx",
+                mime=("application/vnd.openxmlformats-officedocument"
+                      ".spreadsheetml.sheet"),
+                use_container_width=True,
+                help="Set Load = Y to capture a file, Bad = Y to discard it "
+                     "(Bad wins if both). Load needs a UWI in that row. Don't "
+                     "edit INVENTORY_ID — it's how import finds the file.")
+        except Exception as _bxx:
+            st.error(f"Excel export unavailable ({type(_bxx).__name__}: {_bxx}). "
+                     "Needs openpyxl — `pip install openpyxl`.")
+
+        st.divider()
+
+        _bup = st.file_uploader("Import curated batch Excel", type=["xlsx"],
+                                key="wb_batch_xlsx",
+                                help="Applies Bad = Y (mark bad + drop from "
+                                     "catalog) and Load = Y (capture into cat_*) "
+                                     "per row, matched by INVENTORY_ID.")
+        st.text_input("Reason for Bad rows", value="junk / bad format",
+                      key="wb_batch_xlsx_reason")
+        if _bup is not None and st.button("📥 Run batch from file",
+                                          type="primary", key="wb_batch_import"):
+            try:
+                _bimp = _pd.read_excel(_bup, dtype=str)
+            except Exception as _brx:
+                st.error(f"Could not read workbook: {_brx}")
+                _bimp = None
+            if _bimp is not None:
+                _bimp.columns = [str(_c).strip() for _c in _bimp.columns]
+                _need = {"INVENTORY_ID", "FILE_PATH", "FILE_NAME", "FILE_EXT"}
+                _missing = _need - set(_bimp.columns)
+                if _missing:
+                    st.error("Workbook missing column(s): "
+                             + ", ".join(sorted(_missing))
+                             + " — export a fresh template above.")
+                else:
+                    for _c in ("MATCHED_UWI", "Load", "Bad", "FILE_SIZE_KB"):
+                        if _c not in _bimp.columns:
+                            _bimp[_c] = ""
+                    _bimp = _bimp.fillna("")
+
+                    def _yes(v):    # tolerant truthy for the flag columns
+                        return str(v or "").strip().lower() in (
+                            "y", "yes", "true", "1", "x", "✓")
+
+                    _reason = st.session_state.get("wb_batch_xlsx_reason") \
+                        or "junk / bad format"
+
+                    # Bad first — and a Bad row is never also loaded.
+                    _bad_rows = _bimp[_bimp["Bad"].map(_yes)]
+                    _bad_ids  = set(_bad_rows["INVENTORY_ID"].astype(str))
+                    n_bad, bad_errs = 0, []
+                    for _, br in _bad_rows.iterrows():
+                        try:
+                            _mark_bad(engine, str(br["INVENTORY_ID"]),
+                                      br["FILE_PATH"], br.get("FILE_NAME"),
+                                      _safe_int(br.get("FILE_SIZE_KB")), _reason)
+                            n_bad += 1
+                        except Exception as _e:
+                            bad_errs.append(f"{br.get('FILE_NAME', '')}: {_e}")
+
+                    # Load rows with a UWI → feed the same _run_batch_load path.
+                    _lr = _bimp[_bimp["Load"].map(_yes)].copy()
+                    _lr = _lr[~_lr["INVENTORY_ID"].astype(str).isin(_bad_ids)]
+                    _lr["UWI"] = _lr["MATCHED_UWI"].astype(str).str.strip()
+                    _skip_no_uwi = int((_lr["UWI"] == "").sum())
+                    _loadable = _lr[_lr["UWI"] != ""]
+
+                    if n_bad:
+                        st.success(f"Marked {n_bad} file(s) bad.")
+                    if bad_errs:
+                        st.error("Some Bad rows failed:\n- "
+                                 + "\n- ".join(bad_errs[:10]))
+                    if _skip_no_uwi:
+                        st.caption(f"{_skip_no_uwi} Load row(s) skipped — no UWI.")
+
+                    if not _loadable.empty:
+                        _feed = _pd.DataFrame({
+                            "_path": _loadable["FILE_PATH"].values,
+                            "Ext":   _loadable["FILE_EXT"].values,
+                            "UWI":   _loadable["UWI"].values,
+                            "File":  _loadable["FILE_NAME"].values,
+                            "_inv":  _loadable["INVENTORY_ID"].astype(str).values,
+                        })
+                        _run_batch_load(engine, dialect, _feed)   # sets the report
+                        # same post-action refresh as the manual button
+                        st.session_state["wb_batch_nonce"] = (
+                            st.session_state.get("wb_batch_nonce", 0) + 1)
+                        _wb_run_search(engine)
+                        st.rerun()      # re-enter so _render_batch_report shows it
+                    elif n_bad:
+                        st.session_state["wb_batch_nonce"] = (
+                            st.session_state.get("wb_batch_nonce", 0) + 1)
+                        _wb_run_search(engine)
+                        st.rerun()      # bad-only: refresh the grid like manual path
+                    else:
+                        st.info("Nothing to do — no Load=Y (with UWI) or "
+                                "Bad=Y rows in the sheet.")
 
     # Second table: resolve a UWI for the files in these results that don't
     # have one yet — guess + match against the reference well master.
@@ -2778,6 +2718,74 @@ _WB_REF_OPTIONS = {
     "WELL_REF.well_ref.well_master_gold":      "Full master (production)",
     "WELL_REF.well_ref.WELL_MASTER_MINI": "Mini master (demo / test)",
 }
+
+
+# Columns the reference lookups want. The two masters don't carry the same set —
+# the production gold table has no UWI or API_NUM — and a hardcoded SELECT fails
+# the whole lookup with "Invalid column name" rather than degrading. So the list
+# is reflected once per table and any column that isn't there is selected as
+# NULL under its own name, which keeps every downstream m.<COL> access working
+# without a single conditional at the call sites.
+_WB_REF_WANT = ("WELL_NAME", "UWI14", "UWI", "API_NUM", "OPERATOR_NAME",
+                "TOTAL_DEPTH", "SPUD_DATE", "COUNTY", "PROVINCE_STATE")
+
+# WHERE clauses key on these, so their absence isn't recoverable by aliasing.
+_WB_REF_REQUIRED = ("WELL_NAME", "UWI14")
+
+
+def _wb_ref_columns(engine, ref: str) -> set:
+    """Actual column names on a db.schema.table reference master, cached.
+
+    Reads the REFERENCED database's own sys.* (three-part name), so it works
+    across databases on the same instance without a linked server.
+    """
+    _cache = st.session_state.setdefault("_wb_ref_cols", {})
+    if ref in _cache:
+        return _cache[ref]
+    from sqlalchemy import text as _t
+    parts = [p.strip("[]") for p in str(ref).split(".")]
+    if len(parts) == 3:
+        db, sch, tbl = parts
+    elif len(parts) == 2:
+        db, sch, tbl = None, parts[0], parts[1]
+    else:
+        db, sch, tbl = None, "dbo", parts[-1]
+    pfx = f"[{db}]." if db else ""
+    cols = set()
+    try:
+        with engine.connect() as con:
+            rows = con.execute(_t(
+                f"SELECT c.name FROM {pfx}sys.columns c "
+                f"JOIN {pfx}sys.objects o ON o.object_id = c.object_id "
+                f"JOIN {pfx}sys.schemas s ON s.schema_id = o.schema_id "
+                f"WHERE s.name = :s AND o.name = :t"),
+                {"s": sch, "t": tbl}).fetchall()
+        cols = {r[0].upper() for r in rows}
+    except Exception:
+        cols = set()                     # unreadable → caller falls back
+    _cache[ref] = cols
+    return cols
+
+
+def _wb_ref_select(engine, ref: str) -> str:
+    """SELECT list for `ref`: real columns as themselves, absent ones as NULL.
+
+    Falls back to the full list when reflection fails, so a permissions problem
+    on sys.* behaves exactly as before rather than silently nulling everything.
+    """
+    have = _wb_ref_columns(engine, ref)
+    if not have:
+        return ", ".join(_WB_REF_WANT)
+    return ", ".join(c if c in have else f"CAST(NULL AS NVARCHAR(1)) AS {c}"
+                     for c in _WB_REF_WANT)
+
+
+def _wb_ref_missing_required(engine, ref: str):
+    """Required columns the reference master doesn't have — [] when fine."""
+    have = _wb_ref_columns(engine, ref)
+    if not have:
+        return []
+    return [c for c in _WB_REF_REQUIRED if c not in have]
 
 
 def _wb_ref() -> str:
@@ -2921,8 +2929,13 @@ def _wb_um_match(engine, inputs, _pi):
     names = sorted({nm for *_x, nm, _u in cur if nm})
     uwis  = sorted({u for *_x, _nm, u in cur if u})
 
-    cols = ("WELL_NAME, UWI14, UWI, API_NUM, OPERATOR_NAME, "
-            "TOTAL_DEPTH, SPUD_DATE, COUNTY, PROVINCE_STATE")
+    _missing = _wb_ref_missing_required(engine, _wb_ref())
+    if _missing:
+        st.error(f"Reference master `{_wb_ref()}` has no "
+                 + ", ".join(_missing)
+                 + " column — name/UWI matching can't run against it.")
+        return
+    cols = _wb_ref_select(engine, _wb_ref())
     name_map, uwi_map = {}, {}
     try:
         with engine.connect() as con:
@@ -3735,8 +3748,286 @@ def _tab_pipeline(engine, dialect):
 
     _pipeline_report(engine)
 
+    _seismic_coverage(engine)
+
     st.divider()
     _pipeline_clear(engine, dialect)
+
+
+# Words that signal a CRS statement in a free-text seismic header. SEG-Y Rev 0/1
+# have NO CRS field, so the projection — if recorded at all — is prose in the
+# 3200-byte textual header, phrased however the processor felt like it.
+_CRS_HINT_WORDS = (
+    "UTM", "ZONE", "DATUM", "PROJECTION", "SPHEROID", "ELLIPSOID", "MERIDIAN",
+    "EPSG", "WGS", "ED50", "ED 50", "NAD", "GDA", "AGD", "NZGD", "AMG", "MGA",
+    "CLARKE", "BESSEL", "INTERNATIONAL", "GEODETIC", "GRID", "EASTING",
+    "NORTHING", "LAMBERT", "MERCATOR", "STEREOGRAPHIC", "COORDINATE",
+)
+
+
+def _seis_text_header(path, max_lines=45):
+    """The file's own header text, as lines — the primary place a CRS hides.
+
+    SEG-Y: the 3200-byte textual header, 40 lines x 80 chars. It is EBCDIC by
+    the standard but ASCII in plenty of real files, so both are decoded and the
+    one yielding more printable characters wins.
+
+    P1/90: the leading 'H' records, which unlike SEG-Y DO state the CRS
+    formally — H1400/H1500 datum + spheroid, H1800 projection code, H1900 zone.
+    """
+    import os as _os
+    ext = _os.path.splitext(path)[1].lower()
+    if ext in (".p190", ".p90", ".p1"):
+        out = []
+        with open(path, "r", errors="replace") as fh:
+            for line in fh:
+                if line[:1].upper() != "H":
+                    break
+                out.append(line.rstrip("\r\n"))
+                if len(out) >= max_lines * 2:
+                    break
+        return out
+    with open(path, "rb") as fh:
+        raw = fh.read(3200)
+    best, best_score = "", -1
+    for enc in ("cp037", "ascii", "latin-1"):      # cp037 = EBCDIC
+        try:
+            s = raw.decode(enc, errors="replace")
+        except Exception:
+            continue
+        score = sum(1 for ch in s if ch.isprintable() or ch in " \n\t")
+        if score > best_score:
+            best, best_score = s, score
+    lines = [best[i:i + 80].rstrip() for i in range(0, len(best), 80)]
+    return [ln for ln in lines][:max_lines]
+
+
+def _seismic_coverage(engine):
+    """Georeferencing status for every SEG-Y / P190 in the catalog, plus the two
+    controls needed to act on it.
+
+    WHY THIS EXISTS: a seismic file only reaches the map if FILE_SEIS_HEADER
+    holds geometry — a SURVEY_OUTLINE polygon or a complete BBOX_* set. When it
+    doesn't, there are two very different causes that look identical in the UI
+    but need opposite fixes, and the extractor leaves a fingerprint that tells
+    them apart:
+
+      EPSG_CODE NULL + no bbox  -> the trace headers DO carry coordinates, but
+                                   they're projected and nothing declares the
+                                   CRS. Supply one and re-extract.
+      EPSG_CODE 4326 + no bbox  -> the headers carry NO coordinates at all (with
+                                   no points sampled the geographic branch runs
+                                   vacuously and stamps 4326). A CRS cannot help;
+                                   this needs a companion P190 or shapefile.
+
+    Grouped by FOLDER because that is the unit a CRS applies to — one UTM zone
+    per directory is the normal shape of a seismic archive, and DV_SEGY_EPSG is
+    global to a run.
+    """
+    import os as _os
+    import pandas as pd
+    from sqlalchemy import text as _t
+
+    with st.expander("📡 Seismic coverage — georeferencing status", expanded=False):
+        _SEIS_EXTS = ("'.segy'", "'.sgy'", "'.seg'", "'.p190'", "'.p90'", "'.p1'")
+        try:
+            with engine.connect() as _c:
+                df = pd.read_sql(_t(f"""
+                    SELECT
+                      LEFT(g.FILE_PATH,
+                           LEN(g.FILE_PATH) - CHARINDEX('\\', REVERSE(g.FILE_PATH))
+                          ) AS folder,
+                      COUNT(*) AS files,
+                      SUM(CASE WHEN sh.SURVEY_OUTLINE IS NOT NULL
+                                 OR TRY_CAST(sh.BBOX_MIN_LAT AS float) IS NOT NULL
+                               THEN 1 ELSE 0 END) AS mapped,
+                      SUM(CASE WHEN sh.INVENTORY_ID IS NOT NULL
+                                AND sh.SURVEY_OUTLINE IS NULL
+                                AND TRY_CAST(sh.BBOX_MIN_LAT AS float) IS NULL
+                                AND sh.EPSG_CODE IS NULL
+                               THEN 1 ELSE 0 END) AS needs_crs,
+                      SUM(CASE WHEN sh.SURVEY_OUTLINE IS NULL
+                                AND TRY_CAST(sh.BBOX_MIN_LAT AS float) IS NULL
+                                AND sh.EPSG_CODE IS NOT NULL
+                               THEN 1 ELSE 0 END) AS no_coords,
+                      SUM(CASE WHEN sh.INVENTORY_ID IS NULL
+                               THEN 1 ELSE 0 END) AS never_extracted,
+                      MIN(sh.EPSG_CODE)            AS epsg_min,
+                      COUNT(DISTINCT sh.EPSG_CODE) AS epsg_n
+                    FROM file_catalog.GLOBAL_FILE_CATALOG g
+                    LEFT JOIN file_catalog.FILE_SEIS_HEADER sh
+                           ON sh.INVENTORY_ID = g.INVENTORY_ID
+                    WHERE LOWER(g.FILE_EXT) IN ({",".join(_SEIS_EXTS)})
+                    GROUP BY LEFT(g.FILE_PATH,
+                             LEN(g.FILE_PATH) - CHARINDEX('\\', REVERSE(g.FILE_PATH)))
+                """), _c)
+        except Exception as _e:
+            st.caption(f"(coverage unavailable: {str(_e)[:140]})")
+            return
+
+        if df.empty:
+            st.caption("No seismic files catalogued yet.")
+            return
+
+        for _c2 in ("files", "mapped", "needs_crs", "no_coords", "never_extracted"):
+            df[_c2] = pd.to_numeric(df[_c2], errors="coerce").fillna(0).astype(int)
+        df = df.sort_values(["needs_crs", "files"], ascending=False).reset_index(drop=True)
+
+        tot, mp = int(df["files"].sum()), int(df["mapped"].sum())
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Seismic files", f"{tot:,}")
+        m2.metric("On the map", f"{mp:,}",
+                  delta=f"{(mp / tot * 100):.0f}%" if tot else None,
+                  delta_color="off")
+        m3.metric("Need a CRS", f"{int(df['needs_crs'].sum()):,}")
+        m4.metric("No coordinates", f"{int(df['no_coords'].sum()):,}")
+
+        _show = df.copy()
+        # The full path is often 150+ chars and swamps the grid, so lead with
+        # the leaf folder name and keep the full path as the last column for
+        # copy/paste.
+        # RENAME FIRST: the SQL already aliases a column "folder", and
+        # DataFrame.insert refuses a name that exists — that raises
+        # "cannot insert folder, already exists".
+        _show = _show.rename(columns={"folder": "path"})
+        _show.insert(0, "folder",
+                     [str(p).rstrip("\\/").split("\\")[-1].split("/")[-1] or str(p)
+                      for p in _show["path"]])
+        def _epsg_cell(v, n):
+            """NaN-safe: pandas turns a NULL EPSG into float('nan'), which is
+            TRUTHY — so a plain `if not v` prints the literal 'nan', and
+            int(nan) raises. Both are guarded here."""
+            try:
+                blank = v is None or pd.isna(v) or not str(v).strip()
+            except (TypeError, ValueError):
+                blank = not str(v).strip()
+            if blank:
+                return "—"
+            try:
+                n = int(n)
+            except (TypeError, ValueError):
+                n = 1
+            return f"{v}" if n <= 1 else f"{v} (+{n - 1} more)"
+
+        _show["epsg"] = [_epsg_cell(r.epsg_min, r.epsg_n) for r in df.itertuples()]
+        _show.insert(0, "", ["✅" if r.needs_crs == 0 and r.no_coords == 0
+                             else "🧭" if r.needs_crs else "∅"
+                             for r in df.itertuples()])
+        _cols = ["", "folder", "files", "mapped", "needs_crs", "no_coords",
+                 "never_extracted", "epsg", "path"]
+        st.dataframe(_show[[c for c in _cols if c in _show.columns]],
+                     hide_index=True, use_container_width=True)
+        st.caption("✅ fully mapped · 🧭 has coordinates but no CRS — fixable below · "
+                   "∅ no coordinates in the headers at all — needs a companion "
+                   "P190 or shapefile, a CRS won't help. "
+                   "**epsg** is what extraction actually resolved; blank means "
+                   "nothing declared one.")
+
+        st.divider()
+
+        # ── control 0: find out WHAT the CRS is, by reading the file ─────────
+        # The fallback field below is useless until you know which EPSG to type.
+        # SEG-Y Rev 0/1 have no CRS field, so if it's recorded anywhere it is
+        # prose in the 3200-byte textual header — which the _epsg_hint regex may
+        # not match even when a human can read it plainly. P1/90 is better: its
+        # H records state datum and projection formally.
+        st.markdown("**① Find the CRS** — read the header of a file that needs one")
+        try:
+            with engine.connect() as _c4:
+                _cand = [r[0] for r in _c4.execute(_t(f"""
+                    SELECT TOP 200 g.FILE_PATH
+                      FROM file_catalog.GLOBAL_FILE_CATALOG g
+                      LEFT JOIN file_catalog.FILE_SEIS_HEADER sh
+                             ON sh.INVENTORY_ID = g.INVENTORY_ID
+                     WHERE LOWER(g.FILE_EXT) IN ({",".join(_SEIS_EXTS)})
+                     ORDER BY CASE WHEN sh.EPSG_CODE IS NULL THEN 0 ELSE 1 END,
+                              g.FILE_PATH
+                """)).fetchall()]
+        except Exception:
+            _cand = []
+        if _cand:
+            _pickf = st.selectbox(
+                "File to inspect (those missing a CRS are listed first)",
+                _cand, key="wb_segy_peek_file",
+                format_func=lambda p: str(p).split("\\")[-1].split("/")[-1])
+            if st.button("🔍 Show text header", key="wb_segy_peek"):
+                try:
+                    _lines = _seis_text_header(_pickf)
+                    _hits = [ln for ln in _lines
+                             if any(w in ln.upper() for w in _CRS_HINT_WORDS)]
+                    if _hits:
+                        st.markdown("**Lines mentioning a coordinate system:**")
+                        st.code("\n".join(_hits), language=None)
+                    else:
+                        st.warning("No coordinate-system wording found in this "
+                                   "header — the CRS will have to come from the "
+                                   "survey report, a companion P190/shapefile, "
+                                   "or the data provider.")
+                    with st.expander("Full header", expanded=False):
+                        st.code("\n".join(_lines), language=None)
+                    st.caption(str(_pickf))
+                except Exception as _pe:
+                    st.error(f"Could not read header: {str(_pe)[:160]}")
+
+        st.divider()
+        st.markdown("**② Arm the CRS** for files whose header declares none")
+
+        # ── control 1: the fallback CRS, as a visible field ──────────────────
+        # This replaces setting DV_SEGY_EPSG in the shell. An environment
+        # variable can only be read by a process that already had it at launch,
+        # so setting it after Streamlit started silently did nothing — a control
+        # whose failure is invisible. Writing os.environ here means the value is
+        # in place before the run spawns its pool, and children inherit it.
+        c1, c2 = st.columns([2, 1])
+        _cur = st.session_state.get("wb_segy_epsg", _os.environ.get("DV_SEGY_EPSG", ""))
+        _val = c1.text_input(
+            "Fallback CRS for SEG-Y with no CRS in the header (EPSG)",
+            value=_cur, key="wb_segy_epsg",
+            placeholder="e.g. 32754  (WGS84 / UTM zone 54S)",
+            help="Applied ONLY to files whose text header declares no CRS — a "
+                 "declared one always wins. This is normal for SEG-Y: Rev 0/1 "
+                 "have no CRS field at all, so the projection usually comes "
+                 "from the survey report, not the file. One CRS per run, so "
+                 "re-extract one zone's folder at a time.")
+        _clean = "".join(ch for ch in str(_val or "") if ch.isdigit())
+        if _clean:
+            _os.environ["DV_SEGY_EPSG"] = _clean
+            c2.success(f"EPSG {_clean} armed")
+        else:
+            _os.environ.pop("DV_SEGY_EPSG", None)
+            c2.caption("No fallback CRS set.")
+
+        # ── control 2: force re-extract ──────────────────────────────────────
+        # HEADER_EXTRACTED='Y' is CONTENT-based idempotency, so a parser change
+        # or a new CRS never invalidates it — without this the next run silently
+        # skips every file you just fixed.
+        st.markdown("**③ Re-extract** so the change takes effect")
+        _folders = ["(all seismic)"] + list(df["folder"])
+        f1, f2 = st.columns([3, 1])
+        _pick = f1.selectbox("Re-extract which folder?", _folders,
+                             key="wb_segy_reextract_folder",
+                             help="Clears HEADER_EXTRACTED so the next run "
+                                  "re-parses these files. Needed after any "
+                                  "extractor change or CRS change — the stamp "
+                                  "keys on file content, not on your settings.")
+        if f2.button("🔄 Arm re-extract", key="wb_segy_reextract"):
+            try:
+                _sql = (f"UPDATE file_catalog.GLOBAL_FILE_CATALOG "
+                        f"SET HEADER_EXTRACTED='N', ROW_CHANGED_DATE=GETUTCDATE() "
+                        f"WHERE LOWER(FILE_EXT) IN ({','.join(_SEIS_EXTS)})")
+                _p = {}
+                if _pick != "(all seismic)":
+                    # ESCAPE '\' so a folder containing _ or % (common in survey
+                    # names) is matched literally rather than as a wildcard.
+                    _sql += " AND FILE_PATH LIKE :fp ESCAPE '\\'"
+                    _p["fp"] = (_pick.replace("\\", "\\\\").replace("%", "\\%")
+                                .replace("_", "\\_").replace("[", "\\[")) + "%"
+                with engine.begin() as _c3:
+                    _n = _c3.execute(_t(_sql), _p).rowcount
+                st.success(f"{_n:,} file(s) armed — run the pipeline with "
+                           f"Inventory + Capture off and Extract on to re-parse.")
+            except Exception as _e2:
+                st.error(f"Could not arm re-extract: {str(_e2)[:160]}")
 
 
 def _pipeline_report(engine):
@@ -3770,70 +4061,23 @@ def _pipeline_report(engine):
                          use_container_width=True):
             return
 
-        # detail tables: (cat_ staged, dv_ promoted, label). captured = rows in
-        # cat_ OR dv_ ; promoted = rows in dv_. dv_ tables carry INVENTORY_ID.
-        _DETAIL = [
-            ("cat_well", "dv_well", "header"),
-            ("cat_well_dir_srvy_sta", "dv_well_dir_srvy_sta", "survey"),
-            ("cat_well_formation_top", "dv_well_formation_top", "tops"),
-            ("cat_well_dst", "dv_well_dst", "welltest"),
-            ("cat_well_completion", "dv_well_completion", "completion"),
-            ("cat_prod_volume", "dv_prod_volume", "production"),
-            ("cat_well_petro_interp", "dv_well_petro_interp", "petro"),
-            ("cat_well_core", "dv_well_core", "core"),
-            ("cat_well_log", "dv_well_log", "log"),
-            ("cat_well_log_curve", "dv_well_log_curve", "curves"),
-        ]
+        # Lineage comes from promotion_lineage, so this report, the aggregate
+        # scorecard above and pipeline_run's run report all answer "did this
+        # file's data land?" identically. It used to keep its own table list,
+        # which drifted: this one counted dv_well and dv_well_petro_interp, the
+        # aggregate counted dv_prod_entity and dv_well_dir_srvy_hdr, and neither
+        # counted what the other did.
+        #
+        # It is also ONE query now. The previous version ran two COUNT(*) per
+        # table per file — ~24 round-trips a file, ~38,000 on a 1,600-file
+        # catalog — which is why it needed a button and a this-crawl-only
+        # default. Each lineage table is now aggregated once and LEFT JOINed.
+        from dataview.file_catalog import promotion_lineage as _lin
         try:
-            with engine.connect() as con:
-                where, params = ["1=1"], {}
-                if scsel and scsel != _ALL:
-                    where.append("g.ROOT_PATH = :root"); params["root"] = scsel
-                if this_crawl:
-                    where.append(
-                        "CAST(g.SCAN_DATE AS date) = CAST(GETDATE() AS date)")
-                base = con.execute(_t(f"""
-                    SELECT g.FILE_NAME, g.INVENTORY_ID,
-                           NULLIF(LTRIM(RTRIM(g.MATCHED_UWI)),'') AS uwi,
-                           g.HEADER_EXTRACTED, wh.REPORT_TYPE
-                    FROM file_catalog.GLOBAL_FILE_CATALOG g
-                    LEFT JOIN file_catalog.FILE_WELL_HEADER wh
-                           ON wh.INVENTORY_ID = g.INVENTORY_ID
-                    WHERE {' AND '.join(where)}
-                    ORDER BY g.FILE_NAME
-                """), params).fetchall()
-
-                def _cnt(tbl, inv):
-                    try:
-                        return con.execute(_t(
-                            f"SELECT COUNT(*) FROM {tbl} WHERE INVENTORY_ID=:i"),
-                            {"i": inv}).scalar() or 0
-                    except Exception:
-                        return 0
-
-                rows = []
-                for fn, inv, uwi, hx, rtype in base:
-                    extracted = ("Y" if hx == "Y" else
-                                 "ERR" if hx == "E" else
-                                 "skip" if hx == "S" else "N")
-                    cap = prom = 0; detail = []
-                    for cat, dv, label in _DETAIL:
-                        n_dv = _cnt("dataview." + dv, inv)
-                        n_ct = _cnt("file_catalog." + cat, inv)
-                        if n_dv:
-                            prom += n_dv; cap += n_dv; detail.append(f"{label}:{n_dv}")
-                        elif n_ct:
-                            cap += n_ct; detail.append(f"{label}:{n_ct}(staged)")
-                    rows.append({
-                        "file": fn,
-                        "type": rtype or "?",
-                        "extract": extracted,
-                        "capture": "Y" if cap else "N",
-                        "promote": "Y" if prom else "N",
-                        "uwi": uwi or "",
-                        "detail": " ".join(detail) if detail else "no detail rows",
-                    })
-                df = pd.DataFrame(rows)
+            df = _lin.file_detail(
+                engine,
+                root=(None if (not scsel or scsel == _ALL) else scsel),
+                this_crawl=bool(this_crawl))
         except Exception as e:
             st.error(f"Scorecard failed: {type(e).__name__}: {e}")
             return
@@ -3850,21 +4094,65 @@ def _pipeline_report(engine):
         m2.metric("Extracted", n_ext)
         m3.metric("Captured", n_cap)
         m4.metric("Promoted", n_prom)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        st.caption("captured=Y means data reached cat_* or dv_*; promoted=Y means it "
-                   "reached dv_*. A promoted file shows captured=Y even though cat_* is "
-                   "drained by promote — that's expected.")
+        # Per-extension rollup first — it's the view that answers "did the LAS
+        # files load?" without scrolling a thousand rows.
+        try:
+            _roll = df.groupby("ext").agg(
+                files=("file", "size"),
+                extracted=("extract", lambda c: int((c == "Y").sum())),
+                captured=("capture", lambda c: int((c == "Y").sum())),
+                promoted=("promote", lambda c: int((c == "Y").sum())),
+            ).reset_index().sort_values("files", ascending=False)
+            st.markdown("**By extension**")
+            st.dataframe(_roll, use_container_width=True, hide_index=True)
+        except Exception:
+            pass
+        st.markdown("**Per file**")
+        # `path` is carried for the Excel hyperlink, not for reading on screen —
+        # a full Windows path per row would push every useful column off the
+        # right edge. It's in the download.
+        st.dataframe(df.drop(columns=["path"], errors="ignore"),
+                     use_container_width=True, hide_index=True)
+        st.caption("captured=Y means rows reached cat_* or dv_*; promoted=Y means "
+                   "they reached dv_*. Credit follows INVENTORY_ID lineage, so "
+                   "LAS/DLIS/LIS show promoted from dv_well_log(_curve) and SEG-Y "
+                   "from its survey in dv_seis_set, neither of which ever gets a "
+                   "PROMOTED_AT stamp. A promoted file shows captured=Y even "
+                   "though promote drains cat_* — that's expected.")
 
         import time as _tm
+        _ts = _tm.strftime("%Y%m%d_%H%M%S")
         _rdir = st.session_state.get("fp_report", r"C:\Bulk\reports")
         try:
             os.makedirs(_rdir, exist_ok=True)
-            _ts = _tm.strftime("%Y%m%d_%H%M%S")
             _path = os.path.join(_rdir, f"stage_scorecard_{_ts}.csv")
             df.to_csv(_path, index=False)
             st.success(f"Scorecard written to `{_path}`")
         except Exception as e:
             st.warning(f"Shown above; CSV write failed: {type(e).__name__}: {e}")
+
+        # ── Excel export, file name clickable ────────────────────────────────
+        # Same convention as the Browse & View exports: the FILE NAME cell is
+        # the link and the path column stays plain text, so the sheet reads
+        # cleanly and the long path is still there to copy. Offered as a
+        # download rather than only a disk write, because the reports folder is
+        # on the server and whoever is reading the screen may not be.
+        try:
+            _xl = _scorecard_xlsx(df)
+        except ImportError:
+            _xl = None
+            st.caption("Excel export needs openpyxl — `pip install openpyxl`. "
+                       "The CSV above is unaffected.")
+        except Exception as _xe:
+            _xl = None
+            st.caption(f"Excel export unavailable: {type(_xe).__name__}: {_xe}")
+        if _xl:
+            st.download_button(
+                "⬇ Download Excel (file names clickable)", data=_xl,
+                file_name=f"stage_scorecard_{_ts}.xlsx",
+                mime=("application/vnd.openxmlformats-officedocument"
+                      ".spreadsheetml.sheet"),
+                key="score_xlsx", use_container_width=True)
 
 
 _PIPE_STAGES = ["scan", "extract", "enrich", "triage",
@@ -4066,7 +4354,14 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
         with st.container():
             fp1, fp2, fp3 = st.columns(3)
             fp_root  = fp1.text_input("Scan root folder", value="", key="fp_root",
-                                      placeholder=r"D:\data")
+                                      placeholder=r"D:\data",
+                                      help="Quotes and doubled separators are cleaned. A path pasted from JSON or a SQL result often has \\\\ in it, which Windows opens fine but which would catalog every file a second time.")
+            # NORMALISE BEFORE IT REACHES ANYTHING. A doubled-separator root
+            # scans correctly and silently duplicates the whole catalog,
+            # because the id is a hash of the path string. Explorer's
+            # "Copy as path" quotes are stripped for the same reason the
+            # loader boxes strip them.
+            fp_root = _canon_root(fp_root)
             fp_vault = fp2.text_input("Vault root", value=r"C:\Bulk\Vault",
                                       key="fp_vault")
             fp_report = fp3.text_input("Report root", value=r"C:\Bulk\reports",
@@ -4101,6 +4396,36 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
                 value=int(st.session_state.get("fp_workers", 6)),
                 step=1, key="fp_workers",
                 help="Parallel parse workers for the extract stage.")
+            # THE RECOGNISER STAGE HAS EXISTED SINCE JULY AND NOTHING TURNED
+            # IT ON. pipeline_run._stage_recognise is complete and wired into
+            # run_pipeline — but the parameter defaults to False and this page
+            # never passed it, so every run used the classifier plus the
+            # per-format extractors. That is why a scout ticket reads its
+            # casing table 8/8 in the Document Assistant and reported "no
+            # detail rows" here: two readers on the same document, and the
+            # good one was never asked.
+            fp_recognise = ccol.checkbox(
+                "🔍 Use the recogniser for capture",
+                value=bool(st.session_state.get("fp_recognise", True)),
+                key="fp_recognise",
+                help="Read tables with the document vocabulary instead of the "
+                     "per-format extractors. Covers scout tickets, casing "
+                     "records and end-of-well reports — the extractors only "
+                     "handle the formats somebody wrote a handler for.")
+            fp_force = ccol.checkbox(
+                "♻ Force re-extract (ignore what is already catalogued)",
+                value=bool(st.session_state.get("fp_force", False)),
+                key="fp_force",
+                help="Normally a file that is already CATALOGED with an "
+                     "unchanged hash is passed over — right for a re-run over "
+                     "a big tree, wrong the moment the CODE changes. 1,638 LAS "
+                     "files sat skipped as 'already done' while no stage had "
+                     "ever processed them, and the only way back in was a "
+                     "hand-written DELETE. Files you explicitly SKIPPED stay "
+                     "skipped: this ignores 'already processed', not 'leave "
+                     "this alone'. SCOPED TO THE SCAN ROOT above — forcing "
+                     "re-processes that folder, not every tree the catalog "
+                     "has ever seen.")
             fp_multicore = ccol.checkbox(
                 "⚡ Use all CPU cores (multi-core parse)",
                 value=bool(st.session_state.get("fp_multicore", True)),  # default: multi-core ON
@@ -4139,15 +4464,29 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
             if t.strip()
         } or None
         if fp_exts_sel:
-            _unknown = sorted(e for e in fp_exts_sel if e not in KNOWN_EXTS)
+            # Tabular types are refused outright, not merely warned about. The
+            # File Catalog has no CSV/Excel extractor, so honouring the request
+            # would inventory rows that can never be extracted — they'd show as
+            # "pending" on every future run and never clear. Drop them from the
+            # set so the run proceeds with whatever else was asked for.
+            _tab = sorted(e for e in fp_exts_sel if e in TABULAR_EXTS)
+            if _tab:
+                fp_exts_sel = {e for e in fp_exts_sel if e not in TABULAR_EXTS}
+                st.error(
+                    "Not scanned here: " + ", ".join(_tab) + ". Delimited and "
+                    "spreadsheet tables load through the **Bulk Tabular "
+                    "Loader**, which maps columns and resolves foreign keys. "
+                    "Cataloguing them would only create inventory rows with no "
+                    "extractor behind them.")
+                if not fp_exts_sel:
+                    fp_exts_sel = None
+            _unknown = sorted(e for e in (fp_exts_sel or ()) if e not in KNOWN_EXTS)
             if _unknown:
                 st.warning("Not a known type (will match nothing): "
                            + ", ".join(_unknown))
-            _optin = sorted(e for e in fp_exts_sel if e in CSV_EXTS)
-            if _optin:
-                st.caption("CSV is opt-in — scanning delimited tables because "
-                           "you listed " + ", ".join(_optin) + " explicitly.")
-            st.caption("This run is limited to: " + ", ".join(sorted(fp_exts_sel)))
+            if fp_exts_sel:
+                st.caption("This run is limited to: "
+                           + ", ".join(sorted(fp_exts_sel)))
 
         # Enrich always runs (core to the chain). The per-batch stall watchdog is
         # fixed at 180s; Max-files / Sample-N were retired from the UI (CLI only).
@@ -4208,6 +4547,9 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
                     "do_scan":  bool(fp_inventory),
                     "do_enrich": True,
                     "do_capture": bool(fp_capture),
+                    "recognise": bool(fp_recognise),
+                    "pack": "petroleum",
+                    "force": bool(fp_force),
                     "inventory_only": not bool(fp_capture),
                     "do_vault": bool(fp_vaulton),
                     "vault_root": fp_vault.strip(),
@@ -4265,7 +4607,9 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
                             _inv=fp_inventory, _workers=int(fp_workers),
                             _report=fp_report.strip() or None,
                             _batch=(int(fp_batch_size) if fp_batch else None),
-                            _dialect=dialect):
+                            _dialect=dialect,
+                            _rec=bool(fp_recognise),
+                            _force=bool(fp_force)):
                     try:
                         _common = dict(
                             workers=_workers, do_enrich=True,
@@ -4276,6 +4620,7 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
                             per_type_cap=None, stall_timeout=_STALL_TIMEOUT,
                             should_abort=_ev.is_set, ref=REF,
                             parse_mode=("process" if fp_multicore else "thread"),
+                            force=_force,
                             report_root=_report, log=_log_buf.append)
                         if _batch:
                             _state = _pl.run_pipeline_batched(
@@ -4286,7 +4631,8 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
                                 _engine, _root, exts=_exts,
                                 do_scan=_inv,
                                 inventory_only=not _cap,  # Capture off ⇒ stop after inventory
-                                max_files=None, **_common)
+                                recognise=_rec, pack="petroleum",
+                                max_files=None, **_common)   # force is in _common
                         _result["ok"] = True
                         _result["state"] = _state or {}
                     except Exception as e:
@@ -4453,9 +4799,25 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
             st.caption(f"(per-run scorecard unavailable: {str(_rsx)[:100]})")
 
         # keep polling AFTER the scorecard renders, so each cycle shows fresh numbers
+        #
+        # POLL INTERVAL — this is what makes the page pulse. st.rerun() redraws
+        # the WHOLE hero (controls, toggles, timing, both scorecards) and
+        # Streamlit dims stale elements for the duration of every rerun, so a
+        # 0.5s loop means the page dims twice a second for the length of the
+        # run. Nothing here needs half-second granularity: a run is minutes
+        # long and the scorecard behind it only re-aggregates every 5s anyway.
+        #
+        # Fast for the first few seconds so starting the run feels responsive,
+        # then back off — 4x fewer redraws, and the numbers still move well
+        # inside human reaction time.
         if st.session_state.get("fp_running"):
-            _t_mod.sleep(0.5)
+            _started = st.session_state.get("fp_poll_t0")
+            if _started is None:
+                _started = st.session_state["fp_poll_t0"] = _t_mod.monotonic()
+            _t_mod.sleep(0.5 if (_t_mod.monotonic() - _started) < 5.0 else 2.0)
             st.rerun()
+        else:
+            st.session_state.pop("fp_poll_t0", None)   # reset for the next run
 
 
 
@@ -4492,91 +4854,54 @@ def _inventory_scorecard(engine):
         except Exception:
             pass                                  # perf aid only — never block on it
         _CATALOG_COLS_ENSURED = True
-    # Seismic skips the cat_* / PROMOTED_AT path entirely: a SEG-Y line file is
-    # "cataloged" + "promoted" once its survey name has been merged into
-    # dataview.dv_seis_set. Credit each line file (one GFC row) whose INVENTORY_ID
-    # carries a survey name that landed there.
+    # WHAT COUNTS AS CATALOGED / PROMOTED lives in promotion_lineage, not here.
+    # Formats reach the database by different routes and the per-file stamps
+    # only describe one of them: documents capture into cat_* and get
+    # PROMOTED_AT stamped, but LAS/DLIS/LIS write dv_well_log(_curve) directly
+    # and SEG-Y merges into dv_seis_set — neither is ever stamped. Reading the
+    # stamp alone reports the deep-path formats as never promoted when their
+    # data is in dv_* and queryable.
     #
-    # NB: SQL Server forbids a subquery *inside* an aggregate (error 130:
-    # "Cannot perform an aggregate function on an expression containing a
-    # subquery"), so the seismic test can't live in SUM(CASE WHEN EXISTS(...)).
-    # Instead precompute the set of "survey-promoted" INVENTORY_IDs as a CTE and
-    # LEFT JOIN it — then the per-row flag is just a joined column. The DISTINCT
-    # keeps the join 1:1 so COUNT(*) is unaffected. Guard on the tables existing
-    # so the live poll never crashes on a DB without the seismic objects.
+    # The honest test is lineage: every dv_ detail table carries the
+    # INVENTORY_ID of the file its rows came from. promotion_lineage builds the
+    # CTE + LEFT JOIN that expresses it, and the per-file stage scorecard and
+    # the run report use the SAME definition, so the three can no longer
+    # disagree about the same file.
+    from dataview.file_catalog import promotion_lineage as _lin
     with engine.connect() as con:
-        try:
-            _seis_ok = con.execute(_t(
-                "SELECT CASE WHEN OBJECT_ID('dataview.dv_seis_set') IS NOT NULL "
-                "AND OBJECT_ID('file_catalog.FILE_SEIS_HEADER') IS NOT NULL "
-                "THEN 1 ELSE 0 END")).scalar() == 1
-        except Exception:
-            _seis_ok = False
-        if _seis_ok:
-            _seis_cte = ("seis_done AS ("
-                    "SELECT DISTINCT sh.INVENTORY_ID "
-                    "FROM file_catalog.FILE_SEIS_HEADER sh WITH (NOLOCK) "
-                    "JOIN dataview.dv_seis_set ss "
-                    "ON ss.seis_set_name = sh.SURVEY_NAME) ")
-            _join = "LEFT JOIN seis_done sd ON sd.INVENTORY_ID = g.INVENTORY_ID "
-            _seis = "OR sd.INVENTORY_ID IS NOT NULL "
-        else:
-            _seis_cte = _join = _seis = ""
+        _cte, _join, _dprom = _lin.promoted_sql(con, alias="g")
+        _ccte, _cjoin, _dcap = _lin.captured_sql(con, alias="g")
 
-        # ── document promotion credit ────────────────────────────────────────
-        # A .pdf/.xlsx/.csv/.docx is 'promoted' once its deep data (tops, dir
-        # survey, production, completion, log curves) lands in dv_* — tracked by
-        # the INVENTORY_ID lineage promote copies into each dv_ detail table.
-        # Build a UNION over whichever dv_ document tables exist + carry
-        # INVENTORY_ID, then credit any GFC row whose INVENTORY_ID appears there.
-        _doc_tables = ("dv_well_formation_top", "dv_well_dir_srvy_hdr",
-                       "dv_well_dir_srvy_sta", "dv_well_completion",
-                       "dv_prod_volume", "dv_prod_entity", "dv_well_log",
-                       "dv_well_log_curve", "dv_well_core", "dv_well_dst")
-        _parts = []
-        for _dt in _doc_tables:
-            try:
-                _has = con.execute(_t(
-                    "SELECT CASE WHEN OBJECT_ID(:o) IS NOT NULL AND EXISTS("
-                    "SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID(:o) "
-                    "AND name='INVENTORY_ID') THEN 1 ELSE 0 END"),
-                    {"o": f"dataview.{_dt}"}).scalar() == 1
-            except Exception:
-                _has = False
-            if _has:
-                _parts.append(f"SELECT INVENTORY_ID FROM dataview.{_dt} WITH (NOLOCK) "
-                              f"WHERE INVENTORY_ID IS NOT NULL")
-        if _parts:
-            _docs_cte = ("docs_done AS (SELECT DISTINCT INVENTORY_ID FROM ("
-                         + " UNION ALL ".join(_parts) + ") _u) ")
-            _djoin = "LEFT JOIN docs_done dd ON dd.INVENTORY_ID = g.INVENTORY_ID "
-            _dprom = "OR dd.INVENTORY_ID IS NOT NULL "
-        else:
-            _docs_cte = _djoin = _dprom = ""
+        # Merge the two CTE sets into one WITH clause. Both builders emit a
+        # complete "WITH ... " string, so strip the keyword off the second and
+        # comma-join the bodies.
+        _bodies = [c[len("WITH "):].rstrip() for c in (_cte, _ccte) if c]
+        _cte = ("WITH " + ", ".join(_bodies) + " ") if _bodies else ""
+        _join = _join + _cjoin
 
-        # assemble the combined WITH clause from whichever CTEs are present
-        _ctes = [c for c in (_seis_cte, _docs_cte) if c]
-        _cte = ("WITH " + ", ".join(_ctes) + " ") if _ctes else ""
-        _join = _join + _djoin
         sql = _t(f"""
             {_cte}SELECT
                 ISNULL(NULLIF(g.FILE_EXT,''),'(none)')                           AS [type],
                 COUNT(*)                                                          AS inventoried,
                 SUM(CASE WHEN g.HEADER_EXTRACTED='Y' THEN 1 ELSE 0 END)           AS extracted,
-                -- captured (durable): count files that WENT THROUGH capture via the
-                -- CAPTURED_HASH stamp (survives promote, unlike the cat_* staging rows
-                -- or the CATALOG_READINESS flag that LAS never gets set to CATALOGED).
+                -- captured: the CAPTURED_HASH stamp (durable — survives the
+                -- drain of cat_* on promote) OR rows present in cat_*/dv_* by
+                -- lineage. The lineage half is what makes Office and LAS
+                -- correct: neither gets CAPTURED_HASH, yet both put rows in
+                -- dv_*. Without it .xlsx read 0 cataloged while simultaneously
+                -- reporting 126 promoted, which cannot both be true.
                 SUM(CASE WHEN g.CAPTURED_HASH IS NOT NULL
                          OR g.CATALOG_READINESS='CATALOGED'
-                         OR g.PROMOTED_AT IS NOT NULL {_seis}THEN 1 ELSE 0 END)   AS cataloged,
+                         OR g.PROMOTED_AT IS NOT NULL {_dcap}THEN 1 ELSE 0 END)   AS cataloged,
                 SUM(CASE WHEN g.VAULTED_AT  IS NOT NULL THEN 1 ELSE 0 END)        AS vaulted,
-                SUM(CASE WHEN g.PROMOTED_AT IS NOT NULL {_seis}{_dprom}THEN 1 ELSE 0 END) AS promoted,
-                -- pending: NOT extracted AND NOT captured (a captured-then-promoted
-                -- file is done, not pending — key off CAPTURED_HASH so the drain of
-                -- cat_* on promote doesn't resurrect it as 'pending').
+                SUM(CASE WHEN g.PROMOTED_AT IS NOT NULL {_dprom}THEN 1 ELSE 0 END) AS promoted,
+                -- pending: nothing happened to it — not extracted, not
+                -- captured, no rows anywhere. A file whose data reached dv_*
+                -- is done regardless of which route took it there.
                 SUM(CASE WHEN (g.HEADER_EXTRACTED IS NULL OR g.HEADER_EXTRACTED IN ('N',''))
                           AND g.CAPTURED_HASH IS NULL
                           AND g.PROMOTED_AT IS NULL
+                          AND NOT (1=0 {_dcap})
                          THEN 1 ELSE 0 END)                                       AS pending,
                 SUM(CASE WHEN g.HEADER_EXTRACTED='S' THEN 1 ELSE 0 END)           AS skipped
             FROM file_catalog.GLOBAL_FILE_CATALOG g WITH (NOLOCK)
@@ -4633,12 +4958,14 @@ def _render_scorecard(engine):
         m3.metric("Vaulted",     f"{int(_tot['vaulted']):,}")
         m4.metric("Pending",     f"{int(_tot['pending']):,}")
         st.dataframe(_sc, hide_index=True, use_container_width=True)
-        st.caption("**Pending** = not yet extracted · **Cataloged** = document "
-                   "rows captured · **Vaulted** = file placed in the vault · "
-                   "**Promoted** = cataloged rows lifted into dv_* on a clean "
-                   "apply. Binaries (LAS/DLIS/SEG-Y) extract + vault but never "
-                   "catalog/promote, so those columns stay 0 for them — expected, "
-                   "not a backlog.")
+        st.caption("**Pending** = nothing reached the database — not extracted, "
+                   "no rows in cat_* or dv_* · **Cataloged** = rows staged or "
+                   "landed · **Vaulted** = file placed in the vault · "
+                   "**Promoted** = the file\'s data is in dv_*, by whichever "
+                   "route: documents via cat_*, LAS/DLIS/LIS straight into "
+                   "dv_well_log(_curve), SEG-Y via its survey in dv_seis_set. "
+                   "Credit is by INVENTORY_ID lineage, not the PROMOTED_AT "
+                   "stamp, which the deep-path formats never receive.")
     elif _sc is not None:
         st.caption("Inventory is empty — run an inventory to populate this.")
 
@@ -4997,11 +5324,45 @@ def _pipeline_stages(engine, dialect):
         "⑨ Clear / Reset — wipe file_catalog, las_catalog & dv_* catalog rows "
         "(+ optional vault)"
     ):
-        st.caption("Deletes everything the document pipeline produced: all "
+        st.caption("Deletes what the document pipeline produced: the "
                    "file_catalog + las_catalog tables and the catalog-derived "
                    "dv_* tables. Reference / spatial tables are left intact. "
-                   "Same code as `python clear_catalog.py`. Destructive — type "
-                   "CLEAR to enable.")
+                   "How much of that actually goes is the Scope below — the "
+                   "default spares every LAS/CSV row. Same code as "
+                   "`python clear_catalog.py`. Destructive — type CLEAR to "
+                   "enable.")
+        # SCOPE IS ASKED, NOT ASSUMED. gather() defaults to 'documents', under
+        # which GLOBAL_FILE_CATALOG — which carries INVENTORY_ID — is delete-
+        # scoped to pdf/docx/html rows only. Every LAS, CSV, XLSX, DLIS and
+        # SEG-Y entry survives. Neither page passed `scope` at all, so the
+        # caption above promised a wipe, the clear delivered a document-only
+        # delete, and a full wipe was reachable from the CLI and nowhere else.
+        from dataview.file_catalog import clear_catalog as _cc_scopes
+        x_scope = st.radio(
+            "Scope",
+            options=_cc_scopes.SCOPES,
+            format_func=_cc_scopes.scope_label,
+            key="pl_x_scope", horizontal=True)
+        if x_scope == "documents":
+            st.caption("LAS, CSV, XLSX, DLIS and SEG-Y entries stay in "
+                       "GLOBAL_FILE_CATALOG, along with the dv_* rows they "
+                       "produced — provenance is kept with the rows it explains.")
+        elif x_scope == "documents+las":
+            st.caption("Adds the log family (.las / .lis / .dlis): las_catalog, "
+                       "their GLOBAL_FILE_CATALOG entries and the dv_* rows they "
+                       "produced (dv_well_log, dv_well_log_curve, …) clear "
+                       "together, so no log row is left citing a source that is "
+                       "gone. CSV, XLSX and SEG-Y entries still stay.")
+        else:
+            # The same warning main() prints for --scope all, and for the same
+            # reason: gather()'s dv_* block stays document-scoped regardless of
+            # `scope`, so a wholesale catalog wipe strands the rest.
+            st.warning(
+                "Wipes the catalog wholesale while the dv_* deletes stay "
+                "document-scoped, so every non-document dv_* row (CSV/LAS-"
+                "derived) will be left citing a source that no longer exists. "
+                "That is orphaned provenance, and selftest's invariants tier "
+                "will report it.")
         x1, x2 = st.columns(2)
         x_dv    = x1.checkbox("Include dv_* catalog tables", value=True,
                               key="pl_x_dv")
@@ -5026,21 +5387,44 @@ def _pipeline_stages(engine, dialect):
             try:
                 cur = raw.cursor()
                 cur.execute(_cc._SET_OPTS)
-                tbls = _cc.gather(cur, do_dv=x_dv, keep=[])
-                total = sum(n for _, _, n, sc in tbls if n > 0 and sc != "skip")
+                # CAPTURE FIRST, EVERY TIME. _DOC_IDS is a module global, and
+                # Streamlit keeps the module loaded across reruns — so gather()'s
+                # `_DOC_IDS or capture_doc_ids(...)` fallback silently reuses the
+                # ids read by an EARLIER clear in this session, missing every
+                # document scanned since. The CLI never hit this because each run
+                # is a fresh process that calls capture_doc_ids explicitly.
+                #
+                # SAME SCOPE TO BOTH CALLS. capture decides WHICH ids are in
+                # scope (documents+las adds the log family); gather decides
+                # which tables are id-scoped. Pass it to one only and the run
+                # reports a scope it isn't performing — gather() raises on the
+                # mismatch rather than deleting the narrower set.
+                _ids = _cc.capture_doc_ids(cur, out.append, scope=x_scope)
+                tbls = _cc.gather(cur, do_dv=x_dv, keep=[],
+                                  doc_ids=_ids, scope=x_scope)
+                total = sum(n for _, _, n, sc in tbls
+                            if n > 0 and sc not in ("skip", "protected"))
                 out.append(f"{'table':46} {'rows':>10}  scope")
                 out.append("-" * 70)
                 for sch, t, n, sc in tbls:
-                    rows = "  (skip)" if sc == "skip" else f"{n:>10,}"
+                    rows = ("   (skip)" if sc == "skip"
+                            else "  (keep)" if sc == "protected" else f"{n:>10,}")
+                    # KEYED OFF gather()'s ACTUAL scope names. This map still said
+                    # "inventory" after that scope was renamed "document" and
+                    # "protected" was added, so the first table carrying an
+                    # INVENTORY_ID raised KeyError — swallowed by the except below,
+                    # which rendered a half-drawn table and a bare "ERROR: 'document'"
+                    # in place of the counts.
                     tag = {"all": "all rows",
-                           "inventory": "catalog rows only",
-                           "skip": "no INVENTORY_ID"}[sc]
+                           "document": _cc.row_label(x_scope),
+                           "protected": "PROTECTED — learned state, never cleared",
+                           "skip": "no INVENTORY_ID — left intact"}[sc]
                     out.append(f"{sch + '.' + t:46} {rows}  {tag}")
                 out.append("-" * 70)
                 out.append(f"{'TOTAL rows to delete':46} {total:>10,}")
                 raw.rollback()
             except Exception as e:
-                out.append(f"ERROR: {e}")
+                out.append(f"ERROR: {type(e).__name__}: {e}")
             finally:
                 try:
                     raw.close()
@@ -5055,8 +5439,12 @@ def _pipeline_stages(engine, dialect):
             try:
                 cur = raw.cursor()
                 cur.execute(_cc._SET_OPTS)
-                tbls = _cc.gather(cur, do_dv=x_dv, keep=[])
-                _cc.clear(cur, tbls, out.append)
+                # Capture before anything deletes: the dv_* scope is derived from
+                # the catalog, and this clears the catalog in the same transaction.
+                _ids = _cc.capture_doc_ids(cur, out.append, scope=x_scope)
+                tbls = _cc.gather(cur, do_dv=x_dv, keep=[],
+                                  doc_ids=_ids, scope=x_scope)
+                _cc.clear(cur, tbls, out.append, doc_ids=_ids, scope=x_scope)
                 raw.commit()
             except Exception as e:
                 try:
@@ -5092,17 +5480,39 @@ def _pipeline_clear(engine, dialect):
     on disk are never touched."""
     st.markdown("##### \U0001f9f9 Clear catalog & data rows")
     st.caption(
-        "Empties the file catalog (GLOBAL_FILE_CATALOG, headers, cat_*) and the "
+        "Clears the file catalog (GLOBAL_FILE_CATALOG, headers, cat_*) and the "
         "deep las_catalog tables, and removes only the catalog-promoted rows from "
         "the dv_* tables. Bulk-loaded data and all reference / spatial tables are "
-        "left intact. Files on disk are never touched."
+        "left intact. Files on disk are never touched. The Scope below decides "
+        "how far it reaches — the default leaves every LAS / CSV row standing."
     )
     from dataview.file_catalog import clear_catalog as _cc
+
+    # See the note in the ⑨ Clear / Reset expander: 'documents' scoping keeps
+    # every LAS / CSV / XLSX / SEG-Y row in GLOBAL_FILE_CATALOG, which is why
+    # "Clear now" left the inventory populated. The choice is surfaced rather
+    # than hardcoded, and it defaults to the safe side.
+    _scope = st.radio(
+        "Scope",
+        options=_cc.SCOPES,
+        format_func=_cc.scope_label,
+        key="clr_scope", horizontal=True)
+    if _scope == "documents+las":
+        st.caption("Adds the log family (.las / .lis / .dlis): las_catalog, "
+                   "their catalog entries and the dv_* rows they produced clear "
+                   "together. CSV / XLSX / SEG-Y entries are untouched.")
+    if _scope == "all":
+        st.warning(
+            "Wipes the catalog wholesale while the dv_* deletes stay "
+            "document-scoped, so every non-document dv_* row will be left "
+            "citing a source that no longer exists (orphaned provenance).")
 
     if st.button("Preview what would be cleared", key="clr_preview"):
         try:
             raw = engine.raw_connection(); cur = raw.cursor()
-            rows = _cc.gather(cur, do_dv=True, keep=set())
+            _ids = _cc.capture_doc_ids(cur, lambda *_a: None, scope=_scope)
+            rows = _cc.gather(cur, do_dv=True, keep=set(),
+                              doc_ids=_ids, scope=_scope)
             raw.close()
             import pandas as _pd
             df = _pd.DataFrame(
@@ -5124,8 +5534,12 @@ def _pipeline_clear(engine, dialect):
         try:
             raw = engine.raw_connection(); cur = raw.cursor()
             cur.execute(_cc._SET_OPTS)          # required for dv_well spatial DML
-            rows = _cc.gather(cur, do_dv=True, keep=set())
-            _cc.clear(cur, rows, _log)
+            # Capture before the deletes, and pass the ids explicitly — the
+            # module-level _DOC_IDS fallback goes stale across Streamlit reruns.
+            _ids = _cc.capture_doc_ids(cur, _log, scope=_scope)
+            rows = _cc.gather(cur, do_dv=True, keep=set(),
+                              doc_ids=_ids, scope=_scope)
+            _cc.clear(cur, rows, _log, doc_ids=_ids, scope=_scope)
             # reset capture stamps on clear: clearing cat_*/dv_* leaves CAPTURED_HASH
             # stamped, which makes the next crawl's capture skip these files as
             # "already captured" so they never re-capture. Null the stamps so a
@@ -5259,8 +5673,7 @@ def _well_key_grid(engine):
         name_set = sorted({nm for *_x, nm, _u in cur if nm})
         uwi_set = sorted({u for *_x, _nm, u in cur if u})
 
-        cols = ("WELL_NAME, UWI14, UWI, API_NUM, OPERATOR_NAME, "
-                "TOTAL_DEPTH, SPUD_DATE, COUNTY, PROVINCE_STATE")
+        cols = _wb_ref_select(engine, REF)
         name_map, uwi_map, ok = {}, {}, True
         try:
             with engine.connect() as con:

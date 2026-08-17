@@ -10,7 +10,7 @@ Each stage reuses the existing code (no reimplementation):
   scan     mirrors page_workbench's stage->GLOBAL_FILE_CATALOG MERGE, plus
            incremental size-change detection (new + changed files become
            pending; unchanged files are left alone -> resumable / re-runnable)
-  extract  reuses page_workbench._extract_fields + _write_enrichment_on
+  extract  reuses extract_core._extract_fields + _write_enrichment_on
   triage   triage_inventory.run_all_engine  (sets VALUE_TIER + readiness)
   vault    vault_organizer routing; DRY-RUN by default, places bytes only
            with vault_apply=True
@@ -44,8 +44,18 @@ from datetime import datetime, timezone
 
 
 # ── pure helpers (no DB / no streamlit — unit-testable) ───────────────────────
-def inv_id(path: str) -> str:
-    return hashlib.sha1(path.upper().encode("utf-8")).hexdigest().upper()
+# ONE IDENTITY, ONE FUNCTION. This used to mint its own id —
+# sha1(path.upper(), utf-8) — while file_identity.inventory_id used
+# sha1(canonical_path(path), utf-16-le). Both produce forty hex characters,
+# both look right in the table, and they never join. The difference is not
+# academic: the local version skipped normpath, so `C:\\a\\b` and `C:\a\b`
+# hashed differently and the SAME FILE was catalogued twice. Measured 16 Aug
+# 2026 on DataView_Demo: 2,094 of 3,876 rows (54%) carried a doubled-separator
+# path, 1,366 of them duplicating a row that already existed.
+#
+# Delegating rather than deleting: `inv_id` is the name _stage_scan and several
+# tools already call, and it is re-exported below for them.
+from dataview.core.file_identity import inventory_id as inv_id   # noqa: E402,F401
 
 
 # Single source of truth for content fingerprint + duplicate grouping. Both this
@@ -76,17 +86,19 @@ def _reports_dir(preferred=None, fallback=None):
 def default_exts():
     """Default scan set for a BLANK Formats-to-scan box.
 
-    CSV/TSV are deliberately EXCLUDED here (opt-in only — too generic to crawl
-    blindly: every export, log dump and config is a CSV). They scan only when
-    a user hand-enters '.csv'/'.tsv', which arrives as an explicit `exts` and
-    never passes through this default. Source of truth for the opt-in set is
-    page_workbench.CSV_EXTS, with a literal fallback if it can't be imported.
+    TABULAR types (.csv/.tsv and the Excel family) are EXCLUDED and no longer
+    opt-in. They belong to the Bulk Tabular Loader, which maps columns and
+    resolves foreign keys; the File Catalog has no extractor for them, so a
+    scanned CSV becomes an inventory row that can never be extracted and shows
+    as "pending" on every subsequent run. Source of truth is
+    promotion_lineage.TABULAR_EXTS, with a literal fallback if the import
+    fails, so this module and page_workbench cannot disagree.
     """
     try:
-        from dataview.file_catalog import page_workbench as _wb
-        opt_in = set(_wb.CSV_EXTS)
+        from dataview.file_catalog.promotion_lineage import TABULAR_EXTS as _tab
+        opt_in = set(_tab)
     except Exception:
-        opt_in = {".csv", ".tsv"}
+        opt_in = {".csv", ".tsv", ".xlsx", ".xls", ".xlsm", ".xlsb"}
     try:
         from dataview.file_catalog.file_summarizer import SUPPORTED_EXTS
         base = set(SUPPORTED_EXTS)
@@ -205,6 +217,40 @@ def _log_curve_counts(engine):
         return {}
 
 
+def _promotion_counts(engine):
+    """Deep-path-aware promotion rollup for the run report.
+
+    The stage counters above describe what each STAGE did; this describes what
+    actually LANDED, per extension, using the same INVENTORY_ID lineage the UI
+    scorecards use. Without it the report is silent on the formats most likely
+    to be doubted: a LAS run that worked perfectly leaves no PROMOTED_AT stamp,
+    so nothing in the stage counts says its curves are in dv_*.
+
+    Empty dict on any failure — the report omits the section rather than
+    failing a run that has already done its work.
+    """
+    try:
+        from dataview.file_catalog import promotion_lineage as _lin
+        df = _lin.file_detail(engine)
+        if df is None or df.empty:
+            return {}
+        rows = []
+        for ext, g in df.groupby("ext"):
+            rows.append({
+                "ext": ext,
+                "files": int(len(g)),
+                "extracted": int((g["extract"] == "Y").sum()),
+                "captured": int((g["capture"] == "Y").sum()),
+                "promoted": int((g["promote"] == "Y").sum()),
+            })
+        rows.sort(key=lambda r: -r["files"])
+        return {"promotion_by_ext": rows,
+                "promotion_total": int((df["promote"] == "Y").sum()),
+                "promotion_files": int(len(df))}
+    except Exception:
+        return {}
+
+
 def report_md(summary: dict) -> str:
     s = summary
     dur = s.get("duration_sec", 0)
@@ -265,6 +311,39 @@ def report_md(summary: dict) -> str:
             "_LAS/DLIS/LIS take the deep path (las_catalog → dv_log_curve), so "
             "they aren't counted under Captured above._",
         ]
+    _pbe = s.get("promotion_by_ext")
+    if s.get("promotion_rollup_skipped"):
+        # The section still appears — silently dropping it would look like
+        # nothing landed, which is the opposite of what happened.
+        lines += [
+            "",
+            "## Landed in dv_* — by extension",
+            "",
+            "_Skipped — this describes the database rather than this run. "
+            "Use the Stage scorecard (extract · capture · promote per file) "
+            "or the Database scorecard, or re-run with deep_rollup=True._",
+        ]
+    elif _pbe:
+        lines += [
+            "",
+            "## Landed in dv_* — by extension",
+            f"- {s.get('promotion_total',0):,} of {s.get('promotion_files',0):,} "
+            f"catalogued file(s) have data in dv_*",
+            "",
+            "| ext | files | extracted | captured | promoted |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+        for r in _pbe:
+            lines.append(f"| {r['ext']} | {r['files']:,} | {r['extracted']:,} "
+                         f"| {r['captured']:,} | {r['promoted']:,} |")
+        lines += [
+            "",
+            "_Credit follows INVENTORY_ID lineage into the dv_ tables, not the "
+            "PROMOTED_AT stamp. LAS/DLIS/LIS write dv_well_log(_curve) directly "
+            "and SEG-Y merges into dv_seis_set, so neither is ever stamped — "
+            "the stamp alone reports them as unpromoted when their data is "
+            "loaded._",
+        ]
     lines += [
         "",
         "## Placed in vault",
@@ -311,7 +390,7 @@ def _stage_scan(engine, root, exts, log):
     from sqlalchemy import text as _t
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from dataview.file_catalog import page_workbench as wb                      # for EXT_GROUP
+    from dataview.file_catalog.extract_core import EXT_GROUP
 
     log(f"[scan] walking {root} …")
     found, folders = walk_share(root, exts)
@@ -340,7 +419,7 @@ def _stage_scan(engine, root, exts, log):
         if iid in bad:
             continue
         w.writerow([iid, fpath[:900], fname[:260], fext[:20],
-                    _ext_group(fext, wb.EXT_GROUP)[:50],
+                    _ext_group(fext, EXT_GROUP)[:50],
                     size_kb if size_kb else "",
                     fhash, "", "UNCATALOGED", "", root[:900], now, now, now])
         n += 1
@@ -474,9 +553,42 @@ def _extract_one_proc(arg):
         return ("err", iid, f"{type(e).__name__}: {e}", _time.monotonic() - _w0, fext)
 
 
+# ── EXTRACT STEP TIMING ─────────────────────────────────────────────────
+#
+# The arithmetic that prompted this: extract reported 178.8 WORKER-seconds
+# of parse across 1,055 files and took 179.9s of WALL time. Those should
+# not be the same number — six workers at those per-file costs should give
+# ~35 files/sec and the stage delivered 5.9, about 17% of it.
+#
+# Two explanations fit and they lead to completely different work:
+#   * the pool is not actually parallelising   -> fix the pool
+#   * the per-chunk database write dominates   -> the reorder
+#
+# 22 chunks in 179.9s is 8.2s a chunk, of which parse could only be ~1.4s,
+# which points at the write. But pointing has been wrong five times running
+# on this pipeline, so it gets measured instead.
+_EX_TIMES = {}
+_EX_COUNTS = {}
+
+
+def _ex_tick(step, t0):
+    _EX_TIMES[step] = _EX_TIMES.get(step, 0.0) + (time.perf_counter() - t0)
+    _EX_COUNTS[step] = _EX_COUNTS.get(step, 0) + 1
+
+
+def _ex_report(log, files=0):
+    if not _EX_TIMES:
+        return
+    tot = sum(_EX_TIMES.values())
+    parts = [f"{k} {v:.1f}s ({100.0 * v / tot:.0f}%, {_EX_COUNTS.get(k, 0):,}x)"
+             for k, v in sorted(_EX_TIMES.items(), key=lambda kv: -kv[1])]
+    log(f"[extract-steps] {tot:.1f}s measured across {files:,} file(s) · "
+        + " · ".join(parts))
+
+
 def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
                    exts=None, per_type_cap=None, parse_mode="thread"):
-    """Reuse page_workbench._extract_fields + _write_enrichment_on on every
+    """Reuse extract_core._extract_fields + _write_enrichment_on on every
     pending file, parallel parse + sequential write, chunked.
 
     max_files     — process at most this many files this run, then stop (the
@@ -496,13 +608,20 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
     from concurrent.futures import ThreadPoolExecutor, wait as _wait
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from dataview.file_catalog import page_workbench as wb
+    from dataview.file_catalog import extract_core as wb
+    # ONE definition of extract-pending, shared with _unprocessed_count and the
+    # batch loop. Spelled out separately in three places, they drifted.
+    from dataview.file_catalog.promotion_lineage import pending_sql
+    _PENDING_EXTRACT = pending_sql("extract")
 
     CHUNK = getattr(wb, "ENRICH_CHUNK", 300)
     ok = skip = err = timeout = 0
     processed = 0
     per_ext: dict = {}                       # ext -> [count, total_parse_secs]
     _extf = _ext_filter(exts)
+
+    _EX_TIMES.clear()
+    _EX_COUNTS.clear()
 
     # ── Parse pool: created ONCE and reused across chunks ──────────────────
     # Spawning a process pool per chunk would re-import the parsers in every
@@ -552,6 +671,7 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
                 f"(re-run to continue).")
             break
         top = CHUNK if remaining is None else min(CHUNK, remaining)
+        _t_chunk = time.perf_counter()
         with engine.connect() as con:
             if per_type_cap:
                 # one balanced sampling pass: <= cap pending files per FILE_EXT
@@ -561,10 +681,17 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
                                ROW_NUMBER() OVER (PARTITION BY FILE_EXT
                                    ORDER BY SCAN_DATE DESC) AS _rn
                         FROM file_catalog.GLOBAL_FILE_CATALOG
-                        WHERE (HEADER_EXTRACTED IS NULL OR HEADER_EXTRACTED='N')
-                          AND ISNULL(HEADER_EXTRACTED,'') <> 'S'
-                          AND LOWER(FILE_EXT) <> '.las'   -- skip .las in extract (capture writes FILE_WELL_HEADER)
-                          AND DUPLICATE_GROUP IS NULL{_extf}
+                        WHERE {_PENDING_EXTRACT}
+                          -- NOTE: .las is deliberately NOT excluded here. It used to be
+                          -- ('capture writes FILE_WELL_HEADER'), but capture's BCP lane
+                          -- writes ONLY that header table plus a bare HEADER_EXTRACTED='Y'
+                          -- stamp. The GFC enrichment columns (CATALOG_SCORE /
+                          -- CATALOG_READINESS / MATCHED_UWI / CATALOG_ISSUES) are written
+                          -- ONLY by this stage, so skipping .las left every LAS row with a
+                          -- NULL MATCHED_UWI: not loadable, unresolved in the assign grid,
+                          -- invisible to UWI-keyed queries. Parse is header-only
+                          -- (lasio ignore_data=True), so the extra pass is cheap.
+                          {_extf}
                     ) q WHERE q._rn <= :cap
                     ORDER BY FILE_EXT, INVENTORY_ID
                 """), {"cap": int(per_type_cap)}).fetchall()
@@ -572,20 +699,22 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
                 rows = con.execute(_t(f"""
                     SELECT TOP {top} INVENTORY_ID, FILE_PATH, FILE_EXT
                     FROM file_catalog.GLOBAL_FILE_CATALOG
-                    WHERE (HEADER_EXTRACTED IS NULL OR HEADER_EXTRACTED='N')
-                      AND ISNULL(HEADER_EXTRACTED,'') <> 'S'
-                      AND LOWER(FILE_EXT) <> '.las'   -- skip .las in extract (capture writes FILE_WELL_HEADER)
-                      AND DUPLICATE_GROUP IS NULL{_extf}
+                    WHERE {_PENDING_EXTRACT}
+                      -- .las intentionally NOT excluded - see note above.{_extf}
                     ORDER BY SCAN_DATE DESC
                 """)).fetchall()
+        _ex_tick("claim_query", _t_chunk)
+
         if not rows:
             break
 
         results = []
+        _t_parse = time.perf_counter()
         fut_row = {_submit(r): r for r in rows}
         log(f"[extract] parsing {len(rows)} file(s)… "
             f"(OneDrive cloud files hydrate on first read — that can be slow)")
         done, not_done = _wait(fut_row, timeout=stall_timeout)
+        _ex_tick("parse_wait", _t_parse)
         for f in done:
             try:
                 results.append(f.result())
@@ -635,6 +764,7 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
             if err_items:
                 con.execute(_t(_ERR_SQL), err_items)        # executemany
 
+        _t_write = time.perf_counter()
         try:
             with engine.begin() as con:
                 wb._write_enrichment_batch(con, ok_items)   # batched header write
@@ -649,6 +779,7 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
                     except Exception as _we:
                         log(f"  [x] write {_iid}: {type(_we).__name__}: {_we}")
                 _write_skip_err(con)
+        _ex_tick("header_write", _t_write)
         ok += len(ok_items)
         skip += len(skip_ids)
         processed += len(rows)
@@ -670,6 +801,18 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
         ext: {"n": c, "sec": round(t, 2), "avg": round(t / c, 3) if c else 0.0}
         for ext, (c, t) in per_ext.items()
     }
+    # REPORTING MUST NOT BE ABLE TO FAIL THE STAGE. My first version called
+    # this with a variable that does not exist in this scope, and the whole
+    # extract stage — 179 seconds of completed work — reported FAILED at the
+    # last line. The parsing and the per-chunk writes had all landed; only
+    # the return value was lost, which is why the summary said "extracted 0"
+    # for a run that extracted 1,055. Timing is an observation, never a
+    # participant.
+    try:
+        _ex_report(log, files=ok)
+    except Exception as _re:                              # noqa: BLE001
+        log(f"[extract] (step timing unavailable: {type(_re).__name__})")
+
     if by_type:
         worst = sorted(by_type.items(), key=lambda kv: -kv[1]["avg"])
         log("[extract] parse cost by type (avg s/file): " + " · ".join(
@@ -792,12 +935,17 @@ def _stage_extract_capture(engine, workers, log, exts=None, do_capture=True):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from concurrent.futures import ProcessPoolExecutor
     from sqlalchemy import text as _t
-    from dataview.file_catalog import page_workbench as wb
+    from dataview.file_catalog import extract_core as wb
     try:
-        from dataview.file_catalog.page_workbench import SELF_PARSING_EXTS
+        from dataview.file_catalog.extract_core import SELF_PARSING_EXTS
         sp = sorted({e.lower().lstrip(".") for e in SELF_PARSING_EXTS})
     except Exception:
         sp = ["las", "pdf", "docx", "doc", "xlsx", "xls", "xml", "json"]
+
+    # The SAME extract-pending predicate _stage_extract claims on. This stage is
+    # the merged fast route, and it had its own copy — which is exactly how the
+    # six spellings accumulated.
+    from dataview.file_catalog.promotion_lineage import pending_sql
 
     try:
         _url = engine.url.render_as_string(hide_password=False)
@@ -808,9 +956,7 @@ def _stage_extract_capture(engine, workers, log, exts=None, do_capture=True):
         rows = con.execute(_t(f"""
             SELECT INVENTORY_ID, FILE_PATH, FILE_EXT
             FROM file_catalog.GLOBAL_FILE_CATALOG
-            WHERE (HEADER_EXTRACTED IS NULL OR HEADER_EXTRACTED='N')
-              AND ISNULL(HEADER_EXTRACTED,'') <> 'S'
-              AND DUPLICATE_GROUP IS NULL{_ext_filter(exts, 'FILE_EXT')}
+            WHERE {pending_sql('extract')}{_ext_filter(exts, 'FILE_EXT')}
             ORDER BY SCAN_DATE DESC
         """)).fetchall()
     total = len(rows)
@@ -871,7 +1017,106 @@ def _stage_extract_capture(engine, workers, log, exts=None, do_capture=True):
             "capture_rows": cap_rows}
 
 
-def _stage_capture(engine, dialect, log, exts=None, workers=8, parallel=False):
+def _root_likes(root):
+    r"""LIKE patterns matching every file UNDER `root` — both spellings of it.
+
+    Three details, all load-bearing:
+
+    * ESCAPE '\' — a folder called `Well_Log` or `100%_reprocessed` is a
+      literal name, not a wildcard. `_` matches any character in T-SQL, which
+      is the same trap CLAUDE.md records for `LIKE 'cat_%'`. Backslashes are
+      doubled FIRST so the escape character itself survives; the order is what
+      the seismic re-extract block in page_workbench uses.
+
+    * THE TRAILING SEPARATOR IS NOT COSMETIC. `C:\data%` also matches
+      `C:\database\...`, so a root would silently drag in its siblings.
+      Matching `C:\data\%` cannot. A root already ending in a separator (a bare
+      drive, `D:\`) is left alone rather than given a second one.
+
+    * TWO PATTERNS, NOT ONE. canon_root collapses `C:\\a\\b` to `C:\a\b` on the
+      way IN — but rows scanned before that fix are STORED doubled, and on the
+      database this was written against 54% of the catalog is (2,094 of 3,876
+      rows), including 562 files that exist in NO other spelling. Matching only
+      the canonical string would silently skip them while reporting a folder
+      re-extract. `C:\\a\\b` is not a different folder; it is the same folder
+      spelled badly, so both forms are in scope.
+    """
+    r = str(root or "").strip()
+    if not r:
+        return []
+    if not r.endswith(("\\", "/")):
+        r += "\\"
+
+    def _esc(s):
+        return (s.replace("\\", "\\\\").replace("%", "\\%")
+                 .replace("_", "\\_").replace("[", "\\[")) + "%"
+
+    out = [_esc(r)]
+    doubled = r.replace("\\", "\\\\")          # the pre-canon_root spelling
+    if doubled != r:
+        out.append(_esc(doubled))
+    return out
+
+
+def _root_filter(root, alias="g"):
+    """SQL fragment restricting a claim query to files under `root`, or ''.
+
+    The path is embedded as a literal (single quotes doubled) rather than bound,
+    to match _ext_filter and keep these filters composable inside the f-string
+    claim queries. Callers pass an ALREADY-CANONICAL root — see
+    path_identity.canon_root.
+    """
+    likes = _root_likes(root)
+    if not likes:
+        return ""
+    ors = " OR ".join(
+        f"{alias}.FILE_PATH LIKE '{p.replace(chr(39), chr(39) * 2)}' ESCAPE '\\'"
+        for p in likes)
+    return f"\n               AND ({ors})"
+
+
+def _already_done_filter(force=False, alias="g", root=None):
+    r"""The 'skip what is already done' clauses — or nothing, when forcing.
+
+    A file is normally passed over when it has been CATALOGED and its content
+    hash is unchanged. That is right for a re-run over a big tree and wrong the
+    moment the CODE changes: after the recogniser started replacing capture,
+    1,638 LAS files were catalogued-and-unprocessed, and every re-run skipped
+    them for being "already done" when nothing had ever done them. The only way
+    back in was a hand-written DELETE against GLOBAL_FILE_CATALOG.
+
+    'SKIPPED' SURVIVES A FORCE, DELIBERATELY. Forcing means "ignore that this
+    was already processed", not "ignore that I told you to leave it alone" —
+    those are different instructions and only one of them is the operator's.
+
+    FORCING IS SCOPED TO THE SCAN ROOT, AND THE SCOPE LIVES HERE.
+    ------------------------------------------------------------
+    Dropping the CATALOGED/hash gate is what makes a forced run enormous: with
+    it gone the WHERE clause no longer narrows anything, so every claim query
+    selects the WHOLE catalog — every tree ever scanned, not the folder in the
+    Scan root box. On a mixed catalog that is the difference between re-parsing
+    the folder you just fixed and re-parsing everything anybody ever pointed
+    the app at.
+
+    The root clause is emitted by THIS function, next to the clause it bounds,
+    rather than added at each call site — a fourth claim query that forgets it
+    would silently re-acquire the old behaviour. It is applied ONLY on the force
+    path: the normal path is already bounded by CATALOGED + hash, and scoping it
+    would change what a plain re-run processes, which is a different decision.
+    A blank root (a catalog-wide run with no folder given) yields no clause, so
+    forcing still means the whole catalog when that is genuinely what was asked.
+    """
+    if force:
+        return (f"AND ISNULL({alias}.CATALOG_READINESS, '') NOT IN ('SKIPPED')"
+                + _root_filter(root, alias))
+    # THE definition of capture-pending, imported rather than re-spelled —
+    # the same fragment the run gate and every report use.
+    from dataview.file_catalog.promotion_lineage import pending_sql
+    return "AND " + pending_sql("capture", alias)
+
+
+def _stage_capture(engine, dialect, log, exts=None, workers=8, parallel=False,
+                   force=False, root=None):
     """Parse catalogued documents (PDF surveys/scout + shapefiles) into the
     file_catalog.cat_* mirrors — the SAME _do_extract + _load_rows_to_catalog
     path the ④ 'Load checked to catalog' button drives, run headlessly over
@@ -887,14 +1132,15 @@ def _stage_capture(engine, dialect, log, exts=None, workers=8, parallel=False):
     are left to the deep stage."""
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    # page_workbench owns the extract+capture helpers. Imported lazily (and only
-    # when this stage runs) so the rest of the pipeline / CLI never pulls in the
-    # workbench module unless capture is actually requested.
+    # extract_core owns the extract+capture helpers. It is streamlit-free by
+    # design, so this no longer risks pulling the UI into the CLI or a pool
+    # child — which is exactly why these symbols were moved out of
+    # page_workbench on 16 Aug 2026.
     try:
-        from dataview.file_catalog.page_workbench import (_do_extract, _load_rows_to_catalog,
+        from dataview.file_catalog.extract_core import (_do_extract, _load_rows_to_catalog,
                                      SELF_PARSING_EXTS)
     except Exception as e:
-        log(f"[capture] skipped — page_workbench helpers unavailable: {e}")
+        log(f"[capture] skipped — extract_core helpers unavailable: {e}")
         return {"capture_files": 0, "capture_rows": 0, "capture_ok": 0}
     try:
         from dataview.file_catalog.catalog_capture import reset_replace_state
@@ -927,12 +1173,16 @@ def _stage_capture(engine, dialect, log, exts=None, workers=8, parallel=False):
                            AND LTRIM(RTRIM(g.MATCHED_UWI)) <> '')
                    )
                AND ISNULL(g.FLAG_DELETE, 'N') <> 'Y'
-               AND ISNULL(g.CATALOG_READINESS, '') NOT IN ('SKIPPED', 'CATALOGED')
                AND g.DUPLICATE_GROUP IS NULL
-               AND (g.CAPTURED_HASH IS NULL OR g.CAPTURED_HASH <> g.FILE_HASH)
+               {_already_done_filter(force, root=root)}
                {_ext_filter(exts, "g.FILE_EXT")}
              ORDER BY g.CATALOG_SCORE DESC, g.FILE_NAME
         """)).fetchall()
+
+    if force:
+        log(f"[capture] force ON — scope: "
+            + (f"files under {root}" if _root_likes(root)
+               else "the WHOLE catalog (no scan root given)"))
 
     total = len(files)
     _cap_invs = []                                   # stamp only real captures
@@ -1123,15 +1373,21 @@ def _stage_capture(engine, dialect, log, exts=None, workers=8, parallel=False):
     # JSON that failed UWI resolution comes back no_target/error harmlessly,
     # Field/Reservoir land in cat_field / cat_reservoir.
     with engine.connect() as con:
-        masters = con.execute(_t("""
+        # f-STRING, and it was not one before. The filter below is an
+        # interpolation; in a plain string it is inserted as the literal
+        # characters "{_already_done_filter(force)}", which SQL Server rejects
+        # with a bare "syntax error, permission violation, or other
+        # nonspecific error" — a message that names nothing and sends you
+        # looking at permissions. The other two sites were already f-strings,
+        # so the same edit worked there and failed only here.
+        masters = con.execute(_t(f"""
             SELECT g.FILE_PATH, g.FILE_EXT, g.FILE_NAME, g.INVENTORY_ID
               FROM file_catalog.GLOBAL_FILE_CATALOG g
              WHERE g.FILE_EXT = '.json'
                AND (g.MATCHED_UWI IS NULL OR LTRIM(RTRIM(g.MATCHED_UWI)) = '')
                AND ISNULL(g.FLAG_DELETE, 'N') <> 'Y'
-               AND ISNULL(g.CATALOG_READINESS, '') NOT IN ('SKIPPED', 'CATALOGED')
                AND g.DUPLICATE_GROUP IS NULL
-               AND (g.CAPTURED_HASH IS NULL OR g.CAPTURED_HASH <> g.FILE_HASH)
+               {_already_done_filter(force, root=root)}
         """)).fetchall()
     if masters:
         log(f"[capture] {len(masters):,} master JSON (no UWI) → field/reservoir …")
@@ -1189,6 +1445,212 @@ def _stage_capture(engine, dialect, log, exts=None, workers=8, parallel=False):
     grand = total + len(masters)
     log(f"[capture] captured {rows_total:,} row(s) from {ok:,}/{grand:,} file(s)")
     return {"capture_files": grand, "capture_rows": rows_total,
+            "capture_ok": ok}
+
+
+def _stage_recognise(engine, log, exts=None, pack="petroleum", apply=True, force=False,
+                     workers=1, parse_mode="thread", batch_docs=100, root=None):
+    """Capture cat_* rows by RECOGNISING tables, instead of classify+extract.
+
+    Drop-in alternative to _stage_capture. Same file selection, same
+    catalog_capture.capture() at the end, same CAPTURED_HASH stamp so a re-run
+    is incremental — only the middle changes: docshape identifies a table by
+    what its columns ARE, rather than a classifier choosing a per-format
+    extractor that then hunts for section banners.
+
+    SCOPE IS DELIBERATELY NARROW: .pdf, .docx and .xlsx only. LAS, DLIS, LIS
+    and SEG-Y already work through the deep path, which loads real curve and
+    trace data; the recogniser reads headers and metadata, so pointing it at
+    those formats would trade working data for a description of it.
+
+    Runs INSTEAD of capture, not alongside it. Both write to the same cat_
+    tables and capture() replaces per INVENTORY_ID, so interleaving them in
+    one run would make the result depend on ordering. To compare the two, run
+    each separately and read cat_* by source ('SHAPE' vs 'CATALOG') — the
+    source column survives in cat_, though promote relabels it on the way up.
+    """
+    from sqlalchemy import text as _t
+    try:
+        from dataview.file_catalog import shape_loader as _sl
+    except Exception as e:
+        log(f"[recognise] skipped — shape_loader unavailable: {e}")
+        return {"capture_files": 0, "capture_rows": 0, "capture_ok": 0}
+    try:
+        from docshape.readers import TABLE_EXTS
+    except Exception as e:
+        log(f"[recognise] skipped — docshape unavailable: {e}")
+        return {"capture_files": 0, "capture_rows": 0, "capture_ok": 0}
+
+    with engine.begin() as _con:
+        _con.execute(_t("IF COL_LENGTH('file_catalog.GLOBAL_FILE_CATALOG',"
+                        "'CAPTURED_HASH') IS NULL ALTER TABLE "
+                        "file_catalog.GLOBAL_FILE_CATALOG ADD CAPTURED_HASH NVARCHAR(40) NULL"))
+
+    _in = ",".join(f"'{e}'" for e in sorted(TABLE_EXTS))
+    with engine.connect() as con:
+        files = con.execute(_t(f"""
+            SELECT g.FILE_PATH, g.FILE_EXT, g.INVENTORY_ID
+              FROM file_catalog.GLOBAL_FILE_CATALOG g
+             WHERE LOWER(g.FILE_EXT) IN ({_in})
+               AND ISNULL(g.FLAG_DELETE, 'N') <> 'Y'
+               AND g.DUPLICATE_GROUP IS NULL
+               {_already_done_filter(force, root=root)}
+               {_ext_filter(exts, "g.FILE_EXT")}
+             ORDER BY g.FILE_NAME
+        """)).fetchall()
+
+    total = len(files)
+    if force:
+        log(f"[recognise] force ON — scope: "
+            + (f"files under {root}" if _root_likes(root)
+               else "the WHOLE catalog (no scan root given)"))
+    log(f"[recognise] {total:,} document(s) · pack '{pack}' · "
+        f"{'APPLY' if apply else 'DRY RUN'} …")
+    if not total:
+        return {"capture_files": 0, "capture_rows": 0, "capture_ok": 0}
+
+    # One pack + recogniser for the whole stage, not one per file.
+    _pack, _rec = _sl._pack_and_recogniser(pack)
+    ok = rows_total = 0
+    done_ids = []
+
+    # WORKERS PARSE, THE PARENT WRITES.
+    #
+    # 541 documents took ten minutes as a serial loop, almost all of it
+    # inside pdfplumber, and a few thousand wells would be an overnight
+    # run. shape_loader.parse_many does the reading and recognising across
+    # a process pool — no engine crosses the boundary, only a path in and
+    # ~2.5KB of plain dicts out — while every write stays here, in one
+    # connection, in the order the rest of the stage expects.
+    #
+    # parse_many falls back to a serial generator when workers <= 1 or the
+    # pool cannot start, so this path is safe on a host that cannot spawn.
+    _paths = [fp for fp, _fe, _iv in files if fp and os.path.exists(fp)]
+    _inv_by_path = {fp: iv for fp, _fe, iv in files}
+    _pw = max(1, int(workers or 1)) if parse_mode == "process" else 1
+    if _pw > 1:
+        log(f"[recognise] parsing on {_pw} worker(s)")
+
+    # WHERE THE TIME GOES. Parsing is timed in the worker and carried back
+    # on the payload; every database step is timed in the parent. Printed
+    # once at the end so a slow run says WHICH step was slow instead of
+    # leaving it to be guessed at.
+    _sl.reset_timings()
+    # capture()'s own internals — delete vs insert vs the transaction —
+    # because three rounds of reasoning about its 108ms failed and the
+    # only reliable move left is to measure inside it.
+    try:
+        from dataview.file_catalog import catalog_capture as _cc
+        _cc.reset_capture_timings()
+    except Exception:
+        _cc = None
+    _parse_sec = 0.0
+    # BATCHED WRITES. The probe measured a ~50ms fixed cost per capture
+    # call and almost none per row, so 1,907 calls of five rows was the
+    # wrong shape. Rows accumulate per target table across `batch_docs`
+    # documents and go in with one delete and one insert per table.
+    # Set batch_docs=1 to get the old call-per-document behaviour back.
+    # DEGRADE, DON'T DIE. This stage and shape_loader are two files, and a
+    # deploy that moves one without the other took out the whole capture
+    # stage — 617 documents, nothing written, discovered only at the end of
+    # a 283-second run. An optional optimisation must never be able to do
+    # that: if CaptureBatch isn't there, say so once and write the old way.
+    _batch = None
+    if apply:
+        if hasattr(_sl, "CaptureBatch"):
+            _batch = _sl.CaptureBatch(engine, size=batch_docs, log=log)
+        else:
+            log("[recognise] shape_loader has no CaptureBatch — writing one "
+                "document at a time (deploy the current shape_loader.py for "
+                "the batched path)")
+
+    i = 0
+    for parsed in _sl.parse_many(_paths, pack_name=pack, workers=_pw, log=log):
+        i += 1
+        _parse_sec += float(parsed.get("parse_sec") or 0.0)
+        fpath = parsed.get("path")
+        if parsed.get("error"):
+            log(f"[recognise] {os.path.basename(fpath or '?')}: "
+                f"{str(parsed['error'])[:120]}")
+            continue
+        try:
+            # The id came back with the file list — don't make shape_loader
+            # look it up again for every document.
+            # ── LET THE WARNINGS THROUGH ─────────────────────────────
+            # This was `log=lambda *_a: None` — every message from
+            # load_parsed discarded. The silencing was RIGHT in intent: 541
+            # documents of per-row chatter is unreadable. But it also threw
+            # away the two lines that say WHY a document produced nothing —
+            # "!! <table> not found in file_catalog" and "~ <shape>: no
+            # column for …" — so the stage reported "0 row(s)" with no
+            # reason, while the SAME code called directly printed exactly
+            # what it was doing.
+            #
+            # Filter instead of silence: pass the diagnostics, drop the
+            # routine per-row lines. Prefixed with the file name, because at
+            # this point in the stage nothing else says which document a
+            # warning belongs to.
+            _fname = os.path.basename(fpath or "?")
+            def _keep(msg, _f=_fname):
+                _m = str(msg)
+                if "!!" in _m or "~" in _m:
+                    log(f"[recognise] {_f}: {_m.strip()}")
+
+            r = _sl.load_parsed(engine, parsed, pack=_pack, apply=apply,
+                                log=_keep,
+                                inventory_id=_inv_by_path.get(fpath),
+                                batch=_batch)
+        except Exception as e:
+            log(f"[recognise] {os.path.basename(fpath or '?')}: "
+                f"{type(e).__name__}: {str(e)[:120]}")
+            continue
+        n = r.get("captured", 0)
+        rows_total += n
+        if n:
+            ok += 1
+            inv = _inv_by_path.get(fpath)
+            if inv is not None:
+                done_ids.append(inv)
+        if _batch is not None:
+            _batch.end_document()
+        if i % 25 == 0 or i == total:
+            log(f"[recognise] {i}/{total} · {rows_total:,} row(s)")
+
+    if _batch is not None:
+        _batch.flush()
+        log(f"[recognise] {_batch.flushes} batch flush(es) for {i} document(s)")
+    _brk = _sl.format_timings(total_files=i)
+    try:
+        _inner = _cc.capture_timings() if _cc is not None else ""
+    except Exception:
+        _inner = ""
+    if _inner:
+        log(f"[recognise-capture] {_inner}")
+    if _brk:
+        log(f"[recognise] parse {_parse_sec:.1f}s (worker-seconds) · "
+            f"write {_brk}")
+
+    if apply and done_ids:
+        try:
+            with engine.begin() as _con:
+                _con.execute(_t("IF OBJECT_ID('tempdb..#rec_ids') IS NOT NULL "
+                                "DROP TABLE #rec_ids"))
+                _con.execute(_t("CREATE TABLE #rec_ids (inv nvarchar(64) PRIMARY KEY)"))
+                _cur = _con.connection.cursor()
+                _cur.fast_executemany = True
+                for _i in range(0, len(done_ids), 1000):
+                    _cur.executemany("INSERT INTO #rec_ids (inv) VALUES (?)",
+                                     [(v,) for v in done_ids[_i:_i + 1000]])
+                _con.execute(_t(
+                    "UPDATE g SET g.CAPTURED_HASH = g.FILE_HASH "
+                    "FROM file_catalog.GLOBAL_FILE_CATALOG g "
+                    "JOIN #rec_ids c ON c.inv = g.INVENTORY_ID"))
+                _con.execute(_t("DROP TABLE #rec_ids"))
+        except Exception as _e:
+            log(f"[recognise] fingerprint stamp skipped: {str(_e)[:160]}")
+
+    log(f"[recognise] captured {rows_total:,} row(s) from {ok:,}/{total:,} file(s)")
+    return {"capture_files": total, "capture_rows": rows_total,
             "capture_ok": ok}
 
 
@@ -1534,7 +1996,9 @@ def _by_group(engine):
 def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
                  do_scan=True,
                  do_enrich=True, enrich_apply=True,
-                 do_capture=True, dialect="mssql",
+                 do_capture=True, dialect="mssql", force=False,
+                 recognise=False, pack="petroleum",
+                 deep_rollup=False,
                  do_vault=True, vault_root=None, vault_apply=False,
                  vault_mode="copy", do_deep=False, deep_header_only=True,
                  do_promote=False, promote_apply=False,
@@ -1556,6 +2020,17 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
     exts = exts or default_exts()
     if vault_root is None:
         vault_root = os.path.join(os.getcwd(), "vault")
+
+    # The root a FORCED capture/recognise is scoped to. Canonicalised once here,
+    # not per stage: the scan writes FILE_PATH from a walk of the canonical root,
+    # so a pasted `"C:\\a\\b"` has to be collapsed to `C:\a\b` before it can
+    # prefix-match anything. Same helper the Scan root box uses, from the
+    # streamlit-free module so the CLI and the detached child can import it.
+    from dataview.core.path_identity import canon_root as _canon
+    _force_root = _canon(root) if force else None
+    if force and not _force_root:
+        log("[pipeline] force ON with no scan root — every catalogued file is "
+            "in scope, not just one folder.")
 
     from contextlib import contextmanager as _cm
 
@@ -1600,16 +2075,10 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
             # captured (extracted='Y' but no cat_well row). Without the second half,
             # a re-run over an already-inventoried catalog counts 0 pending and the
             # guard skips capture, so nothing ever gets captured. (capture-pending)
+            from dataview.file_catalog.promotion_lineage import pending_sql
             _pending = _c.execute(_tt(
                 "SELECT COUNT(*) FROM file_catalog.GLOBAL_FILE_CATALOG g "
-                "WHERE ISNULL(g.FLAG_DELETE,'N') <> 'Y' "
-                "AND g.DUPLICATE_GROUP IS NULL "
-                "AND ( (g.HEADER_EXTRACTED IS NULL OR g.HEADER_EXTRACTED = 'N') "
-                "      OR ( LOWER(g.FILE_EXT) IN ('.las','.pdf','.xlsx','.xls','.docx','.doc','.xml','.json') "
-                "           AND ISNULL(g.CATALOG_READINESS,'') NOT IN ('SKIPPED','CATALOGED') "
-                "           AND (g.CAPTURED_HASH IS NULL OR g.CAPTURED_HASH <> g.FILE_HASH) "
-                "           AND NOT EXISTS (SELECT 1 FROM file_catalog.cat_well w "
-                "                           WHERE w.INVENTORY_ID = g.INVENTORY_ID) ) )"
+                "WHERE " + pending_sql("any", "g")
             )).scalar() or 0
     except Exception:
         _pending = 1                 # any doubt -> process normally
@@ -1633,7 +2102,11 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
         log("[inventory] scan-only run — processing stages skipped.")
 
     # 2) extract — or single-pass extract+capture when enabled (multi-core only)
-    _merged = bool(single_pass and parse_mode == "process" and do_capture)
+    # The merged extract+capture fast route runs the OLD extractors, so it is
+    # disabled when the recogniser is requested — otherwise the checkbox would
+    # be silently ignored whenever single-pass happened to be on.
+    _merged = bool(single_pass and parse_mode == "process" and do_capture
+                   and not recognise)
     if _go():
         if _merged:
             with _timed("extract+capture"):
@@ -1679,9 +2152,58 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
     if _go() and do_capture and not _merged:
         with _timed("capture"):
             try:
-                s.update(_stage_capture(engine, dialect, log, exts=exts,
-                                        workers=workers,
-                                        parallel=(parse_mode == "process")))
+                if recognise:
+                    # ── THE BINARY LANE IS NOT PART OF THE EITHER/OR ────────
+                    # _stage_recognise is .pdf/.docx/.xlsx BY DESIGN — its own
+                    # docstring says LAS/DLIS/LIS/SEG-Y "already work through
+                    # the deep path". That was true while the recogniser ran
+                    # ALONGSIDE capture. Once it REPLACED capture (5 Aug,
+                    # recognise defaulted ON), the LAS lane went with it:
+                    # run_bcp_capture lives inside _stage_capture, so nothing
+                    # claimed a .las file at all. MEASURED 10 Aug: 1,638 LAS
+                    # files catalogued, 0 captured, every one reporting "no
+                    # detail rows" — which was literally true, no stage ran.
+                    #
+                    # So run the binary lane FIRST and unconditionally,
+                    # scoped to those extensions, then hand the documents to
+                    # the recogniser. The two were always independent; only
+                    # the DOCUMENT path was ever an either/or.
+                    #
+                    # parallel=True because the BCP peel lives in the process
+                    # branch — the sequential path has no fast lane.
+                    _bin_exts = {".las", ".segy", ".sgy", ".seg", ".p190"}
+                    if exts:
+                        _bin_exts &= {str(e).lower() for e in exts}
+                    if _bin_exts:
+                        try:
+                            _binres = _stage_capture(engine, dialect, log,
+                                                     exts=_bin_exts,
+                                                     workers=workers,
+                                                     parallel=True,
+                                                     force=force,
+                                                     root=_force_root)
+                            # ADD, never update() — the recogniser writes the
+                            # same keys and would silently drop these counts.
+                            for _k, _v in (_binres or {}).items():
+                                if isinstance(_v, int):
+                                    s[_k] = int(s.get(_k, 0) or 0) + _v
+                        except Exception as _be:
+                            s["errors"]["capture_binary"] = str(_be)
+                            log(f"[capture] binary lane FAILED: {_be}")
+
+                    # Same stage, different implementation. Everything before
+                    # it (scan, inventory, enrich, triage) and after it
+                    # (vault, deep, promote) is untouched.
+                    s.update(_stage_recognise(engine, log, exts=exts,
+                                              pack=pack, apply=True,
+                                              workers=workers,
+                                              parse_mode=parse_mode,
+                                              force=force, root=_force_root))
+                else:
+                    s.update(_stage_capture(engine, dialect, log, exts=exts,
+                                            workers=workers,
+                                            parallel=(parse_mode == "process"),
+                                            force=force, root=_force_root))
             except Exception as e:
                 s["errors"]["capture"] = str(e)
                 log(f"[capture] FAILED: {e}")
@@ -1715,12 +2237,57 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
                 log(f"[promote] FAILED: {e}")
 
     # 5) report
+    #
+    # THESE FOUR ROLLUPS ARE NOT A STAGE AND WERE NEVER TIMED, which is why
+    # the stage breakdown never summed to the run: 269s of stages against a
+    # 343s run, and 449 against 525 the run before — a steady ~75s that no
+    # line accounted for, right at the end where the progress bar appears to
+    # hang. _promotion_counts is the suspect: a per-extension "what landed in
+    # dv_*" rollup joins every dv_ table back to GLOBAL_FILE_CATALOG on
+    # INVENTORY_ID, and nothing indexes that column. It costs the same
+    # whatever the rest of the run did, and it grows with the database.
+    _t_roll = time.perf_counter()
+    _roll = {}
     try:
         s["by_group"] = _by_group(engine)
     except Exception:
         s["by_group"] = {}
+    _roll["by_group"] = time.perf_counter() - _t_roll
+
+    _t = time.perf_counter()
     s.update(_seis_counts(engine))     # seismic rollup for the report section
+    _roll["seis_counts"] = time.perf_counter() - _t
+
+    _t = time.perf_counter()
     s.update(_log_curve_counts(engine))   # LAS/DLIS/LIS log-curve rollup
+    _roll["log_curve_counts"] = time.perf_counter() - _t
+
+    # A RUN REPORT SHOULD DESCRIBE THE RUN.
+    #
+    # _promotion_counts does not: it calls promotion_lineage.file_detail(),
+    # which builds a row for EVERY file in the catalog showing whether it
+    # extracted, captured and promoted — a description of the DATABASE, not
+    # of this run. It ran unconditionally at the end of every pipeline, cost
+    # the same whatever the run did, grew with the catalog, and fed exactly
+    # ONE of the report's eleven sections ("Landed in dv_* — by extension").
+    #
+    # That information already exists in two better places, both on demand:
+    # the Stage scorecard button (extract · capture · promote per file) and
+    # the Database scorecard. Paying for it on every run, whether or not
+    # anyone opens the markdown, is the wrong trade.
+    #
+    # Off by default. deep_rollup=True restores it for a run where the
+    # report is the artefact you actually want.
+    if deep_rollup:
+        _t = time.perf_counter()
+        s.update(_promotion_counts(engine))
+        _roll["promotion_counts"] = time.perf_counter() - _t
+    else:
+        s["promotion_rollup_skipped"] = True
+
+    log("[report-rollups] " + " · ".join(
+        f"{k} {v:.1f}s" for k, v in sorted(_roll.items(), key=lambda kv: -kv[1]))
+        + f"  (total {sum(_roll.values()):.1f}s)")
     s["duration_sec"] = time.monotonic() - t0
 
     if do_report:
@@ -1836,9 +2403,8 @@ def _unprocessed_count(engine, exts=None):
     on (pending, not skipped, not a duplicate). Drives batch-loop termination.
     The ext filter is best-effort; the no-progress guard is the real safety net."""
     from sqlalchemy import text as _t
-    where = ["(HEADER_EXTRACTED IS NULL OR HEADER_EXTRACTED='N')",
-             "ISNULL(HEADER_EXTRACTED,'') <> 'S'",
-             "DUPLICATE_GROUP IS NULL"]
+    from dataview.file_catalog.promotion_lineage import pending_sql
+    where = [pending_sql("extract")]      # the SAME predicate _stage_extract claims on
     params = {}
     if exts:
         ph = []
@@ -1932,6 +2498,7 @@ def run_pipeline_batched(engine, root, *, batch_size=1000, max_batches=None,
         out["by_group"] = {}
     out.update(_seis_counts(engine))
     out.update(_log_curve_counts(engine))
+    out.update(_promotion_counts(engine))
     reports_dir = _reports_dir(
         kw.get("report_root"),
         fallback=os.path.join(kw.get("vault_root") or ".", "_reports"))
@@ -1985,6 +2552,12 @@ def main():
                     help="skip the enrich (UWI resolve / attr fill) stage")
     ap.add_argument("--no-capture", action="store_true",
                     help="skip document-capture (PDF/shapefile -> cat_* mirrors)")
+    ap.add_argument("--recognise", action="store_true",
+                    help="use docshape table recognition for the capture "
+                         "stage instead of the classifier + per-format "
+                         "extractors")
+    ap.add_argument("--pack", default="petroleum",
+                    help="docshape vocabulary for --recognise")
     ap.add_argument("--no-vault", action="store_true")
     ap.add_argument("--vault-root", default=None)
     ap.add_argument("--report-root", default=None,
@@ -2021,6 +2594,7 @@ def main():
         workers=a.workers, schema=a.schema, parse_mode=a.parse_mode,
         single_pass=a.single_pass,
         do_enrich=not a.no_enrich, do_capture=not a.no_capture,
+        recognise=a.recognise, pack=a.pack,
         do_vault=not a.no_vault, vault_root=a.vault_root,
         vault_apply=a.vault_apply, vault_mode=a.vault_mode, ref=a.ref,
         do_deep=a.deep, deep_header_only=not a.deep_full,

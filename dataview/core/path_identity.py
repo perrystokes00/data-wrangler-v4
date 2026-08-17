@@ -36,6 +36,40 @@ def _dirname(path):
     return "\\".join(parts[:-1])
 
 
+def canon_root(p):
+    r"""A pasted folder, made canonical: quotes off, separators collapsed.
+
+    Windows treats C:\\a\\b and C:\a\b as the same folder, so a doubled path
+    scans perfectly and produces a SECOND catalog entry for every file, with a
+    different INVENTORY_ID. That is invisible until somebody counts rows and
+    finds twice as many files as exist.
+
+    LIVES HERE, NOT IN page_workbench, because the pipeline needs it too and
+    page_workbench imports streamlit. The CLI and the detached pipeline child
+    must be able to canonicalise a root without dragging the UI in — every
+    other helper in this module is pure-Python for the same reason.
+    page_workbench keeps `_canon_root` as an alias for this.
+    """
+    s = str(p or "").strip()
+    if s.startswith("& "):
+        s = s[2:].strip()
+    for q in ('"', "'", "\u201c", "\u201d"):
+        if s.startswith(q):
+            s = s[1:]
+        if s.endswith(q):
+            s = s[:-1]
+    s = s.strip()
+    if not s:
+        return s
+    s = os.path.expandvars(os.path.expanduser(s))
+    # normpath collapses repeated separators; keep a UNC prefix intact
+    unc = s.startswith("\\\\") and not s.startswith("\\\\\\\\")
+    out = os.path.normpath(s)
+    if unc and not out.startswith("\\\\"):
+        out = "\\\\" + out.lstrip("\\")
+    return out
+
+
 def norm_uwi14(s):
     """Normalize any UWI-ish string to a 14-char API key, or None.
     Strip -_./ and spaces, require all-numeric and 10-14 digits, pad to 14.
