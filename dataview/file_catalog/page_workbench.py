@@ -1620,6 +1620,13 @@ def _wb_run_search(engine):
         params["srch"] = f"%{srch}%"
     if flagged:
         conditions.append("ISNULL(FLAG_DELETE,'N')='Y'")
+    # SKIPPED is terminal. A rejected file now KEEPS its catalog row so its
+    # history stays attributable (see _mark_bad), which means this list has to
+    # hide it — otherwise rejecting a file would look like it did nothing.
+    # Choosing SKIPPED in the Readiness filter still finds them, which is how
+    # you review what was rejected.
+    if rd != "SKIPPED":
+        conditions.append("ISNULL(CATALOG_READINESS,'') <> 'SKIPPED'")
     try:
         with engine.connect() as con:
             rows = con.execute(_t(f"""
@@ -1677,7 +1684,11 @@ def _tab_browse(engine, dialect):
     )
     rd = f2.selectbox(
         "Readiness",
-        ["All","CATALOGED","READY","REVIEW","NEEDS_UWI","ATTENTION"],
+        # SKIPPED is listed so rejected files stay reachable — _wb_run_search
+        # hides them from every other selection, so this is the only way back to
+        # them. Appended, not inserted: a fixed-key selectbox keeps whatever the
+        # session already holds, and reordering would silently change it.
+        ["All","CATALOGED","READY","REVIEW","NEEDS_UWI","ATTENTION","SKIPPED"],
         key="wb_rd",
     )
     srch = f3.text_input("Filename contains", key="wb_srch",
@@ -1767,28 +1778,33 @@ def _tab_browse(engine, dialect):
                            help="Rejecting removes the file from the catalog. "
                                 "Tick to enable the button.")
 
-    # Rejecting DELETES catalog rows, so it needs both a selection and an
-    # explicit confirm — a stray click on a 500-row result set would otherwise
-    # empty most of the inventory. Failures are collected per file rather than
-    # aborting, so one unreadable file doesn't strand the rest half-done.
+    # Rejecting DELETES the rows a file staged (and retires its catalog row as
+    # SKIPPED), so it needs both a selection and an explicit confirm — a stray
+    # click on a 500-row result set would otherwise discard most of what the
+    # catalog has captured. Failures are collected per file rather than aborting,
+    # so one unreadable file doesn't strand the rest half-done.
     if st.button(f"🚫 Reject checked ({len(_picked)}) — blocklist + remove",
                  key=f"wb_sel_reject_{_nonce}", type="secondary",
                  disabled=not (_picked and _confirm),
                  use_container_width=True):
-        _ok, _fail = 0, []
+        _ok, _fail, _rows = 0, [], 0
         for _i in _picked:
             _r = df.iloc[_i]
             try:
-                _mark_bad(engine, _r["INVENTORY_ID"], _r["FILE_PATH"],
-                          _r.get("FILE_NAME"), _r.get("FILE_SIZE_KB"),
-                          _reason or "rejected on review")
+                _rows += sum(_mark_bad(
+                    engine, _r["INVENTORY_ID"], _r["FILE_PATH"],
+                    _r.get("FILE_NAME"), _r.get("FILE_SIZE_KB"),
+                    _reason or "rejected on review").values())
                 _ok += 1
             except Exception as _be:
                 _fail.append(f"{_r.get('FILE_NAME','?')}: "
                              f"{type(_be).__name__}: {_be}")
         if _ok:
-            st.success(f"Rejected {_ok:,} file(s) — blocklisted and removed "
-                       f"from the catalog. The next crawl will skip them.")
+            st.success(
+                f"Rejected {_ok:,} file(s) — blocklisted, catalog row retired "
+                f"as SKIPPED"
+                + (f", {_rows:,} staged row(s) dropped" if _rows else "")
+                + ". The next crawl will skip them.")
         for _m in _fail[:5]:
             st.warning(_m)
         if len(_fail) > 5:
@@ -2150,14 +2166,18 @@ def _wb_nav(engine, dialect, df):
                    label_visibility="collapsed",
                    placeholder="why is this file bad?")
     if bc2.button("🚫 Mark bad", key="wb_bad_btn",
-                  help="Fingerprint this file as bad and remove it from the "
-                       "catalog — the next crawl will skip it."):
+                  help="Fingerprint this file as bad, drop the rows it staged, "
+                       "and retire its catalog row — the next crawl will skip it."):
         try:
-            _mark_bad(engine, inv_id, fpath, row.get("FILE_NAME"),
-                      row.get("FILE_SIZE_KB"),
-                      st.session_state.get("wb_bad_reason"))
-            st.success(f"Marked bad — the next crawl will skip "
-                       f"`{row.get('FILE_NAME', '')}`.")
+            _dropped = _mark_bad(engine, inv_id, fpath, row.get("FILE_NAME"),
+                                 row.get("FILE_SIZE_KB"),
+                                 st.session_state.get("wb_bad_reason"))
+            _n = sum(_dropped.values())
+            st.success(
+                f"Marked bad — the next crawl will skip "
+                f"`{row.get('FILE_NAME', '')}`."
+                + (f" Dropped {_n:,} staged row(s) from {len(_dropped)} "
+                   f"mirror(s): {', '.join(sorted(_dropped))}." if _n else ""))
             st.session_state.pop("wb_results", None)
             st.rerun()
         except Exception as e:
@@ -3085,13 +3105,31 @@ def _toggle_flag(engine, inv_id: str, flag: bool):
 
 def _mark_bad(engine, inv_id, fpath, fname=None, size_kb=None, reason=None):
     """Fingerprint a file as bad (junk / badly formatted) so the next crawl
-    skips it, and drop it from the live catalog now.
+    skips it, DROP THE ROWS IT STAGED, and retire its catalog row as SKIPPED.
 
     The blocklist is keyed on INVENTORY_ID — the same SHA-1(uppercase path)
     fingerprint the crawler computes — so the skip is a cheap set lookup with
     no per-file hashing during the walk. A best-effort content signature
     (first 4 MB) is stored alongside for reference, but is never used to gate
     the crawl (so it can't stall on huge files).
+
+    A PARENT THAT CANNOT BE PROMOTED MUST TAKE ITS CHILDREN WITH IT.
+    Rejecting used to delete the GLOBAL_FILE_CATALOG row and nothing else, so
+    every cat_* row the file had already captured was left with no catalog
+    parent: invisible to every report that joins through GFC, and still
+    PROMOTED = 0, so promote retried them forever. MEASURED 17 Aug: 10 rejected
+    files had orphaned 50 rows across 6 mirrors (30 cat_prod_volume, 8
+    cat_well_stimulation, 4 cat_well, 4 cat_well_casing, 2
+    cat_well_formation_top, 2 cat_prod_entity). Those rows also read as a
+    provenance break — a cat_ row whose INVENTORY_ID resolves nowhere looks
+    exactly like a broken write path, and was diagnosed as one.
+
+    dataview.dv_* is NOT touched. Rows that already promoted belong to whatever
+    load inserted them (first one in wins); un-promoting them is a separate
+    decision, not a side effect of blocklisting a file.
+
+    Returns {mirror_table: rows_deleted} for the mirrors that had rows, so the
+    caller can report what went. Empty dict = the file had staged nothing.
     """
     from sqlalchemy import text as _t
     import hashlib
@@ -3138,8 +3176,50 @@ def _mark_bad(engine, inv_id, fpath, fname=None, size_kb=None, reason=None):
         """), {"id": inv_id, "p": (fpath or "")[:900],
                "n": (fname or "")[:260], "sz": sz, "h": fhash,
                "r": (reason or "junk / bad format")[:500]})
-        con.execute(_t("DELETE FROM file_catalog.GLOBAL_FILE_CATALOG "
-                       "WHERE INVENTORY_ID=:id"), {"id": inv_id})
+        # CASCADE. The table list is a SWEEP, deliberately NOT
+        # promotion_lineage.LINEAGE: LINEAGE answers "which cat_ -> dv_ pairs can
+        # a report attribute?", while a cascade must answer the wider "what did
+        # this file stage ANYWHERE" — and a mirror missing from LINEAGE is
+        # precisely the case that would go on orphaning rows silently. Same
+        # reasoning catalog_readiness._sources gives for widening its dv_ side.
+        # 'cat[_]%' is bracketed because _ is a T-SQL LIKE wildcard: unbracketed
+        # 'cat_%' also matches catalog_setting. The mirrors carry no FKs between
+        # them (build_catalog_mirror.build_ddl makes only a PK on CAT_ROW_ID plus
+        # two indexes), so delete order does not matter.
+        mirrors = [r[0] for r in con.execute(_t("""
+            SELECT t.name
+              FROM sys.tables t
+              JOIN sys.schemas s ON s.schema_id = t.schema_id
+              JOIN sys.columns c ON c.object_id = t.object_id
+             WHERE s.name = 'file_catalog'
+               AND t.name LIKE 'cat[_]%'
+               AND c.name = 'INVENTORY_ID'
+             ORDER BY t.name
+        """)).fetchall()]
+        dropped = {}
+        for _m in mirrors:
+            _n = con.execute(
+                _t(f"DELETE FROM file_catalog.[{_m}] WHERE INVENTORY_ID = :id"),
+                {"id": inv_id}).rowcount or 0
+            if _n:
+                dropped[_m] = _n
+
+        # RETIRE, don't delete. 'SKIPPED' is already the terminal state for
+        # "leave this file alone", and both halves of the pipeline already honour
+        # it: catalog_readiness._CASE tests SKIPPED FIRST (so a leftover row
+        # cannot make the file read pending), and pipeline_run._already_done_filter
+        # keeps it excluded even under --force — "forcing means 'ignore that this
+        # was already processed', not 'ignore that I told you to leave it alone'".
+        # Deleting the row instead threw away the file's entire catalog history
+        # and the join path every report and lineage query needs. The crawl skip
+        # reads BAD_FILE, not the row's absence, so blocklisting still works.
+        con.execute(_t("""
+            UPDATE file_catalog.GLOBAL_FILE_CATALOG
+               SET CATALOG_READINESS = 'SKIPPED',
+                   ROW_CHANGED_DATE  = GETUTCDATE()
+             WHERE INVENTORY_ID = :id
+        """), {"id": inv_id})
+    return dropped
 
 
 
