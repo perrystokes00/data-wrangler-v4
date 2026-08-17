@@ -58,6 +58,88 @@ def _help_badge(text, top="2px", right="6px"):
 # by the rest of the page. If you change the SQLAlchemy CONN_STR for
 # the main connection, update these too — BCP is a separate executable
 # that doesn't share the SQLAlchemy connection string.
+# ── KEYS THAT MUST NEVER BE WRITTEN BACK TO SESSION STATE ───────────────
+#
+# Both sub-pages (Documents, Export) keep widget state alive across the page
+# switch by self-assigning every key: `st.session_state[k] = st.session_state[k]`.
+# That is the standard Streamlit idiom and it works for INPUT widgets —
+# text_input, selectbox, checkbox, slider.
+#
+# It is INVALID for ACTION widgets: button, download_button,
+# form_submit_button, file_uploader. Streamlit refuses to let their value be
+# set from session_state at all.
+#
+# 🔑 AND THE ERROR DOES NOT SURFACE AT THE ASSIGNMENT. It is raised when the
+# WIDGET IS CREATED, on a later run:
+#
+#     Values for the widget with key 'wm_shp_add' cannot be set using
+#     st.session_state
+#
+# which is why the try/except wrapped around the assignment never caught it,
+# and why the failure appears on a completely different page from the code
+# that caused it. Returning from Export poisoned a button on the map.
+#
+# The skip lists below already named several action keys — they were added
+# one at a time, each after a bug like this one. A NAME-BY-NAME DENY LIST
+# CANNOT HOLD: every new button is a future crash, and the crash lands
+# somewhere else. So this also matches on how action widgets are NAMED here,
+# which catches the next one without anybody remembering.
+import re as _re
+
+_ACTION_KEY_SUFFIXES = (
+    "_add", "_btn", "_go", "_run", "_clear", "_apply", "_save", "_del",
+    "_delete", "_refresh", "_reset", "_open", "_close", "_back", "_dl",
+    "_download", "_upload", "_submit", "_cancel", "_toggle", "_export",
+)
+_ACTION_KEY_EXACT = {
+    "wm_shp_add", "wm_ai_run", "wm_ai_clear", "wm_reset_page",
+    "apply_uwi_filter", "wells_clear_viewport", "wells_reset_view",
+    "view_summary", "clear_tray", "close_summary_bottom",
+    "open_docs_btn", "export_xlsx_btn", "docs_back", "export_back",
+    # Found by sweeping every st.button/download_button key in this
+    # file against the predicate — the one name the suffix rules
+    # missed. Re-run that sweep after adding a button.
+    "close_summary",
+}
+
+
+def _is_action_key(k):
+    """True when k belongs to a widget whose value cannot be set."""
+    s = str(k)
+    return (s in _ACTION_KEY_EXACT
+            or s.endswith(_ACTION_KEY_SUFFIXES)
+            # dynamic keys built from a file path — the universal viewer's
+            # per-file download buttons ("las_dl_C:\...\file.las")
+            # A BARE COLON IS NOT ENOUGH: "results_mode:v1" is a
+            # SELECTBOX whose key carries a version marker, and skipping
+            # it silently reset that control every time someone came back
+            # from Export. Match a real separator, or a drive letter
+            # followed by one.
+            or "\\" in s or "/" in s
+            or bool(_re.search(r"[A-Za-z]:[\\/]", s))
+            # DATA EDITORS CANNOT BE SET EITHER, and they are not "action"
+            # widgets so nothing above catches them. `tray_grid:sel` is the
+            # Results tray's st.data_editor: the persist loops self-assigned
+            # it, the assignment raised, the try/except swallowed it, and the
+            # error surfaced LATER — "Values for the widget with key
+            # 'tray_grid:sel' cannot be set using st.session_state" — on
+            # whatever run next instantiated the widget.
+            #
+            # ⚠ A BARE COLON IS NOT THE TEST, for the reason given above:
+            # "results_mode:v1" is a SELECTBOX carrying a version marker, and
+            # skipping it reset that control on every return from Export.
+            # Match the editor SUFFIX instead.
+            or s.endswith((":sel", ":edit", ":editor", "_editor"))
+            # FORM SUBMIT BUTTONS. Streamlit names them internally as
+            # "FormSubmitter:<form key>-<label>" and they cannot be set either.
+            # Self-assigning one corrupts the form's state, and the symptom is
+            # not an obvious error — the form renders with NO SUBMIT BUTTON at
+            # all, plus Streamlit's own warning that user interactions will
+            # never be sent. Same root cause as tray_grid:sel, one more widget
+            # type nobody had added to this list.
+            or s.startswith("FormSubmitter:"))
+
+
 BCP_SERVER = r"localhost\SQLEXPRESS"
 BCP_DATABASE = "DataView"
 
@@ -83,6 +165,144 @@ _GULF_STATE = "Gulf of Mexico"
 # and browser sessions. session_state alone resets when the browser closes.
 # -----------------------------------------------------------------------------
 _USER_PREFS_PATH = Path(__file__).parent / "user_prefs.json"
+
+
+# ── SAVED PLACES ───────────────────────────────────────────────────────────
+# Every demo starts with "show me", and hunting for a county on a world map is
+# a poor opening ten seconds. A named extent is one click.
+#
+# Ships with Teapot because that extent is now established from THREE
+# independent sources that agree: the 2005 navigation file, the 1977 3D load
+# sheet corners, and the published 2D basemap. A place added by hand from the
+# current view is stored the same way.
+_BUILTIN_PLACES = {
+    "Teapot Dome (NPR-3), WY": [[43.2291, -106.2482], [43.3424, -106.1585]],
+}
+
+
+def _region_bounds(_engine, state: str, counties) -> list | None:
+    """The extent of a petroleum region's WELLS, measured not declared.
+
+    PETROLEUM_REGIONS already names the canonical plays — Permian, Eagle Ford,
+    Bakken — as (state, [counties]) for the region FILTER. Rather than write a
+    second list of hand-typed extents that would drift from it, ask the data
+    where those counties' wells actually are. A region with no wells loaded
+    returns None and is not offered: a place that goes nowhere is worse than
+    an absent one.
+    """
+    from sqlalchemy import text as _t
+    if not state or not counties:
+        return None
+    _c = [str(c).strip().upper() for c in counties if str(c).strip()]
+    if not _c:
+        return None
+    _marks = ", ".join(f":c{i}" for i in range(len(_c)))
+    _p = {f"c{i}": v for i, v in enumerate(_c)}
+    _p["st"] = str(state).strip().upper()
+    try:
+        with _engine.connect() as cx:
+            r = cx.execute(_t(
+                f"SELECT MIN(surface_latitude), MIN(surface_longitude), "
+                f"       MAX(surface_latitude), MAX(surface_longitude), COUNT(*) "
+                f"  FROM dataview.dv_well WITH (NOLOCK) "
+                f" WHERE UPPER(LTRIM(RTRIM(province_state))) = :st "
+                f"   AND UPPER(LTRIM(RTRIM(county))) IN ({_marks}) "
+                f"   AND surface_latitude IS NOT NULL"), _p).fetchone()
+    except Exception:
+        return None
+    if not r or not r[4] or r[0] is None:
+        return None
+    # a hair of padding so edge wells are not on the frame line
+    _pad = 0.02
+    return [[float(r[0]) - _pad, float(r[1]) - _pad],
+            [float(r[2]) + _pad, float(r[3]) + _pad]]
+
+
+def _saved_places(_engine=None) -> dict:
+    """Built-ins, petroleum regions that have wells, then anything saved.
+
+    Order is deliberate — a USER entry wins any name clash, because their view
+    of a play is more current than a built-in of mine.
+    """
+    out = dict(_BUILTIN_PLACES)
+    if HAS_PETROLEUM_REGIONS:
+        for _nm, _v in (PETROLEUM_REGIONS or {}).items():
+            if str(_nm).startswith("—"):
+                continue
+            # EVERY REGION IS OFFERED, with or without wells.
+            #
+            # My first cut derived each region's extent from ITS WELLS and
+            # dropped any with none — so on a database holding only Teapot the
+            # dropdown showed no plays at all. Wrong: a basin is a geographic
+            # fact, and it does not stop existing because this database has not
+            # been loaded yet. Wanting to LOOK at the Eagle Ford before loading
+            # it — or to check afterwards that a load landed in the right
+            # place — is the normal case, not an edge one.
+            #
+            # And the registry already states each region's centre as the third
+            # tuple element, with STATE_CENTERS behind it. _region_zoom_target
+            # has resolved both since long before I got here; querying wells
+            # for a position it already knew was a second mechanism doing a
+            # worse job.
+            _c = _region_zoom_target(_nm, _v)
+            if not _c:
+                continue
+            _lat, _lon, _z = _c
+            # Same zoom-to-span rule the area auto-zoom uses, so a region
+            # frames the way every other navigation on this page frames.
+            _sp = max(0.5, 30.0 / (2 ** (int(_z) - 4)))
+            _b = [[_lat - _sp / 2, _lon - _sp], [_lat + _sp / 2, _lon + _sp]]
+            # If wells ARE loaded, their measured extent is tighter and more
+            # useful than the registry's nominal centre — prefer it, and say
+            # which one the label is showing.
+            _wb = _region_bounds(_engine, *_v[:2]) if _engine is not None else None
+            out[f"{_nm} (wells)" if _wb else _nm] = _wb or _b
+    try:
+        out.update(_load_user_prefs().get("places") or {})
+    except Exception:
+        pass
+    return out
+
+
+def _delete_place(name: str) -> bool:
+    """Remove a SAVED place. Built-ins and regions cannot be deleted — they
+    are code and data respectively, so a delete would appear to work and the
+    entry would be back on the next run, which is worse than refusing."""
+    try:
+        _p = _load_user_prefs()
+        if name in (_p.get("places") or {}):
+            del _p["places"][name]
+            _save_user_prefs(_p)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _go_to_place(bounds) -> None:
+    """Fit the map to [[min_lat, min_lon], [max_lat, max_lon]].
+
+    Reuses the EXISTING one-shot bounds mechanism rather than adding a second
+    way to move the camera — _drawn_bounds is what area changes, circle drills
+    and the schema auto-zoom all use, and the consumer pops it after applying
+    once so a later rerun does not snap the view back.
+
+    Deliberately does NOT touch the well selection: this moves the CAMERA, not
+    the DATA — the same distinction as 🎯 Reset view versus ✗ Clear wells.
+    """
+    import streamlit as st
+    st.session_state["_drawn_bounds"] = bounds
+    st.session_state["_drawn_bounds_oneshot"] = True
+    # 🔑 TELL THE VIEW-PERSIST JS TO DROP ITS SAVED VIEW FIRST.
+    # That script restores the previous pan/zoom on every rerun — which is what
+    # makes drawing usable, and also what silently undoes a camera move. Set
+    # the bounds without this and the region's LAYERS appear while the map
+    # stays where it was, which reads as "the zoom does not work".
+    #
+    # 🎯 Reset view has set this flag since July for exactly this reason. My
+    # first cut POPPED it — removing the one thing that makes a camera move
+    # stick.
+    st.session_state["_reset_saved_view"] = True
 
 
 def _load_user_prefs() -> dict:
@@ -380,6 +600,17 @@ BASEMAPS = {
     },
 }
 
+# WHICH BACKGROUNDS ARE OFFERED. BASEMAPS keeps all nine definitions — the
+# tile URLs and attributions are the awkward part to get right and they cost
+# nothing sitting here. This is only what the UI SHOWS: the 🖼 Background
+# selector and the map's own layer control both read this list, so the two
+# can never drift apart and offer different sets.
+#
+# Widen it by raising the slice, or name them explicitly if the order of
+# BASEMAPS ever changes for another reason.
+_BASEMAPS_SHOWN = list(BASEMAPS.keys())[:4]
+
+
 
 # ── Region auto-zoom helper ─────────────────────────────────────────
 # When a Petroleum or State Region is selected, navigate the map to
@@ -498,7 +729,7 @@ AREAS = [
     # grey-out + spinner on first page open from auto-firing the grid
     # aggregation queries.
     {"label": "— Select schema —",  "id": "none",       "sources": [],
-     "center": (39.0, -98.0, 3),   "enabled": True,
+     "center": (39.5, -98.35, 4),  "enabled": True,
      "queries": ["all", "uwi"]},
     {"label": "🗂 dataview",         "id": "main",       "sources": ["main"],
      "center": (32.0, -100.0, 5),  "enabled": True,
@@ -516,7 +747,7 @@ AREAS = [
      "queries": ["all", "uwi", "operator", "well_type",
                  "td_range", "spud_range", "comp_range"]},
     {"label": "🌎 All schemas",     "id": "all",        "sources": ["main", "gom"],
-     "center": (39.0, -98.0, 3),   "enabled": True,
+     "center": (39.5, -98.35, 4),  "enabled": True,
      "queries": ["all", "uwi", "operator", "well_type", "source", "area",
                  "td_range", "spud_range", "comp_range",
                  "has_docs",
@@ -762,8 +993,19 @@ def _bcp_fetch_to_csv(sql: str, out_path: "Path") -> int:
         encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
-        err_msg = (result.stderr or result.stdout or "")[:300]
-        raise RuntimeError(f"BCP queryout failed: {err_msg}")
+        # SAY ENOUGH TO DIAGNOSE IT. The old message was just bcp's stderr,
+        # and bcp can exit non-zero having printed NOTHING at all — which
+        # produced "BCP queryout failed:" with nothing after the colon and
+        # no way to tell whether the database, the auth, the query or the
+        # command line was at fault. An error that cannot be acted on is
+        # only slightly better than a silent failure.
+        _db = st.session_state.get("wm_map_db", BCP_DATABASE)
+        err_msg = (result.stderr or result.stdout or "(no output)").strip()[:300]
+        raise RuntimeError(
+            f"BCP queryout failed (exit {result.returncode}) · "
+            f"server {BCP_SERVER} · database {_db} · "
+            f"{len(one_line)} chars of SQL · {err_msg} · "
+            f"SQL: {one_line[:200]}")
 
     # Parse "N rows copied." from BCP stdout
     rows_copied = 0
@@ -986,6 +1228,39 @@ def _qry_well_count_near(_engine, center_lat: float, center_lon: float,
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def _qry_distinct_attr(_engine, expr: str, where_spatial: str = "",
+                       _v: int = 1) -> list:
+    """DISTINCT values of an attribute, for a Query dropdown.
+
+    WHY NOT just read wells_df: those options were built from the wells that
+    survived the CURRENT filter, so picking an operator narrowed the loaded
+    wells to that operator, which narrowed the dropdown to that one value —
+    and there was no way back to any other. The list has to come from a source
+    the attribute filter does not touch.
+
+    Scoped by the SPATIAL clause (area / bbox) but NOT by the attribute one,
+    so the options stay relevant to where you are looking while still offering
+    every value there. Cached, because it runs on every rerun of the page.
+    """
+    _w = (where_spatial or "").strip()
+    if _w[:4].upper() == "AND ":
+        _w = _w[4:].strip()
+    _clause = f" AND ({_w})" if _w else ""
+    sql = text(
+        f"SELECT DISTINCT {expr} AS v FROM dataview.dv_well w "
+        "LEFT JOIN dataview.dv_business_associate ba "
+        "ON ba.ba_id = w.operator_ba_id "
+        "WHERE w.surface_latitude IS NOT NULL "
+        "AND w.surface_longitude IS NOT NULL" + _clause + " ORDER BY 1")
+    try:
+        with _engine.connect() as con:
+            return [r[0] for r in con.execute(sql).fetchall() if r[0] is not None]
+    except Exception as exc:
+        print(f"[distinct_attr] failed: {exc}")
+        return []
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def _qry_wells_scope_count(_engine, where_extra: str = "", _v: int = 1) -> int:
     """Count wells for the current scope (optional WHERE fragment, same one
     _qry_wells uses). Cheap cached scalar COUNT so the 'plot Wells if small'
@@ -995,8 +1270,16 @@ def _qry_wells_scope_count(_engine, where_extra: str = "", _v: int = 1) -> int:
     if _w[:4].upper() == "AND ":
         _w = _w[4:].strip()
     _clause = f" AND ({_w})" if _w else ""
+    # The ba join is here ONLY so this query can resolve the same WHERE
+    # fragment _qry_wells uses. That fragment may reference ba.ba_name (the
+    # operator filter does), and without the join SQL Server rejects the whole
+    # statement on an unknown alias — this function then returned its -1
+    # sentinel, the caller treated the scope as unloadable, and the map came
+    # back empty. A LEFT JOIN on a FK adds nothing to the count.
     sql = text(
         "SELECT COUNT(*) FROM dataview.dv_well w "
+        "LEFT JOIN dataview.dv_business_associate ba "
+        "ON ba.ba_id = w.operator_ba_id "
         "WHERE w.surface_latitude IS NOT NULL "
         "AND w.surface_longitude IS NOT NULL" + _clause)
     try:
@@ -2080,6 +2363,79 @@ def _qry_survey_sticks(_engine) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def _register_spatial_layer(engine, path, name, category, colour, filled):
+    """Insert a row into dv_spatial_layer for a shapefile or GeoJSON on disk.
+
+    Registration records WHERE the file is; it does not copy or parse the
+    geometry into the database. _add_shapefile_layer reads the file at render
+    time, so a moved or deleted file shows up as a blank layer rather than a
+    stale one — which is the honest behaviour for a registry of paths.
+
+    Bbox and feature count are best-effort: nice for zooming, not worth
+    failing a registration over, so a file we can't pre-read still registers.
+    """
+    import os as _os
+    import uuid as _uuid
+    from datetime import datetime as _dt2
+    if not _os.path.exists(path):
+        return False, f"Not found on disk: {path}"
+    _ext = _os.path.splitext(path)[1].lower()
+    if _ext not in (".shp", ".geojson", ".json"):
+        return False, "Expected a .shp, .geojson or .json file."
+    if _ext == ".shp":
+        _missing = [e for e in (".shx", ".dbf")
+                    if not _os.path.exists(_os.path.splitext(path)[0] + e)]
+        if _missing:
+            return False, ("A shapefile needs its sidecars — missing "
+                           + ", ".join(_missing)
+                           + ". Copy the whole set, not just the .shp.")
+        if not _os.path.exists(_os.path.splitext(path)[0] + ".prj"):
+            # Not fatal, but say so: without a .prj the CRS has to be assumed,
+            # and a State Plane file read as degrees lands in the wrong ocean.
+            pass
+
+    _n, _bb = None, (None, None, None, None)
+    try:
+        import shapefile as _pyshp          # pyshp
+        _r = _pyshp.Reader(path)
+        _n = len(_r)
+        _mnlo, _mnla, _mxlo, _mxla = _r.bbox
+        _bb = (_mnla, _mxla, _mnlo, _mxlo)
+    except Exception:
+        pass
+
+    row = {
+        "layer_id": _uuid.uuid4().hex[:40].upper(),
+        "layer_name": name[:255],
+        "layer_type": "POLYGON" if filled else "LINE",
+        "layer_category": (category or "")[:40] or None,
+        "file_path": path[:2000],
+        "source_type": "GEOJSON" if _ext != ".shp" else "SHAPEFILE",
+        "feature_count": _n,
+        "bbox_min_lat": _bb[0], "bbox_max_lat": _bb[1],
+        "bbox_min_lon": _bb[2], "bbox_max_lon": _bb[3],
+        "active_ind": "Y",
+        "style_color": colour, "style_weight": 2, "style_opacity": 0.9,
+        "style_fill_color": colour if filled else None,
+        "style_fill_opacity": 0.25 if filled else 0.0,
+        "source": "MANUAL",
+        "row_created_by": "DataWrangler",
+        "row_created_date": _dt2.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    cols = ", ".join(f"[{k}]" for k in row)
+    vals = ", ".join(f":{k}" for k in row)
+    try:
+        with engine.begin() as con:
+            con.execute(text(
+                f"INSERT INTO dataview.dv_spatial_layer ({cols}) VALUES ({vals})"),
+                row)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return True, (f"Registered '{name}'"
+                  + (f" — {_n:,} feature(s)" if _n else "")
+                  + ". Tick it above to draw it.")
+
+
 def _load_shp_layers(_engine) -> list[dict]:
     try:
         return list_layers(_engine)
@@ -3490,6 +3846,80 @@ def _add_basins(m, df):
     fg.add_to(m)
 
 
+def _geog_linestring_pts(wkt):
+    """LINESTRING WKT -> [[lat, lon], ...].
+
+    SQL Server geography WKT is (lon lat) — X is longitude; folium wants
+    (lat, lon). Plain string parse: no shapely dependency for a layer that
+    must degrade to nothing, not to an ImportError.
+    """
+    s = str(wkt or "")
+    if "(" not in s or not s.lstrip().upper().startswith("LINESTRING"):
+        return []
+    body = s[s.find("(") + 1:s.rfind(")")]
+    pts = []
+    for pair in body.split(","):
+        bits = pair.split()
+        if len(bits) >= 2:
+            try:
+                pts.append([float(bits[1]), float(bits[0])])
+            except ValueError:
+                continue
+    return pts
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _seismic_line_paths(_engine, _v: int = 2):
+    """Real 2D seismic line paths from dataview.dv_seis_line.geog.
+
+    The extract path now writes trace-order LINESTRINGs (WGS84, reprojected
+    from the CRS each file's own textual header declares) into
+    FILE_SEIS_HEADER.SURVEY_OUTLINE, and promote converts them into
+    dv_seis_line.geog — so the DATABASE is the source. The old
+    seismic_lines.geojson is a pure export and is no longer read here.
+
+    No rows, no layer, silently: the dv_seis_set.geog footprints on the same
+    pill still draw, so a deployment that has never promoted seismic
+    geometry is not worse off than before.
+    """
+    try:
+        with _engine.connect() as con:
+            df = pd.read_sql(text("""
+                SELECT ss.seis_set_name   AS survey,
+                       sl.line_name       AS line_name,
+                       sl.trace_count     AS trace_count,
+                       ss.epsg_code       AS epsg,
+                       sl.geog.STAsText() AS wkt
+                  FROM dataview.dv_seis_line sl
+                  LEFT JOIN dataview.dv_seis_set ss
+                         ON ss.seis_set_id = sl.seis_set_id
+                 WHERE sl.geog IS NOT NULL
+                   AND sl.geog.STGeometryType() = 'LineString'
+                 ORDER BY ss.seis_set_name, sl.line_name
+            """), con)
+    except Exception as exc:
+        print(f"[seismic_lines] dv_seis_line: {exc}")
+        return []
+    out = []
+    for r in df.itertuples():
+        pts = _geog_linestring_pts(r.wkt)
+        if len(pts) < 2:
+            continue
+        try:
+            _epsg = int(r.epsg) if pd.notna(r.epsg) else None
+        except (TypeError, ValueError):
+            _epsg = None
+        try:
+            _tr = int(r.trace_count) if pd.notna(r.trace_count) else None
+        except (TypeError, ValueError):
+            _tr = None
+        out.append({"pts": pts,
+                    "survey": r.survey or "(unnamed survey)",
+                    "line": r.line_name or "",
+                    "epsg": _epsg, "traces": _tr})
+    return out
+
+
 def _add_seismic_3d(m, df):
     """Render 3D seismic survey footprints as filled rectangles.
 
@@ -3718,12 +4148,31 @@ tr:nth-child(even) td {{background:#f1f5f9;}}
 </body></html>"""
 
 
-def _scout_ticket_pdf(html_body, well_name):
+def _scout_ticket_pdf(html_body, well_name, return_error=False):
+    """Render scout-ticket HTML to a real PDF via WeasyPrint.
+
+    WeasyPrint output carries a NATIVE TEXT LAYER. That matters beyond looking
+    the same: printing the HTML through a browser (or the Windows "Microsoft
+    Print to PDF" driver) flattens every glyph to a vector outline, and the
+    resulting file has ZERO extractable characters — the File Catalog can't
+    read a word of it. Same ticket, same pixels, unusable downstream.
+
+    The old version swallowed the exception and returned None, which the UI
+    reported as "pip install weasyprint". On Windows that's usually wrong:
+    WeasyPrint imports fine but fails at render time without the GTK/Pango
+    runtime, so the real message is the one worth showing.
+    """
     try:
         from weasyprint import HTML
-        return HTML(string=_full_html_doc(html_body, well_name)).write_pdf()
-    except Exception:
-        return None
+        pdf = HTML(string=_full_html_doc(html_body, well_name)).write_pdf()
+        return (pdf, None) if return_error else pdf
+    except ImportError as e:
+        err = f"WeasyPrint is not installed — pip install weasyprint ({e})"
+    except Exception as e:
+        err = (f"{type(e).__name__}: {e}\n\n"
+               "On Windows WeasyPrint also needs the GTK3 runtime "
+               "(Pango/Cairo) on PATH.")
+    return (None, err) if return_error else None
 
 
 def _show_detail(uwi, well_row, counts_df, engine=None):
@@ -3790,6 +4239,131 @@ def _photos_html(photos_df) -> str:
         return "<div style='padding:6px 12px;font-size:12px;color:#999;background:#fff'>Photos on file but not found on disk</div>"
     return ("<div style='background:#fff;padding:8px;overflow-x:auto;white-space:nowrap'>"
             + "".join(cards) + "</div>")
+
+
+def _provenance_html(uwi, engine):
+    """The PROVENANCE FOOTER for a scout ticket: where this well's data
+    came from, and which documents said so.
+
+    Added Aug 5. The ticket above it is assembled from hand-written
+    per-section queries, which is right — they are tuned, they alias
+    columns readably, and rewriting them to be generic would lose that.
+    So this does not touch them. It answers the one question they cannot:
+    IS ANY OF THIS TRACEABLE, and to what.
+
+    Counts are gathered by INTROSPECTION rather than a table list, for the
+    same reason as everywhere else: a section added to the model next month
+    should appear here without an edit, and a report that silently shows
+    less is worse than one that errors.
+
+    Never raises. A ticket that fails to render because its footer could
+    not count something would be a poor trade.
+    """
+    try:
+        with engine.connect() as cx:
+            tabs = [r[0] for r in cx.execute(text(
+                "SELECT c.TABLE_NAME FROM INFORMATION_SCHEMA.COLUMNS c "
+                "JOIN INFORMATION_SCHEMA.TABLES t "
+                "  ON t.TABLE_SCHEMA=c.TABLE_SCHEMA AND t.TABLE_NAME=c.TABLE_NAME "
+                " AND t.TABLE_TYPE='BASE TABLE' "
+                "WHERE c.TABLE_SCHEMA='dataview' AND LOWER(c.COLUMN_NAME)='uwi' "
+                "  AND c.TABLE_NAME LIKE 'dv[_]%' "
+                "  AND c.TABLE_NAME NOT LIKE 'dv[_]r[_]%' "
+                "  AND c.TABLE_NAME <> 'dv_global_file_catalog' "
+                "  AND EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS i "
+                "              WHERE i.TABLE_SCHEMA=c.TABLE_SCHEMA "
+                "                AND i.TABLE_NAME=c.TABLE_NAME "
+                "                AND LOWER(i.COLUMN_NAME)='inventory_id')"))]
+            if not tabs:
+                return ""
+            # READ FROM A DOCUMENT is decided by the KIND OF FILE behind
+            # the row, not by "has an inventory_id". The bulk loader
+            # stamps ids too and registers its CSVs in the catalog, so
+            # the older test called a spreadsheet load "catalogued".
+            try:
+                from dataview.tools.well_report import file_class as _fclass
+            except Exception:
+                _DOCX = {".pdf", ".docx", ".doc", ".html", ".htm", ".rtf"}
+
+                def _fclass(name):
+                    return ("document"
+                            if os.path.splitext(str(name or ""))[1].lower()
+                            in _DOCX else "data file")
+
+            n_rows = n_doc = n_orphan = 0
+            ids = set()
+            for t in tabs:
+                try:
+                    # group by the source FILE, then classify: one query
+                    # per table either way, and the extension list stays
+                    # in one place.
+                    res = cx.execute(text(
+                        f"SELECT g.INVENTORY_ID, g.FILE_NAME, COUNT_BIG(*) "
+                        f"FROM dataview.[{t}] d "
+                        f"LEFT JOIN file_catalog.GLOBAL_FILE_CATALOG g "
+                        f"       ON g.INVENTORY_ID = d.inventory_id "
+                        f"WHERE d.uwi=:u "
+                        f"GROUP BY g.INVENTORY_ID, g.FILE_NAME"),
+                        {"u": uwi}).fetchall()
+                    for iid, fname, n in res:
+                        n = int(n or 0)
+                        n_rows += n
+                        if not fname:
+                            continue          # bulk, or an unresolved id
+                        if _fclass(fname) == "document":
+                            n_doc += n
+                            ids.add(iid)
+                except Exception:
+                    continue
+            docs = []
+            if ids:
+                idl = list(ids)
+                for i in range(0, len(idl), 200):
+                    chunk = idl[i:i + 200]
+                    marks = ", ".join(f":p{j}" for j in range(len(chunk)))
+                    prm = {f"p{j}": v for j, v in enumerate(chunk)}
+                    try:
+                        docs += cx.execute(text(
+                            "SELECT INVENTORY_ID, FILE_NAME, FILE_PATH, MODIFIED_DATE "
+                            "FROM file_catalog.GLOBAL_FILE_CATALOG "
+                            f"WHERE INVENTORY_ID IN ({marks})"), prm).fetchall()
+                    except Exception:
+                        break
+            found = {d[0] for d in docs}
+            n_orphan = len(ids - found)          # document ids the catalog lost
+    except Exception:
+        return ""
+
+    if not n_rows:
+        return ""
+    pct = (100.0 * n_doc / n_rows) if n_rows else 0.0
+    rows_html = ""
+    for _iid, name, path, mod in sorted(docs, key=lambda d: str(d[1] or "")):
+        href = str(path or "").replace("\\", "/")
+        link = (f"<a href='file:///{href}' style='color:#1d4ed8;"
+                f"text-decoration:none'>{name}</a>" if href else (name or ""))
+        when = f" &middot; {str(mod)[:10]}" if mod else ""
+        rows_html += (f"<div style='padding:2px 0'>&#128196; {link}"
+                      f"<span style='color:#64748b'>{when}</span></div>")
+    if n_orphan:
+        rows_html += (f"<div style='padding:2px 0;color:#b45309'>&#9888; "
+                      f"{n_orphan} source id(s) with no catalog entry</div>")
+    if not rows_html:
+        rows_html = ("<div style='color:#64748b'>No source documents &mdash; "
+                     "every row here was parsed from a data file, not read from a document.</div>")
+
+    return f"""
+      <div style='padding:10px 18px;border-top:2px solid #e2e8f0;
+                  background:#f8fafc;font-size:11px;color:#334155'>
+        <div style='font-weight:700;letter-spacing:0.6px;color:#334155;
+                    margin-bottom:5px'>PROVENANCE</div>
+        <div style='margin-bottom:6px'>
+          <b>{n_rows:,}</b> row(s) across <b>{len(tabs)}</b> table(s) &middot;
+          <b>{n_doc:,}</b> ({pct:.0f}%) read from a document &middot;
+          <b>{len(docs)}</b> source document(s)
+        </div>
+        {rows_html}
+      </div>"""
 
 
 def _build_scout_ticket_html(uwi, well_row, engine=None):
@@ -4033,6 +4607,19 @@ def _build_scout_ticket_html(uwi, well_row, engine=None):
         &nbsp;|&nbsp; DataView Scout Ticket
       </div>
     </div>"""
+    # Provenance goes INSIDE the ticket's border, above the confidential
+    # strip, so it travels with every export — print, PDF and multi-well.
+    if engine is not None:
+        prov = _provenance_html(uwi, engine)
+        if prov:
+            # rfind, not replace: the confidential strip is the LAST block
+            # before the ticket's closing div, and matching on a style
+            # prefix that also occurs earlier would put the footer in the
+            # middle of the ticket. Anchoring on the last occurrence is
+            # unambiguous however the styling above it changes.
+            _k = html.rfind("<div style='background:#334155;color:#cbd5e1")
+            html = (html[:_k] + prov + "\n      " + html[_k:]) if _k > 0 \
+                else html + prov
     return html
 
 
@@ -4400,7 +4987,309 @@ def _build_export_excel(selected_uwis, wells_df, engine):
 # AI NATURAL LANGUAGE FILTER
 # =============================================================================
 
-def _ai_filter_wells(question: str, sample_wells: list[dict]) -> tuple[dict | None, str]:
+def _ai_spec_to_sql(spec) -> str:
+    """Render an AI filter spec as the equivalent SQL WHERE clause.
+
+    FOR READING, NOT FOR RUNNING. The AI returns a JSON spec applied with
+    pandas over the wells already loaded — no SQL is generated or sent
+    anywhere. But "which wells did it actually pick?" is a SQL-shaped
+    question, and a list of JSON operators answers it poorly, so the spec is
+    shown in the form people read fastest.
+
+    Where the two differ the SQL follows the SEMANTICS rather than the syntax:
+    `contains` is a case-insensitive substring match in pandas, so it renders
+    as UPPER(col) LIKE '%…%' rather than a plain LIKE that would imply
+    case-sensitivity the filter does not have.
+    """
+    _OPS = {"eq": "=", "ne": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+
+    def _lit(v):
+        if isinstance(v, bool):
+            return "1" if v else "0"
+        if isinstance(v, (int, float)):
+            return str(v)
+        return "'" + str(v).replace("'", "''") + "'"
+
+    filters = (spec or {}).get("filters") or []
+    if not filters:
+        return "-- no filters returned - every loaded well matches"
+    parts = []
+    for f in filters:
+        col = str(f.get("field", "?"))
+        op = str(f.get("op", "eq")).lower()
+        val = f.get("value")
+        if op == "in" and isinstance(val, (list, tuple)):
+            parts.append(col + " IN (" + ", ".join(_lit(v) for v in val) + ")")
+        elif op == "contains":
+            parts.append("UPPER(" + col + ") LIKE '%" + str(val).upper() + "%'")
+        elif op in _OPS:
+            parts.append(col + " " + _OPS[op] + " " + _lit(val))
+        else:
+            parts.append("/* unsupported op " + repr(op) + " on " + col + " */")
+    return "SELECT *\nFROM   wells\nWHERE  " + "\n  AND  ".join(parts)
+
+
+# ── AI filter, database mode ────────────────────────────────────────────────
+# The model NEVER writes SQL. It returns the same JSON spec it always has, and
+# this translates that spec against a whitelist. A model that emitted SQL would
+# be one prompt away from writing anything at all against a production
+# database; a model that emits {field, op, value} can only name a column the
+# schema actually has.
+#
+# The whitelist is REFLECTED from dv_well rather than typed out here — "any
+# attribute in the well header" is the requirement, a hand-list is always a
+# subset of it, and a hand-list silently rots when a column is added.
+_AI_KIND = {
+    "int": "num", "bigint": "num", "smallint": "num", "tinyint": "num",
+    "decimal": "num", "numeric": "num", "float": "num", "real": "num",
+    "money": "num", "smallmoney": "num",
+    "date": "date", "datetime": "date", "datetime2": "date",
+    "smalldatetime": "date", "datetimeoffset": "date",
+    "bit": "num",
+}
+
+# Child tables a well can be asked about. These are not columns — "has core
+# data" is an EXISTS, and no amount of column whitelisting expresses it.
+AI_HAS_TABLES = {
+    "has_core":        ("dataview.dv_well_core", "core analysis"),
+    "has_core_photos": ("dataview.dv_well_core_photo", "core photographs"),
+    "has_tops":        ("dataview.dv_well_formation_top", "formation tops"),
+    "has_dst":         ("dataview.dv_well_dst", "drill stem tests"),
+    "has_survey":      ("dataview.dv_well_dir_srvy_hdr", "directional surveys"),
+    "has_production":  ("dataview.dv_prod_entity", "production"),
+    "has_petro":       ("dataview.dv_well_petro_interp", "petrophysical interpretation"),
+    "has_stimulation": ("dataview.dv_well_stimulation", "frac / stimulation"),
+    "has_casing":      ("dataview.dv_well_casing", "casing"),
+    "has_perforations": ("dataview.dv_well_perforation", "perforations"),
+    "has_logs":        ("dataview.dv_well_log", "well logs"),
+    "has_completion":  ("dataview.dv_well_completion", "completion"),
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _ai_db_columns(_engine, _v: int = 1) -> dict:
+    """{field: (sql_expression, kind)} for every column on dv_well.
+
+    Reflected, so a schema change is picked up without an edit here. The three
+    joined values are added by hand because they are expressions rather than
+    columns, and they mirror exactly what _qry_wells_bcp SELECTs so a filter
+    matches the value the user can see.
+    """
+    out = {}
+    try:
+        with _engine.connect() as con:
+            rows = con.execute(text(
+                "SELECT c.name, t.name AS ty FROM sys.columns c "
+                "JOIN sys.types t ON t.user_type_id = c.user_type_id "
+                "WHERE c.object_id = OBJECT_ID('dataview.dv_well') "
+                "ORDER BY c.column_id")).fetchall()
+        for _name, _ty in rows:
+            # geography / varbinary can't be compared from a text spec
+            if str(_ty).lower() in ("geography", "geometry", "varbinary",
+                                    "binary", "image", "xml"):
+                continue
+            out[_name] = ("w.[" + _name + "]",
+                          _AI_KIND.get(str(_ty).lower(), "text"))
+    except Exception as exc:
+        print(f"[ai_db_columns] reflection failed: {exc}")
+    out["operator_name"] = ("COALESCE(w.operator_name, ba.ba_name, 'Unknown')", "text")
+    out["field_name"] = ("COALESCE(w.field_name, f.field_name, 'Unknown')", "text")
+    out["basin_name"] = ("ISNULL(f.basin_name, 'Unknown')", "text")
+    return out
+
+
+_AI_SQL_OPS = {"eq": "=", "ne": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
+
+
+def _ai_literal(val, kind):
+    """Type-checked SQL literal, or None if the value doesn't fit the column.
+
+    Values reach here from a language model, so each is validated against the
+    column's TYPE before it goes near the statement: a number must parse as a
+    number, a date must look like a date, and text has its quotes doubled and
+    its length capped. A value that fails returns None and the clause is
+    dropped and reported rather than guessed at.
+    """
+    if val is None:
+        return None
+    if kind == "num":
+        try:
+            return str(float(val))
+        except (TypeError, ValueError):
+            return None
+    if kind == "date":
+        t = str(val).strip()[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", t):
+            return None
+        return "'" + t + "'"
+    t = str(val).strip()[:200]
+    return "'" + t.replace("'", "''") + "'"
+
+
+def _ai_spec_to_where(spec, columns=None):
+    """(where_fragment, [rejected notes]). The fragment starts with AND."""
+    columns = columns or {}
+    filters = (spec or {}).get("filters") or []
+    parts, rejected = [], []
+    for f in filters:
+        field = str(f.get("field", ""))
+        op = str(f.get("op", "eq")).lower()
+        val = f.get("value")
+
+        # EXISTS against a child table — "wells that have core data"
+        if field in AI_HAS_TABLES:
+            _tbl, _label = AI_HAS_TABLES[field]
+            _want = val not in (False, 0, "false", "False", "no", "No", None)
+            parts.append(
+                ("EXISTS" if _want else "NOT EXISTS")
+                + f" (SELECT 1 FROM {_tbl} _x WHERE _x.uwi = w.uwi)")
+            continue
+
+        col = columns.get(field)
+        if not col:
+            rejected.append(f"{field or '(blank)'} — not a column on dv_well")
+            continue
+        expr, kind = col
+        if op == "in":
+            vals = [_ai_literal(v, kind) for v in (val or [])]
+            vals = [v for v in vals if v is not None]
+            if not vals:
+                rejected.append(f"{field} IN — no usable values")
+                continue
+            parts.append(f"{expr} IN ({', '.join(vals)})")
+        elif op == "contains":
+            lit = _ai_literal(val, "text")
+            if lit is None:
+                rejected.append(f"{field} contains — unusable value")
+                continue
+            parts.append(f"UPPER({expr}) LIKE UPPER('%' + {lit} + '%')")
+        elif op in _AI_SQL_OPS:
+            lit = _ai_literal(val, kind)
+            if lit is None:
+                rejected.append(f"{field} {op} {val!r} — not a valid {kind}")
+                continue
+            parts.append(f"{expr} {_AI_SQL_OPS[op]} {lit}")
+        else:
+            rejected.append(f"{field} — operator {op!r} not supported")
+    if not parts:
+        return "", rejected
+    return " AND (" + " AND ".join(parts) + ")", rejected
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _qry_child_rows(_engine, table: str, uwis: tuple, limit: int = 2000):
+    """Rows from a child table for a set of wells, as a DataFrame.
+
+    Separate from the FILTER path on purpose. "Wells that have core data" is a
+    question about which wells to show; "core data for well X" is a question
+    about what to put in a grid. The first narrows the map, the second fills a
+    table, and conflating them gives you a map of one dot and no numbers.
+
+    `table` is looked up in AI_HAS_TABLES rather than taken from the model, so
+    the only tables reachable are ones already approved for the presence flags.
+    """
+    import pandas as _pd
+    if not uwis or table not in {t for t, _l in AI_HAS_TABLES.values()}:
+        return _pd.DataFrame()
+    _in = ", ".join("'" + str(u).replace("'", "''") + "'" for u in uwis[:500])
+    sql = text(f"SELECT TOP {int(limit)} * FROM {table} WHERE uwi IN ({_in})")
+    try:
+        with _engine.connect() as con:
+            rows = con.execute(sql).fetchall()
+            cols = list(con.execute(sql).keys()) if rows else []
+        df = _pd.DataFrame([dict(zip(cols, r)) for r in rows]) if rows \
+            else _pd.DataFrame()
+        # Drop the audit furniture — it is the same on every row and pushes
+        # the actual measurements off the right of the grid.
+        _noise = {"row_created_by", "row_created_date", "row_changed_by",
+                  "row_changed_date", "active_ind", "INVENTORY_ID"}
+        return df[[c for c in df.columns if c not in _noise]] if len(df) else df
+    except Exception as exc:
+        print(f"[child_rows] {table}: {exc}")
+        import pandas as _p
+        return _p.DataFrame()
+
+
+# The dozen attributes a well list is actually read for: who, what, where,
+# when, how deep. Everything else on dv_well is available behind the "all
+# columns" toggle — a fifty-column grid is a wall of text, and thirty of them
+# are audit fields or identifiers nobody scans by eye.
+WELL_HEADER_CORE = [
+    "uwi", "well_name", "operator", "field", "well_type", "well_status",
+    "county", "province_state", "spud_date", "completion_date", "final_td",
+    "surface_latitude", "surface_longitude",
+]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _qry_well_header_rows(_engine, uwis: tuple, limit: int = 2000):
+    """The FULL dv_well row for a set of wells, as a DataFrame.
+
+    Distinct from the child-table fetch: "well header data" is not a child
+    dataset, it is the well record itself — and distinct from what the map
+    already holds, because _qry_wells_bcp selects ~22 columns for drawing and
+    the header has fifty. Asking to SEE the header should return the header,
+    not the subset that happened to be needed for markers.
+    """
+    import pandas as _pd
+    if not uwis:
+        return _pd.DataFrame()
+    _in = ", ".join("'" + str(u).replace("'", "''") + "'" for u in uwis[:500])
+    # NOT "SELECT w.*". dv_well carries a geography column (geog), and the
+    # driver raises reading it — the whole query failed and surfaced as
+    # "could not be read back", which sounds like missing wells rather than an
+    # unreadable data type. _ai_db_columns already excludes geography,
+    # varbinary and friends, so reuse it and name the columns explicitly.
+    _cols = [c for c in _ai_db_columns(_engine)
+             if c not in ("operator_name", "field_name", "basin_name")]
+    if not _cols:
+        return _pd.DataFrame()
+    _sel = ", ".join("w.[" + c + "]" for c in _cols)
+    sql = text(
+        f"SELECT TOP {int(limit)} {_sel}, "
+        "COALESCE(w.operator_name, ba.ba_name, 'Unknown') AS operator, "
+        "ISNULL(f.field_name, 'Unknown') AS field "
+        "FROM dataview.dv_well w "
+        "LEFT JOIN dataview.dv_business_associate ba ON ba.ba_id = w.operator_ba_id "
+        "LEFT JOIN dataview.dv_field f ON f.field_id = w.field_id "
+        f"WHERE w.uwi IN ({_in})")
+    try:
+        with _engine.connect() as con:
+            res = con.execute(sql)
+            cols = list(res.keys())
+            rows = res.fetchall()
+        if not rows:
+            return _pd.DataFrame()
+        df = _pd.DataFrame([dict(zip(cols, r)) for r in rows])
+        _noise = {"row_created_by", "row_created_date", "row_changed_by",
+                  "row_changed_date", "geog", "h3_r4", "h3_r5", "h3_r6",
+                  "h3_r7", "h3_coord_hash"}
+        _keep = [c for c in df.columns if c not in _noise]
+        # Drop columns that are empty for every matched well — a fifty-column
+        # grid where thirty are blank is harder to read than one that isn't.
+        _keep = [c for c in _keep if df[c].notna().any()]
+        return df[_keep]
+    except Exception as exc:
+        print(f"[well_header_rows] {exc}")
+        import pandas as _p
+        _df = _p.DataFrame()
+        _df.attrs["error"] = f"{type(exc).__name__}: {exc}"
+        return _df
+
+
+# Model for the AI Well Filter. A hardcoded dated string ("claude-sonnet-4-
+# 20250514") eventually 404s when that snapshot is retired, and the failure
+# surfaces as an opaque error in the UI. Named alias + an env override, so a
+# model change is a .env edit rather than a code edit.
+AI_MODEL = os.environ.get("DATAVIEW_AI_MODEL", "claude-sonnet-5")
+
+# Ceiling for a database-mode AI search. A vague question against a real table
+# would otherwise try to draw the whole thing.
+AI_DB_LIMIT = int(os.environ.get("DATAVIEW_AI_DB_LIMIT", "5000"))
+
+
+def _ai_filter_wells(question: str, sample_wells: list[dict],
+                     _engine=None) -> tuple[dict | None, str]:
     """
     Send a natural language question to Claude via anthropic SDK.
     Returns (filter_spec, error_message).
@@ -4421,11 +5310,32 @@ def _ai_filter_wells(question: str, sample_wells: list[dict]) -> tuple[dict | No
         operators = sorted({w.get("operator_name","") for w in sample_wells if w.get("operator_name")})[:10]
         counties  = sorted({w.get("county","")      for w in sample_wells if w.get("county")})[:15]
 
+        # The model can only name what it is told about. Previously the column
+        # list came from the SAMPLE WELLS — i.e. the 22 columns the map query
+        # happens to return — so two thirds of the well header was invisible to
+        # it and "wells with core data" had no vocabulary at all.
+        _db_cols = _ai_db_columns(_engine) if _engine is not None else {}
+        _col_list = ", ".join(sorted(_db_cols)) if _db_cols else col_summary
+        _has_list = "\n".join(
+            f"  {k} — true if the well has {lbl}"
+            for k, (_t, lbl) in sorted(AI_HAS_TABLES.items()))
+
         system = (
             "You are a petroleum data filter assistant.\n"
             "Convert natural language questions into a JSON filter spec for well data.\n"
             "Return ONLY valid JSON — no explanation, no markdown, no backticks.\n\n"
-            f"Available columns: {col_summary}\n\n"
+            f"Available columns: {_col_list}\n\n"
+            "Presence flags — use these for questions about what DATA a well\n"
+            "has. Give them a boolean value:\n"
+            f"{_has_list}\n\n"
+            "If the question asks to SEE or LIST a dataset rather than to find\n"
+            "wells (e.g. 'show me core data for well 42001205750000'), add a\n"
+            '"show" key naming the dataset — one of: well_header, '
+            + ", ".join(sorted(AI_HAS_TABLES)) + "\n"
+            "  well_header = the wells themselves as a table of their own\n"
+            "  attributes (use it for 'show me the well header data',\n"
+            "  'list those wells', 'give me a table of wells')\n"
+            "and put any well identifier in filters as a uwi condition.\n\n"
             f"Sample values:\n"
             f"  well_status: {statuses}\n"
             f"  well_type: {wtypes}\n"
@@ -4443,6 +5353,13 @@ def _ai_filter_wells(question: str, sample_wells: list[dict]) -> tuple[dict | No
             "- For text comparisons use uppercase values to match the data\n"
             "- contains is case-insensitive substring match\n"
             "- in value must be a list\n"
+            "- combine conditions freely; they are ANDed together\n"
+            "- Example: 'wells deeper than 10000 ft operated by Anadarko with\n"
+            "  core data' ->\n"
+            '  {"filters": [{"field": "final_td", "op": "gt", "value": 10000},\n'
+            '               {"field": "operator_name", "op": "contains", "value": "Anadarko"},\n'
+            '               {"field": "has_core", "op": "eq", "value": true}],\n'
+            '   "description": "Wells over 10,000 ft by Anadarko with core data"}\n'
             "- final_td, lat, lon are numeric (float)\n"
             '- If the question cannot be answered, return {"filters": [], "description": "Could not interpret query"}'
         )
@@ -4470,21 +5387,181 @@ def _ai_filter_wells(question: str, sample_wells: list[dict]) -> tuple[dict | No
             return None, "ANTHROPIC_API_KEY not found in .env file"
         client = anthropic.Anthropic(api_key=_api_key)
         msg = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=AI_MODEL,
             max_tokens=500,
             system=system,
             messages=[{"role": "user", "content": question}],
         )
-        text = msg.content[0].text.strip()
+        # Take the first TEXT block, not the first block. A model that returns
+        # extended thinking puts a ThinkingBlock at index 0, and content[0].text
+        # then raises "'ThinkingBlock' object has no attribute 'text'" — which
+        # reads like a broken filter rather than a response shape we didn't
+        # expect. Also joins multiple text blocks, since a long answer can be
+        # split across several.
+        _parts = [getattr(_b, "text", "") for _b in (msg.content or [])
+                  if getattr(_b, "type", "") == "text"
+                  or (not hasattr(_b, "type") and hasattr(_b, "text"))]
+        text = "".join(_parts).strip()
+        if not text:
+            _kinds = ", ".join(sorted({getattr(_b, "type", type(_b).__name__)
+                                       for _b in (msg.content or [])})) or "none"
+            return None, (f"The model returned no text to parse "
+                          f"(blocks: {_kinds}).")
         text = re.sub(r"^```(?:json)?\n?", "", text)
         text = re.sub(r"\n?```$", "", text)
-        return json.loads(text), ""
+        # A model may narrate around the JSON despite being told not to; take
+        # the outermost object rather than failing on the prose.
+        try:
+            return json.loads(text), ""
+        except json.JSONDecodeError:
+            _m = re.search(r"\{.*\}", text, re.S)
+            if _m:
+                return json.loads(_m.group(0)), ""
+            raise
     except Exception as e:
-        return None, str(e)
+        _msg = str(e)
+        # A retired or mistyped model name comes back as a bare 404 with a
+        # request id — accurate and useless to whoever is looking at the map.
+        # Say what to change and where.
+        if "not_found_error" in _msg or "404" in _msg:
+            _msg = (f"Model '{AI_MODEL}' was not found. Set DATAVIEW_AI_MODEL "
+                    f"in your .env to a current model name, or update "
+                    f"AI_MODEL in page_well_map.py.")
+        return None, _msg
+
+
+def _cmp_values(wval, val, op):
+    """Compare one well value against a filter value. None = not comparable.
+
+    ORDER MATTERS. Numeric first, then string. The previous version tried only
+    float() and swallowed the failure with a bare except, so a date filter —
+    float("2020-01-01") raises — left `match` untouched at True and matched
+    EVERY well. "Wells drilled since 2020" silently returned everything, which
+    is worse than returning nothing: nothing looks broken, everything looks
+    correct.
+
+    ISO dates (YYYY-MM-DD) order correctly as strings, so the text fallback
+    handles them without a date parser. Mixed formats will not compare sanely,
+    which is why an incomparable pair returns None rather than guessing — the
+    caller reports it instead of hiding it.
+    """
+    if wval is None or str(wval).strip().upper() in ("", "NULL", "NONE", "NAN"):
+        # bcp writes an unset value as the literal text "NULL", and "NULL"
+        # sorts AFTER "2020-01-01", so a missing date would satisfy a
+        # "since 2020" filter. Treat every spelling of absent as absent.
+        return None
+    try:
+        a, b = float(wval), float(val)
+        return (a > b if op == "gt" else a >= b if op == "gte"
+                else a < b if op == "lt" else a <= b)
+    except (TypeError, ValueError):
+        pass
+    a, b = str(wval).strip().upper(), str(val).strip().upper()
+    if not b:
+        return None
+    return (a > b if op == "gt" else a >= b if op == "gte"
+            else a < b if op == "lt" else a <= b)
+
+
+# ── SPATIAL SEARCH AGAINST STORED GEOMETRY ─────────────────────────────────
+# The whole point of keeping seismic as `geography` rather than as a drawing
+# is that it can be asked questions. "Which wells lie within 500 m of line C"
+# is one STDistance away — but nothing on this page could ask it, and the AI
+# filter cannot either: it applies a spec in PANDAS over already-loaded wells,
+# so it has no access to geometry and no business gaining any.
+#
+# THIS IS THE DETERMINISTIC HALF, and it is built first on purpose. A picker
+# and a distance box answer the question with no model involved. Once this is
+# proven, a `near` clause in the AI spec becomes a NAME for this operation —
+# the model chooses and parameterises it, exactly as it does with the Data
+# Assistant's transform catalogue, and never writes SQL.
+#
+# Building it the other way round leaves two failure modes indistinguishable:
+# a wrong answer could be a bad query or a misread sentence, and with no
+# direct control there is no way to tell which.
+
+_NEAR_FEATURES = {
+    # feature key      (table,                     name column,      geom)
+    "seismic_line":    ("dataview.dv_seis_line",   "line_name",      "geog"),
+    "seismic_survey":  ("dataview.dv_seis_set",    "seis_set_name",  "geog"),
+    "field":           ("dataview.dv_field",       "field_name",     "geog"),
+    "lease":           ("dataview.dv_land_tract",  "tract_name",     "geog"),
+    "pipeline":        ("dataview.dv_pipeline",    "pipeline_name",  "geog"),
+}
+_NEAR_MAX_M = 50_000        # 50 km: past this "near" stops meaning anything
+
+
+def _near_feature_names(_engine, feature: str) -> list[str]:
+    """The named features of this kind that actually HAVE geometry.
+
+    Only geometry-bearing rows are offered — a name in the list that cannot be
+    searched is a control that fails after you use it.
+    """
+    from sqlalchemy import text as _t
+    spec = _NEAR_FEATURES.get(feature)
+    if not spec:
+        return []
+    tbl, namecol, geom = spec
+    try:
+        with _engine.connect() as cx:
+            rows = cx.execute(_t(
+                f"SELECT DISTINCT {namecol} FROM {tbl} "
+                f"WHERE {geom} IS NOT NULL AND {namecol} IS NOT NULL "
+                f"ORDER BY {namecol}")).fetchall()
+        return [r[0] for r in rows if r[0]]
+    except Exception:
+        return []
+
+
+def _wells_near_feature(_engine, feature: str, name: str,
+                        distance_m: float) -> list[str]:
+    """UWIs within distance_m of a named feature. Server-side, parameterised.
+
+    Returns a LIST OF UWIs rather than well rows, deliberately: the caller
+    turns it into an ordinary `uwi in (...)` clause, so every existing
+    surface — the per-clause diagnostics, the drill shadow, the results grid —
+    keeps working unchanged. By the time it reaches them it is just a well
+    list.
+
+    STDistance on geography returns METRES regardless of how the data was
+    projected on the way in, which is why this takes a distance in metres and
+    not in whatever unit the source survey used.
+    """
+    from sqlalchemy import text as _t
+    spec = _NEAR_FEATURES.get(feature)
+    if not spec:
+        return []
+    tbl, namecol, geom = spec
+    try:
+        d = float(distance_m)
+    except (TypeError, ValueError):
+        return []
+    if not (0 < d <= _NEAR_MAX_M):
+        return []
+    # The table and column come from _NEAR_FEATURES — a fixed dict, never from
+    # the caller — so they can be interpolated. The NAME and the DISTANCE are
+    # user (or model) input and are bound.
+    sql = _t(f"""
+        SELECT DISTINCT w.uwi
+          FROM dataview.dv_well w
+          JOIN {tbl} f ON f.{namecol} = :nm
+         WHERE w.geog IS NOT NULL
+           AND f.{geom} IS NOT NULL
+           AND w.geog.STDistance(f.{geom}) <= :d""")
+    try:
+        with _engine.connect() as cx:
+            return [r[0] for r in cx.execute(sql, {"nm": name, "d": d}).fetchall()]
+    except Exception:
+        return []
 
 
 def _apply_ai_filter(wells: list[dict], filter_spec: dict) -> list[dict]:
-    """Apply filter spec returned by Claude to wells list."""
+    """Apply a filter spec returned by the model to the loaded wells.
+
+    A clause that cannot be evaluated counts as NOT matching, never as a pass.
+    Silently passing an unevaluable clause is how a broken filter looks like a
+    working one.
+    """
     filters = filter_spec.get("filters", [])
     if not filters:
         return wells
@@ -4494,26 +5571,26 @@ def _apply_ai_filter(wells: list[dict], filter_spec: dict) -> list[dict]:
         match = True
         for f in filters:
             field = f.get("field", "")
-            op    = f.get("op", "eq")
-            val   = f.get("value")
-            wval  = w.get(field)
+            op = f.get("op", "eq")
+            val = f.get("value")
+            wval = w.get(field)
 
-            # Numeric ops
-            try:
-                if op == "gt":  match = match and float(wval or 0) > float(val)
-                elif op == "gte": match = match and float(wval or 0) >= float(val)
-                elif op == "lt":  match = match and float(wval or 0) < float(val)
-                elif op == "lte": match = match and float(wval or 0) <= float(val)
-                elif op == "eq":
-                    match = match and str(wval or "").upper() == str(val).upper()
-                elif op == "ne":
-                    match = match and str(wval or "").upper() != str(val).upper()
-                elif op == "contains":
-                    match = match and str(val).upper() in str(wval or "").upper()
-                elif op == "in":
-                    match = match and str(wval or "").upper() in [str(v).upper() for v in (val or [])]
-            except Exception:
-                pass
+            if op in ("gt", "gte", "lt", "lte"):
+                got = _cmp_values(wval, val, op)
+                match = bool(got)
+            elif op == "eq":
+                match = str(wval or "").strip().upper() == str(val).strip().upper()
+            elif op == "ne":
+                match = str(wval or "").strip().upper() != str(val).strip().upper()
+            elif op == "contains":
+                match = str(val).upper() in str(wval or "").upper()
+            elif op == "in":
+                match = str(wval or "").strip().upper() in [
+                    str(v).strip().upper() for v in (val or [])]
+            else:
+                # Unknown operator: exclude rather than pass, so it shows up as
+                # a 0-match clause instead of quietly doing nothing.
+                match = False
             if not match:
                 break
         if match:
@@ -4679,13 +5756,14 @@ def run(engine=None):
         )
         _skip_keys = {
             "wm_reset_page", "apply_uwi_filter", "wm_ai_run", "wm_ai_clear",
-            "wells_clear_viewport", "view_summary", "clear_tray",
+            "wells_clear_viewport", "wells_reset_view", "view_summary",
+            "clear_tray",
             "close_summary_bottom", "open_docs_btn", "export_xlsx_btn",
         }
         for _pk in list(st.session_state.keys()):
             if (_pk.startswith(_skip_prefixes)
                     or _pk in _skip_keys
-                    or any(_c in _pk for _c in ("\\", "/", ":"))):
+                    or _is_action_key(_pk)):
                 continue
             try:
                 st.session_state[_pk] = st.session_state[_pk]
@@ -4693,6 +5771,16 @@ def run(engine=None):
                 pass
 
         if st.button("← Back to map", key="docs_back"):
+            # RESET THE RADIO ON THE WAY OUT, or returning lands on a
+            # Results panel whose radio still says "Documents", which
+            # navigates straight back and traps the user in a loop with no
+            # way out but the browser back button.
+            #
+            # Safe to set here specifically: this is the Documents page, it
+            # returns before the Results panel is drawn, so the radio widget
+            # has NOT been instantiated in this run. Setting a widget key
+            # after its widget exists is what Streamlit refuses.
+            st.session_state["results_mode:v1"] = "🛢 Wells"
             st.session_state["wm_docs_page"] = False
             st.rerun()
         try:
@@ -4763,13 +5851,14 @@ def run(engine=None):
         # run it's clicked).
         _skip_persist_keys = {
             "wm_reset_page", "apply_uwi_filter", "wm_ai_run", "wm_ai_clear",
-            "wells_clear_viewport", "view_summary", "clear_tray",
+            "wells_clear_viewport", "wells_reset_view", "view_summary",
+            "clear_tray",
             "close_summary_bottom",
         }
         for _persist_k in list(st.session_state.keys()):
             if (_persist_k.startswith(_skip_persist_prefixes)
                     or _persist_k in _skip_persist_keys
-                    or any(_c in _persist_k for _c in ("\\", "/", ":"))):
+                    or _is_action_key(_persist_k)):
                 # The third test skips dynamic widget keys built from a file
                 # path (e.g. the universal viewer's "las_dl_C:\...\file.las"
                 # download button). Those are widgets and re-assigning them
@@ -4886,10 +5975,29 @@ def run(engine=None):
                     st.cache_data.clear()
                 except Exception:
                     pass
-                # Drop every key in session_state. Iterate over a list
-                # copy because deleting from a dict you're iterating
-                # raises RuntimeError.
+                # Drop only the keys THIS PAGE owns. Deleting every key
+                # took the app shell's database connection with it and
+                # dumped the user back at the login screen — a page reset
+                # should not log you out. Iterate over a list copy because
+                # deleting from a dict you're iterating raises RuntimeError.
+                _PAGE_PREFIXES = (
+                    "wm_", "_wm_", "wells_", "_wells_", "map_", "_map_",
+                    "_drawn", "_active_", "_last_", "_zoom_", "_refilter_",
+                    "_pending_", "viewport_", "tray_", "_sel_", "_summary_",
+                    "_reset_saved_view", "selected_cells", "processed_drawings",
+                    "clicked_uwis", "scout_uwi", "show_summary", "h3_", "_h3_",
+                    "_filter_", "_last_filter_sig", "_broad_", "_auto_",
+                    # Found by listing every st.session_state key this file
+                    # touches and subtracting the prefixes above — guessing at
+                    # the list left the AI filter surviving a page reset, which
+                    # is exactly the state someone hits reset to escape.
+                    "ai_filter", "gom_sel_mode", "grid_visible",
+                    "selected_entities", "selected_h3_cells",
+                    "_export_scroll_pending", "_sc_",
+                )
                 for _k in list(st.session_state.keys()):
+                    if not str(_k).startswith(_PAGE_PREFIXES):
+                        continue
                     try:
                         del st.session_state[_k]
                     except KeyError:
@@ -4968,6 +6076,36 @@ def run(engine=None):
         # valid for the new sources) — drop it so it can't re-filter.
         st.session_state.pop("_active_drill_bbox", None)
         st.session_state.pop("_refilter_drawn_box", None)
+
+    # ── the SAME reasoning, for every other filter ───────────────────────────
+    # Changing the Area lifted the suppression above; changing an operator, a
+    # county, a depth range or the Query type did not. So after a "✗ Clear
+    # wells" or a draw (both of which set wells_suppressed), adjusting any of
+    # those left the flag set and the map came back EMPTY — the user changed a
+    # filter and got no wells, with nothing on screen explaining why.
+    #
+    # Every one of these is a deliberate "show me this" action, so all of them
+    # lift the suppression. Compared as a signature rather than one tracker per
+    # widget: a new filter added to the tuple is then covered automatically,
+    # and repr() copes with the list values multiselects return.
+    #
+    # DISPLAY toggles are deliberately absent — basemap, legend, the wm_db_*
+    # overlay switches. Those change how the map looks, not which wells were
+    # asked for, and un-suppressing on them would undo a Clear the moment
+    # someone flicked a layer on.
+    _FILTER_KEYS = (
+        "wm_query_sel", "wm_q_area", "wm_q_op", "wm_q_source", "wm_q_wtype",
+        "wm_q_uwi_text", "wm_q_td_lo", "wm_q_td_hi", "wm_q_spud_lo",
+        "wm_q_spud_hi", "wm_q_comp_lo", "wm_q_comp_hi",
+        "wm_sc_state", "wm_sc_county", "wm_sc_protraction",
+    )
+    _filter_sig = repr([st.session_state.get(_k) for _k in _FILTER_KEYS])
+    if st.session_state.get("_last_filter_sig") != _filter_sig:
+        # First render seeds the signature without acting — otherwise every
+        # cold start would clear a suppression the user set deliberately.
+        if "_last_filter_sig" in st.session_state:
+            st.session_state["wells_suppressed"] = False
+        st.session_state["_last_filter_sig"] = _filter_sig
 # ── Resolve query filter for SQL push-down ─────────────────────
     _qry_where = ""
     _early_qsel = st.session_state.get("wm_query_sel")
@@ -4988,7 +6126,13 @@ def run(engine=None):
         _early_qvalue = st.session_state.get("wm_q_op")
         if _early_qvalue:
             _safe = _early_qvalue.replace("'", "''")
-            _qry_where = f"AND COALESCE(w.operator_name, ba.ba_name) = '{_safe}'"
+            # Mirror the SELECT expression exactly — _qry_wells displays
+            # COALESCE(w.operator_name, ba.ba_name, 'Unknown'), so a two-arg
+            # COALESCE here cannot match the wells shown as "Unknown" (both
+            # sides NULL). The dropdown offers that value, so it has to work.
+            _qry_where = (
+                "AND COALESCE(w.operator_name, ba.ba_name, 'Unknown') = "
+                f"'{_safe}'")
     elif _early_qtype == "well_type":
         _early_qvalue = st.session_state.get("wm_q_wtype")
         if _early_qvalue:
@@ -5353,7 +6497,54 @@ def run(engine=None):
 
     # Apply AI filter if active (only meaningful when we have wells)
     _ai_spec = st.session_state.get("ai_filter_spec")
-    if _ai_spec and _wells_raw:
+    # The filter runs over _wells_raw — the main wells query. Wells can also
+    # reach the map through the drill shadow (tray_well_data) without
+    # _wells_raw ever being populated, and in that case the filter was
+    # skipped ENTIRELY and silently: a spec on screen, a full map, and no
+    # filtering. Record it so the panel can say so.
+    # Two different reasons the filter can have nothing to work on, and they
+    # need different advice. Either the map is empty (wells cleared, or never
+    # loaded), or the map has wells that arrived through the drill shadow
+    # without _wells_raw being populated. Telling someone who just pressed
+    # Clear that "these wells did not come from the main query" is nonsense —
+    # there are no wells at all.
+    st.session_state["ai_filter_no_source"] = bool(_ai_spec) and not _wells_raw
+    st.session_state["ai_filter_map_empty"] = (
+        bool(_ai_spec) and not _wells_raw
+        and not st.session_state.get("tray_well_data")
+        and not st.session_state.get("viewport_uwis"))
+
+    # ── DATABASE MODE ───────────────────────────────────────────────────────
+    # Translate the spec to a WHERE fragment and let the wells query answer it,
+    # instead of sieving what happens to be loaded. This is the difference
+    # between "which of these 350 wells spudded since 2020" and "which wells
+    # spudded since 2020" — the second is usually the question being asked, and
+    # the loaded set is an accident of how the map was navigated.
+    #
+    # It REPLACES the loaded set rather than narrowing it, so the area/query
+    # scope no longer applies. That is the point of the mode; the caption says
+    # so, and AI_DB_LIMIT caps what a broad question can pull back.
+    _ai_db_mode = str(st.session_state.get("wm_ai_scope", "")).startswith("Whole")
+    st.session_state.pop("ai_filter_rejected", None)
+    if _ai_spec and _ai_db_mode:
+        _ai_where, _ai_rejected = _ai_spec_to_where(
+            _ai_spec, _ai_db_columns(engine))
+        st.session_state["ai_filter_rejected"] = _ai_rejected
+        st.session_state["ai_filter_sql_where"] = _ai_where
+        if _ai_where:
+            try:
+                _display_wells = _qry_wells_bcp(
+                    engine, limit=AI_DB_LIMIT, where_extra=_ai_where) or []
+            except Exception as _e:
+                _display_wells = []
+                st.session_state["ai_filter_rejected"] = (
+                    _ai_rejected + [f"query failed: {type(_e).__name__}: {_e}"])
+            st.session_state["ai_filter_match"] = (len(_display_wells), None)
+            st.session_state["ai_filter_empty_fields"] = []
+            st.session_state["ai_filter_clauses"] = []
+            st.session_state["ai_filter_no_source"] = False
+            st.session_state["ai_filter_map_empty"] = False
+    elif _ai_spec and _wells_raw:
         _display_wells = _apply_ai_filter(_wells_raw, _ai_spec)
         # Diagnostics so a 0-match isn't a silent blank map. Record how many
         # of the loaded wells matched, and flag any filtered field that's
@@ -5373,10 +6564,34 @@ def run(engine=None):
         ]
         st.session_state["ai_filter_match"] = (len(_display_wells), len(_wells_raw))
         st.session_state["ai_filter_empty_fields"] = _empty_fields
+
+        # PER-CLAUSE counts. A combined 0 tells you nothing actionable: the
+        # model may have written a sensible filter that legitimately matches
+        # nothing, or a nonsense one. Applying each clause ALONE separates
+        # those — "spud_date >= 2020 matched 0 by itself, and the sample
+        # values are 2016-04-11" is a diagnosis; "0 of 50 matched" is not.
+        # Sample values come along because most surprises here are a type
+        # mismatch (a date compared as text) rather than a wrong predicate.
+        _clauses = []
+        for _f in (_ai_spec.get("filters") or []):
+            _fld = _f.get("field")
+            try:
+                _alone = len(_apply_ai_filter(_wells_raw, {"filters": [_f]}))
+            except Exception:
+                _alone = None
+            _samples = [str(_w.get(_fld)) for _w in _wells_raw[:300]
+                        if _populated(_w.get(_fld))][:3]
+            _clauses.append({
+                "clause": f"{_fld} {_f.get('op')} {_f.get('value')!r}",
+                "matches alone": "error" if _alone is None else _alone,
+                "example values in the data": ", ".join(_samples) or "(all empty)",
+            })
+        st.session_state["ai_filter_clauses"] = _clauses
     else:
         _display_wells = _wells_raw
         st.session_state.pop("ai_filter_match", None)
         st.session_state.pop("ai_filter_empty_fields", None)
+        st.session_state.pop("ai_filter_clauses", None)
 
     # Merge drilled wells from the shadow cache into _display_wells.
     # The shadow is populated by the rectangle/circle drill paths
@@ -5386,13 +6601,48 @@ def run(engine=None):
     # current filter in Wells mode. Merging means: after a user draws a
     # circle or bbox to drill an area, those wells become searchable
     # in the picker AND can be added to the tray from there.
+    # 🔑 THE MERGE MUST NOT UNDO THE FILTER.
+    #
+    # This ran unconditionally and appended every drilled well back into
+    # _display_wells — which is what wells_df, and therefore the MAP, is
+    # built from. So an AI filter narrowed the set and the very next block
+    # put the removed wells straight back. That is the whole of the
+    # "intermittent AI filter" bug: it worked in a fresh session with an
+    # empty shadow, and silently stopped the moment anyone drew a rectangle
+    # or a circle. Spec on screen, full map, no explanation.
+    #
+    # The merge is still right for what it was FOR — the sidebar picker, so
+    # a well you drilled can be found and added to the tray. So the merged
+    # set now lives in its own name, and the map keeps the filtered one.
+    # 🔑 THE MERGE MUST NOT UNDO THE FILTER.
+    #
+    # This appended every drilled well back into _display_wells, which is
+    # what wells_df — and therefore the MAP — is built from. So an AI filter
+    # narrowed the set and the very next block put the removed wells back.
+    # That is the whole of the "intermittent AI filter" bug: it worked in a
+    # fresh session with an empty shadow and silently stopped the moment
+    # anyone drew a rectangle or a circle. Spec on screen, full map, no
+    # explanation.
+    #
+    # The merge itself is still right — a well you drilled should stay
+    # findable. So the SHADOW WELLS GO THROUGH THE SAME FILTER before they
+    # are merged, rather than bypassing it. With no spec running,
+    # _apply_ai_filter returns them untouched, so every other case behaves
+    # exactly as it did.
     _shadow_for_display = st.session_state.get("tray_well_data", {})
     if _shadow_for_display:
         _existing_uwis = {w.get("uwi") for w in _display_wells}
-        _display_wells = list(_display_wells)  # copy so we don't mutate _wells_raw
-        for _u, _w in _shadow_for_display.items():
-            if _u not in _existing_uwis:
-                _display_wells.append(_w)
+        _shadow_new = [_w for _u, _w in _shadow_for_display.items()
+                       if _u not in _existing_uwis]
+        if _ai_spec and _shadow_new:
+            try:
+                _shadow_new = _apply_ai_filter(_shadow_new, _ai_spec)
+            except Exception:
+                # A filter that cannot be evaluated must not silently
+                # readmit everything it was meant to exclude.
+                _shadow_new = []
+        _display_wells = list(_display_wells)   # copy — never mutate _wells_raw
+        _display_wells.extend(_shadow_new)
 
     # Convert list-of-dicts to DataFrame once — all downstream code unchanged.
     # In lazy-load case this is an empty DataFrame, which is fine: the grid
@@ -5460,7 +6710,7 @@ def run(engine=None):
     top2 = _row_a[1]   # 🗂 Schema
     top5 = _row_a[2]   # 📊 Database
     with top1:
-        basemap = st.selectbox("🖼 Background", list(BASEMAPS.keys()),
+        basemap = st.selectbox("🖼 Background", _BASEMAPS_SHOWN,
                                index=0, key="wm_basemap")
     with top2:
         # Area selector — partitions which region's well data renders on
@@ -5525,13 +6775,44 @@ def run(engine=None):
         # whole map (engine + bcp) on the next rerun via the resolution block
         # at the top of run().
         _conn_db = st.session_state.get("wm_conn_db", BCP_DATABASE)
+        _db_all = []          # every user database; set inside the try below
         try:
             from sqlalchemy import text as _dbt2
             with engine.connect() as _dbc2:
-                _db_options = [r[0] for r in _dbc2.execute(_dbt2(
+                # ONLY DATABASES THE MAP CAN ACTUALLY READ.
+                #
+                # This listed every user database on the instance, which is a
+                # promise the page cannot keep: every query here names
+                # dataview.dv_well, dataview_federation.* and file_catalog.*,
+                # so picking a database shaped differently — WELL_REF, say —
+                # produced "Invalid object name
+                # 'dataview_federation.v_well_density_r4'" and an empty map.
+                # Two people spent an hour discovering that, one of whom wrote
+                # the notes on this page.
+                #
+                # A control that only offers valid choices needs no
+                # explanation. The test is the table every path depends on:
+                # dataview.dv_well. OBJECT_ID with a three-part name returns
+                # NULL rather than raising when the database is unreachable or
+                # the object is absent, so one query settles the whole list.
+                #
+                # Other sources reach the map by being FEDERATED INTO
+                # dataview_federation.v_well — that is the supported route,
+                # and it is how the 4M-well reference draws today.
+                _db_all = [r[0] for r in _dbc2.execute(_dbt2(
                     "SELECT name FROM sys.databases "
                     "WHERE database_id > 4 AND state = 0 "
                     "ORDER BY name")).fetchall()]
+                _db_options = []
+                for _dbn in _db_all:
+                    try:
+                        _ok = _dbc2.execute(_dbt2(
+                            "SELECT OBJECT_ID(:o)"),
+                            {"o": f"[{_dbn}].dataview.dv_well"}).scalar()
+                    except Exception:
+                        _ok = None
+                    if _ok is not None:
+                        _db_options.append(_dbn)
         except Exception:
             _db_options = []
         if _conn_db and _conn_db not in _db_options:
@@ -5544,8 +6825,13 @@ def run(engine=None):
             _db_options = [_cur] + _db_options
         _map_db = st.selectbox("📊 Database", _db_options, key="wm_map_db",
                                 help="Which database the map reads from "
-                                     "(engine + bcp). Defaults to the database "
-                                     "you connected to.")
+                                     "(engine + bcp). Only databases carrying "
+                                     "a dataview.dv_well table are listed — "
+                                     "the map cannot read an arbitrary "
+                                     "database. Other sources reach the map by "
+                                     "being federated into "
+                                     "dataview_federation.v_well, which is how "
+                                     "the national reference draws.")
 
     # ── Spatial constraint ("Constrain to") — standing, composes w/ Query ─
     # Geography filter applied after Query and before the map renders. Its
@@ -5771,14 +7057,33 @@ def run(engine=None):
                 st.session_state["wells_layer_on"] = True
                 st.session_state["wells_suppressed"] = False
                 st.rerun()
-    elif qtype == "operator" and not wells_df.empty:
-        qvalue = st.selectbox("Operator",
-            sorted(wells_df["operator_name"].dropna().unique()),
-            key="wm_q_op", label_visibility="collapsed")
-    elif qtype == "well_type" and not wells_df.empty:
-        qvalue = st.selectbox("Well Type",
-            sorted(wells_df["well_type"].dropna().unique()),
-            key="wm_q_wtype", label_visibility="collapsed")
+    elif qtype == "operator":
+        # Options come from the database, scoped by area only — see
+        # _qry_distinct_attr. Reading them from wells_df collapsed the list to
+        # whatever was already selected. Falls back to the loaded wells if the
+        # query fails, so the control still works rather than vanishing (a
+        # missing selectbox loses its session value and resets to the first
+        # option on the next run, which is what made this look like a filter
+        # that "went back to Anadarko").
+        _ops = _qry_distinct_attr(
+            engine, "COALESCE(w.operator_name, ba.ba_name, 'Unknown')",
+            _spatial_where)
+        if not _ops and not wells_df.empty:
+            _ops = sorted(wells_df["operator_name"].dropna().unique())
+        if _ops:
+            qvalue = st.selectbox("Operator", _ops,
+                key="wm_q_op", label_visibility="collapsed")
+        else:
+            st.caption("No operators found for this area.")
+    elif qtype == "well_type":
+        _wts = _qry_distinct_attr(engine, "w.well_type", _spatial_where)
+        if not _wts and not wells_df.empty:
+            _wts = sorted(wells_df["well_type"].dropna().unique())
+        if _wts:
+            qvalue = st.selectbox("Well Type", _wts,
+                key="wm_q_wtype", label_visibility="collapsed")
+        else:
+            st.caption("No well types found for this area.")
     elif qtype == "source":
         # Query distinct sources directly from DB — no need to load all wells
         _src_opts = []
@@ -5846,67 +7151,399 @@ def run(engine=None):
         st.session_state["wells_layer_on"] = True
         st.session_state["wells_suppressed"] = False
 
-    ctrl, mapcol = st.columns([1, 3], gap="small")
+    # ── Match the theme's framed look on the panels added above the map ─────
+    # The Query selectbox and the geography pills get a gold frame from the app
+    # theme; expanders do not, so the new panels read as a different class of
+    # thing from the controls beside them.
+    #
+    # SEVERAL SELECTORS ON PURPOSE. Streamlit has moved the expander DOM more
+    # than once — data-testid has sat on the wrapper div, on the <details>
+    # itself, and before that there were streamlit-expander* class names. A
+    # single selector is a guess about which version is installed; the unmatched
+    # ones cost nothing.
+    #
+    # var(--primary-color) rather than a hex, so this follows Midnight Gold to
+    # whatever theme is picked next instead of pinning one palette into the page.
+    st.markdown(
+        "<style>"
+        'div[data-testid="stExpander"],'
+        'div[data-testid="stExpander"] > details,'
+        'div[data-testid="stExpander"] details,'
+        'details[data-testid="stExpander"],'
+        'section[data-testid="stExpander"],'
+        "div.streamlit-expander,"
+        "div.stExpander{"
+        "border:1px solid var(--primary-color,#E8B84B) !important;"
+        "border-radius:8px !important;"
+        "background:transparent !important;"
+        "box-shadow:none !important;}"
+        # The inner <details> would otherwise draw a second frame inside the
+        # wrapper's — one box, not two.
+        'div[data-testid="stExpander"] details{'
+        "border:0 !important;}"
+        "</style>", unsafe_allow_html=True)
 
-    with ctrl:
-        # ── AI Query ──────────────────────────────────────────────────
-        _ai_open = bool(
-            st.session_state.get("ai_filter_spec") or
-            st.session_state.get("ai_filter_error") or
-            st.session_state.get("ai_filter_desc")
+    # ── AI Well Filter — FULL WIDTH, above the control/map split ─────────────
+    # It used to sit inside `ctrl`, the 1-of-4 column, which left a
+    # natural-language question box about 200px wide — you could not read your
+    # own question back. A question box wants width more than anything else on
+    # this page, and it applies to the whole map rather than to one panel, so
+    # it belongs above the split rather than inside either side of it.
+    # ── AI Query ──────────────────────────────────────────────────
+    _ai_open = bool(
+        st.session_state.get("ai_filter_spec") or
+        st.session_state.get("ai_filter_error") or
+        st.session_state.get("ai_filter_desc")
+    )
+    with st.expander("🤖 AI Well Filter", expanded=_ai_open):
+        st.caption("Ask anything about the wells — natural language.")
+        # Scope FIRST. It changes what the question means — "mapped wells"
+        # sieves what is on screen, "whole database" goes and finds more — so
+        # it belongs before the box, where it is read before typing rather
+        # than discovered after a surprising result.
+        st.radio(
+            "Search", ["Mapped wells", "Whole database"],
+            horizontal=True, key="wm_ai_scope",
+            help="Mapped wells filters the wells already on the map. Whole "
+                 "database queries dv_well directly and REPLACES what is "
+                 "displayed, ignoring the current area — use it when the "
+                 "answer may lie outside what is loaded.")
+        # ── NEAR A FEATURE — the deterministic spatial search ──────────────
+        # Sits under the AI question deliberately. The geometry is IN THE
+        # DATABASE, so "which wells are near line C" is one STDistance away —
+        # but the AI filter applies its spec in pandas over already-loaded
+        # wells and can neither reach geometry nor should it. This control
+        # answers the question with no model involved, and it is what a `near`
+        # clause in the spec will eventually CALL rather than reimplement.
+        # A TOGGLE, NOT AN EXPANDER — this whole AI panel is already inside one,
+        # and expanders cannot nest. Perry predicted this exact trap in July and
+        # I walked into it anyway; the error surfaces as "Expanders may not be
+        # nested inside other expanders" and takes the page down, not just the
+        # control.
+        if st.checkbox("📍 Wells near a feature (seismic line, field, lease…)",
+                       key="wm_near_open"):
+            _nf1, _nf2, _nf3, _nf4 = st.columns([1.4, 2.2, 1.1, 1])
+            _feat = _nf1.selectbox(
+                "Feature type",
+                ["seismic_line", "seismic_survey", "field", "lease", "pipeline"],
+                key="wm_near_feat",
+                format_func=lambda k: k.replace("_", " ").title())
+            # Only features that HAVE geometry are offered — a name in the list
+            # that cannot be searched is a control that fails after you use it.
+            _names = _near_feature_names(engine, _feat)
+            if not _names:
+                _nf2.selectbox("Name", ["(none with geometry)"], disabled=True,
+                               key=f"wm_near_name_{_feat}")
+                st.caption(f"No {_feat.replace('_', ' ')} in this database "
+                           f"carries geometry yet.")
+            else:
+                _nm = _nf2.selectbox("Name", _names, key=f"wm_near_name_{_feat}")
+                _dist = _nf3.number_input(
+                    "Within (m)", min_value=10, max_value=int(_NEAR_MAX_M),
+                    value=500, step=100, key="wm_near_dist",
+                    help="Straight-line distance on the ellipsoid. "
+                         "STDistance on a geography column returns METRES "
+                         "whatever CRS the source data arrived in.")
+                if _nf4.button("📍 Find", key="wm_near_run",
+                               use_container_width=True):
+                    _uwis = _wells_near_feature(engine, _feat, _nm, _dist)
+                    if not _uwis:
+                        st.warning(
+                            f"No wells within {int(_dist):,} m of {_nm}. "
+                            f"(A well needs a surface coordinate to be found — "
+                            f"wells held without one are not in dv_well.)")
+                    else:
+                        # Becomes an ordinary uwi-in-list filter, so every
+                        # existing surface — diagnostics, drill shadow, results
+                        # grid — keeps working unchanged. By this point it is
+                        # just a well list.
+                        st.session_state["ai_filter_spec"] = {
+                            "filters": [{"field": "uwi", "op": "in",
+                                         "value": _uwis}],
+                            "description": (f"Wells within {int(_dist):,} m of "
+                                            f"{_feat.replace('_', ' ')} {_nm}")}
+                        st.session_state["ai_filter_desc"] = \
+                            st.session_state["ai_filter_spec"]["description"]
+                        st.session_state["map_mode"] = "wells"
+                        st.session_state["map_mode_radio"] = "wells"
+                        st.session_state["wells_layer_on"] = True
+                        st.session_state["wells_suppressed"] = False
+                        st.session_state["_wells_already_loaded"] = False
+                        st.rerun()
+
+        # Question on the left, buttons stacked narrow on the right. At full
+        # width a 50/50 button split would give two enormous buttons under a
+        # wide box; the question is what deserves the space.
+        _q_col, _b_col = st.columns([5, 1], gap="small")
+        _ai_q = _q_col.text_area(
+            "Question",
+            key="wm_ai_question",
+            label_visibility="collapsed",
+            placeholder='e.g. "horizontal wells deeper than 10,000 ft in Loving '
+                        'County" or "wells spudded after 2020 with production"',
+            height=80,
         )
-        with st.expander("🤖 AI Well Filter", expanded=_ai_open):
-            st.caption("Ask anything about the wells — natural language.")
-            _ai_q = st.text_area(
-                "Question",
-                key="wm_ai_question",
-                label_visibility="collapsed",
-                placeholder='e.g. "horizontal wells deeper than 10,000 ft in Loving County"',
-                height=80,
-            )
-            _ai_col1, _ai_col2 = st.columns(2)
-            if _ai_col1.button("🔍 Filter", key="wm_ai_run",
-                               use_container_width=True, type="primary",
-                               disabled=not _ai_q.strip()):
-                st.session_state.pop("ai_filter_error", None)
-                with st.spinner("Asking Claude…"):
-                    _spec, _err = _ai_filter_wells(_ai_q.strip(), _wells_raw)
-                if _spec is not None:
-                    st.session_state["ai_filter_spec"] = _spec
-                    st.session_state["ai_filter_desc"] = _spec.get("description", "")
-                    st.session_state.pop("ai_filter_error", None)
-                    st.rerun()
-                else:
-                    # Store error — don't rerun so user can read it
-                    st.session_state["ai_filter_error"] = _err
-            if _ai_col2.button("✕ Clear", key="wm_ai_clear",
-                               use_container_width=True,
-                               disabled="ai_filter_spec" not in st.session_state):
-                st.session_state.pop("ai_filter_spec", None)
-                st.session_state.pop("ai_filter_desc", None)
+        _ai_col1 = _b_col
+        _ai_col2 = _b_col
+        if _ai_col1.button("🔍 Filter", key="wm_ai_run",
+                           use_container_width=True, type="primary",
+                           disabled=not _ai_q.strip()):
+            st.session_state.pop("ai_filter_error", None)
+            # Asking a question is asking to SEE the answer, and three separate
+            # pieces of state can keep the result invisible: the mode radio,
+            # the wells layer switch, and the suppression flag. Setting only
+            # the last one left the map blank until the radio was moved by
+            # hand. Same set "🔍 Apply UWI Filter" uses — that button is the
+            # working precedent for "show me what this query found".
+            st.session_state["map_mode"] = "wells"
+            st.session_state["map_mode_radio"] = "wells"
+            st.session_state["wells_layer_on"] = True
+            st.session_state["wells_suppressed"] = False
+            st.session_state["_wells_already_loaded"] = False
+            with st.spinner("Asking Claude…"):
+                _spec, _err = _ai_filter_wells(_ai_q.strip(), _wells_raw,
+                                           _engine=engine)
+            if _spec is not None:
+                st.session_state["ai_filter_spec"] = _spec
+                st.session_state["ai_filter_desc"] = _spec.get("description", "")
                 st.session_state.pop("ai_filter_error", None)
                 st.rerun()
-            if st.session_state.get("ai_filter_error"):
-                st.error(f"❌ {st.session_state['ai_filter_error']}")
-            elif st.session_state.get("ai_filter_desc"):
-                st.success(f"✅ {st.session_state['ai_filter_desc']}")
-                # Match count + empty-field diagnosis so a 0-match reads as
-                # "no wells matched / no data" rather than a silent blank map.
-                _match = st.session_state.get("ai_filter_match")
-                if _match:
-                    _n, _tot = _match
-                    _empty = st.session_state.get("ai_filter_empty_fields") or []
-                    if _n == 0:
-                        st.warning(f"0 of {_tot:,} loaded wells matched.")
-                        if _empty:
-                            st.caption(
-                                "⚠ " + ", ".join(_empty) + " is empty for every "
-                                "loaded well — there's no data to filter on. The "
-                                "filter is working; the column just isn't "
-                                "populated for these wells.")
+            else:
+                # Store error — don't rerun so user can read it
+                st.session_state["ai_filter_error"] = _err
+        if _ai_col2.button("✕ Clear", key="wm_ai_clear",
+                           use_container_width=True,
+                           disabled="ai_filter_spec" not in st.session_state):
+            for _k in ("ai_filter_spec", "ai_filter_desc", "ai_filter_error",
+                       "ai_filter_match", "ai_filter_clauses",
+                       "ai_filter_empty_fields", "ai_filter_rejected",
+                       "ai_filter_sql_where", "ai_filter_no_source"):
+                st.session_state.pop(_k, None)
+            # Clearing has to RESTORE, not just forget. In database mode the
+            # spec REPLACED the well set, so dropping it leaves the
+            # replacement on screen until something reloads — which is why
+            # toggling the wells layer off and on "fixed" it by hand. Ask for
+            # a reload, the same way the Filter button does.
+            st.session_state["_wells_already_loaded"] = False
+            st.session_state["wells_suppressed"] = False
+            st.session_state["wells_layer_on"] = True
+            st.rerun()
+        if st.session_state.get("ai_filter_error"):
+            st.error(f"❌ {st.session_state['ai_filter_error']}")
+        elif (st.session_state.get("ai_filter_desc")
+                and st.session_state.get("ai_filter_spec")):
+            st.success(f"✅ {st.session_state['ai_filter_desc']}")
+            _spec_now = st.session_state.get("ai_filter_spec")
+            if _spec_now:
+                # NOT an expander — this whole block already lives inside the
+                # "🤖 AI Well Filter" expander, and Streamlit forbids nesting
+                # them. It would also be redundant disclosure: the parent is
+                # already the thing you open to get here.
+                st.markdown("**What the filter actually asked for**")
+                st.code(_ai_spec_to_sql(_spec_now), language="sql")
+                _cl = st.session_state.get("ai_filter_clauses")
+                if _cl:
+                    st.caption("Each condition on its own, against the loaded "
+                               "wells — the one matching 0 is the one to look "
+                               "at:")
+                    st.dataframe(pd.DataFrame(_cl), hide_index=True,
+                                 use_container_width=True)
+                if st.session_state.get("ai_filter_map_empty"):
+                    st.warning(
+                        "There are no wells on the map to filter — Mapped "
+                        "wells mode has nothing to work on. Load wells with an "
+                        "Area or Query selection, or set Search to **Whole "
+                        "database** and the question will go to dv_well "
+                        "directly.")
+                elif st.session_state.get("ai_filter_no_source"):
+                    st.warning(
+                        "The wells on the map arrived from a drawn selection "
+                        "rather than the main wells query, so Mapped wells "
+                        "mode cannot filter them. Load via an Area or Query "
+                        "selection, or use Whole database.")
+                # ── the dataset, when one was asked for ──────────────────
+                _show = (_spec_now or {}).get("show")
+                if _show in ("well_header", "wells", "well", "header"):
+                    _uwis = tuple(
+                        str(w.get("uwi")) for w in (_display_wells or [])
+                        if w.get("uwi"))[:500]
+                    if not _uwis:
+                        st.info("No wells matched, so there is no header data "
+                                "to show.")
                     else:
-                        st.caption(f"📊 {_n:,} of {_tot:,} wells match")
+                        _hdf = _qry_well_header_rows(engine, _uwis)
+                        if _hdf.empty:
+                            _why = _hdf.attrs.get("error")
+                            st.warning(
+                                "Matched wells could not be read back from "
+                                "dv_well." + (f"\n\n{_why}" if _why else ""))
+                        else:
+                            _all_cols = st.checkbox(
+                                "All columns", key="ai_hdr_all",
+                                help=f"Show every populated column "
+                                     f"({len(_hdf.columns)}) instead of the "
+                                     f"common ones.")
+                            _view = _hdf
+                            if not _all_cols:
+                                _pick = [c for c in WELL_HEADER_CORE
+                                         if c in _hdf.columns]
+                                if _pick:
+                                    _view = _hdf[_pick]
+                            st.markdown(
+                                f"**Well header** — {len(_view):,} well(s), "
+                                f"{len(_view.columns)} of {len(_hdf.columns)} "
+                                f"column(s)")
+                            st.dataframe(_view, hide_index=True,
+                                         use_container_width=True)
+                            st.download_button(
+                                "⬇ Download CSV",
+                                _view.to_csv(index=False).encode(),
+                                file_name="well_header.csv", mime="text/csv",
+                                key="ai_hdr_dl")
+                elif _show and _show in AI_HAS_TABLES:
+                    _tbl, _lbl = AI_HAS_TABLES[_show]
+                    _uwis = tuple(
+                        str(w.get("uwi")) for w in (_display_wells or [])
+                        if w.get("uwi"))[:500]
+                    if not _uwis:
+                        st.info(f"No wells matched, so there is no {_lbl} to "
+                                f"show. Widen the filter or switch Search to "
+                                f"Whole database.")
+                    else:
+                        _cdf = _qry_child_rows(engine, _tbl, _uwis)
+                        if _cdf.empty:
+                            st.warning(
+                                f"{len(_uwis)} well(s) matched, but none of "
+                                f"them have {_lbl} rows in {_tbl}.")
+                        else:
+                            st.markdown(
+                                f"**{_lbl.title()}** — {len(_cdf):,} row(s) "
+                                f"for {_cdf['uwi'].nunique()} well(s)")
+                            st.dataframe(_cdf, hide_index=True,
+                                         use_container_width=True)
+                            st.download_button(
+                                "⬇ Download CSV",
+                                _cdf.to_csv(index=False).encode(),
+                                file_name=f"{_show}.csv", mime="text/csv",
+                                key=f"ai_child_dl_{_show}")
+                elif _show:
+                    st.warning(f"'{_show}' is not a dataset this page can "
+                               f"show. Available: well_header, "
+                               + ", ".join(sorted(AI_HAS_TABLES)))
 
+                _rej = st.session_state.get("ai_filter_rejected") or []
+                if _rej:
+                    st.warning("Not searchable in database mode:\n\n"
+                               + "\n".join("• " + r for r in _rej))
+                if str(st.session_state.get("wm_ai_scope", "")).startswith("Whole"):
+                    st.caption(
+                        "Database mode: this ran against dv_well and replaced "
+                        f"what was displayed (max {AI_DB_LIMIT:,} wells). The "
+                        "current area filter does not apply.")
+                else:
+                    st.caption(
+                        "Mapped-wells mode: applied in pandas over the wells "
+                        "already on the map. No query was sent to the "
+                        "database, and wells outside the loaded set cannot "
+                        "match — switch Search to Whole database for those.")
+                st.json(_spec_now, expanded=False)
+            # Match count + empty-field diagnosis so a 0-match reads as
+            # "no wells matched / no data" rather than a silent blank map.
+            _match = st.session_state.get("ai_filter_match")
+            if _match:
+                _n, _tot = _match
+                _empty = st.session_state.get("ai_filter_empty_fields") or []
+                # _tot is None in DATABASE mode — there is no "of N loaded" to
+                # report against, because the query replaced the loaded set
+                # rather than narrowing it. Formatting None with :, is what
+                # raised "unsupported format string passed to NoneType".
+                _of = f" of {_tot:,}" if isinstance(_tot, int) else ""
+                _where = "loaded wells" if isinstance(_tot, int) else "in the database"
+                if _n == 0:
+                    st.warning(f"0{_of} {_where} matched.")
+                    if _empty:
+                        st.caption(
+                            "⚠ " + ", ".join(_empty) + " is empty for every "
+                            "loaded well — there's no data to filter on. The "
+                            "filter is working; the column just isn't "
+                            "populated for these wells.")
+                else:
+                    st.caption(f"📊 {_n:,}{_of} wells match"
+                               + ("" if isinstance(_tot, int)
+                                  else " (database search)"))
+
+
+    # ── Registered layers — FULL WIDTH, above the control/map split ─────────
+    # Was inside `ctrl`, the 1-of-4 column: a file path and a five-field form
+    # squeezed into ~200px. Same misjudgement as the AI filter, and the same
+    # fix — a form whose main input is a Windows path wants the width, and it
+    # applies to the whole map rather than to one panel.
+    # ── Registered layers ───────────────────────────────────────────────
+        # The picker was removed at some point and left active_shp = [], which
+        # made the whole shapefile path dead: dv_spatial_layer still held the
+        # registry, _load_shp_layers still read it, _add_shapefile_layer still
+        # knew how to draw one, and nothing chose any. Restored here, plus the
+        # register-by-path form that went with it.
+    active_shp = []
+    with st.expander("🗺 Registered layers", expanded=False):
+        _all_layers = shp_layers or []
+        if _all_layers:
+            _lbl = {}
+            for _l in _all_layers:
+                _n = _l.get("layer_name") or _l.get("layer_id")
+                _c = _l.get("layer_category") or ""
+                _lbl[f"{_n}" + (f"  ({_c})" if _c else "")] = _l
+            _picked_lyr = st.multiselect(
+                "Show on map", sorted(_lbl), key="wm_shp_pick",
+                help="Layers registered in dv_spatial_layer.")
+            active_shp = [_lbl[k] for k in _picked_lyr if k in _lbl]
+        else:
+            st.caption("No layers registered yet.")
+
+        st.divider()
+        st.markdown("**Register a shapefile or GeoJSON**")
+        # One row at full width instead of two stacked rows of thirds — the
+        # path is the field that needs room and everything else is short.
+        _r1, _r2, _r3, _r4, _r5 = st.columns([4, 1.6, 1.2, 0.9, 0.9])
+        _new_path = _r1.text_input(
+            "Path", key="wm_shp_path",
+            placeholder=r"C:\GIS\Oil_Fields_USA.shp")
+        _new_name = _r2.text_input("Name", key="wm_shp_name",
+                                   placeholder="Oil Fields")
+        _new_cat = _r3.text_input("Category", key="wm_shp_cat",
+                                  placeholder="FIELD")
+        _new_col = _r4.color_picker("Colour", "#4CAF50", key="wm_shp_col")
+        _new_fill = _r5.checkbox("Filled", value=True, key="wm_shp_fill")
+        if st.button("➕ Register layer", key="wm_shp_add",
+                     disabled=not (_new_path and _new_name)):
+            _ok, _msg = _register_spatial_layer(
+                engine, _new_path.strip(), _new_name.strip(),
+                _new_cat.strip() or None, _new_col,
+                bool(_new_fill))
+            if _ok:
+                st.cache_data.clear()
+                st.success(_msg)
+                st.rerun()
+            else:
+                st.error(_msg)
+
+    # The map gets the FULL page width and the controls sit under it.
+    #
+    # Containers reserve their position at CREATION, not at use, so creating
+    # the map container first and the control container second puts the map on
+    # top — while `with ctrl:` and `with mapcol:` stay exactly where they are
+    # further down. That matters on a file this size: reordering ~100 lines of
+    # control UI by hand risks far more than swapping two constructors, and a
+    # revert is a two-line change.
+    #
+    # Was st.columns([1, 3]) — a quarter-width control rail beside the map.
+    # Everything that needed room (AI filter, layer registration) has already
+    # moved above the split, so the rail was holding two items and costing the
+    # map 25% of the page.
+    mapcol = st.container()
+    ctrl = st.container()
+
+    with ctrl:
         # ── Petroleum Region (optional state+county shortcut) ──────────
         # Picking a region applies a WHERE filter to wells: only those
         # whose province_state AND county fall inside the region's
@@ -5980,49 +7617,19 @@ def run(engine=None):
         _area_is_gom = ("gom" in active_area.get("sources", [])
                         and "main" not in active_area.get("sources", []))
 
-        # Overlays
+        # Map display
+        # The seven data-layer checkboxes that used to live here — trajectories,
+        # sticks, prod bubbles, prod heatmap, DST, formation tops, documented
+        # wells — were removed at Perry's request. Only the display toggles
+        # remain, so the panel is named for what it now does.
+        #
+        # active_db stays as an empty set rather than being deleted: the layer
+        # rendering downstream reads it, and an empty set means "draw none of
+        # them" without touching that code. The render blocks are now dead but
+        # harmless, and can be stripped separately once the removal has proved
+        # itself — deleting UI and its renderer in one pass makes a revert
+        # much more work than it needs to be.
         active_db = set()
-        with st.expander("💾 Overlays", expanded=False):
-            if st.checkbox("📐 Trajectories",    key="wm_db_traj"):
-                active_db.add("db_trajectories")
-            if st.checkbox("➖ Surface→TD sticks", key="wm_db_sticks",
-                           help="Straight line from surface to bottomhole "
-                                "for every well with a directional survey"):
-                active_db.add("db_sticks")
-            if st.checkbox("📈 Prod Bubbles",    key="wm_db_prod"):
-                active_db.add("db_production")
-            if st.checkbox("🔥 Prod Heatmap",    key="wm_db_prod_heat",
-                           help="Heatmap weighted by cumulative production for "
-                                "wells that have production data"):
-                active_db.add("db_production_heat")
-                st.radio("Weight by", ["BOE", "Oil", "Gas"],
-                         key="wm_db_prod_heat_wt", horizontal=True)
-            if st.checkbox("🧪 DST Intervals",   key="wm_db_dst"):
-                active_db.add("db_dst")
-            if st.checkbox("📏 Formation Tops",  key="wm_db_tops"):
-                active_db.add("db_formation_tops")
-            if st.checkbox("📄 Documented wells", key="wm_db_docs",
-                           help="Wells we hold catalogued documents for — "
-                                "click a marker to list the files"):
-                active_db.add("db_documents")
-            st.divider()
-            _show_legend = st.checkbox(
-                "🏷 Status legend", key="wm_show_legend", value=True,
-                help="Show a colour/symbol key for well status on the map")
-            _ppdm_symbols = st.checkbox(
-                "🛢 PPDM well symbols", key="wm_ppdm_symbols", value=False,
-                help="Draw wells as standard PPDM/API symbols (shape = status) "
-                     "instead of plain coloured dots")
-            # GOM wells are now driven by the top-bar Area selector — no
-            # separate checkbox here. The Area dropdown is the single
-            # source of truth for which region's wells render on the map.
-            # GOM Trajectories is rendered outside this expander (below)
-            # so it's visible without expanding Overlays first.
-
-        # Registered layers
-        active_shp = []
-        # Registered Layers UI removed. active_shp stays empty so the
-        # downstream shapefile-overlay loop is a no-op (no overlays drawn).
     with mapcol:
         # ── Spatial geography layer toggles ─────────────────────────────────
         # Chips above the map for the native-geography layers (dv_*.geog).
@@ -6036,6 +7643,7 @@ def run(engine=None):
             ("geo_pipelines",  "➖ Pipelines"),
             ("geo_seismic",    "🟪 Seismic"),
             ("geo_wellpts",    "⚫ Well points"),
+            ("geo_wellpath",   "🌀 Well paths"),
         ]
         _label_to_flag = {lbl: flag for flag, lbl in _geo_defs}
         if hasattr(st, "pills"):
@@ -6447,7 +8055,10 @@ def run(engine=None):
                 )
 
         # Build map — always show basemap even if no wells
-        bm   = BASEMAPS.get(basemap, BASEMAPS["OpenStreetMap"])
+        # A saved wm_basemap from a previous session could name a background
+        # no longer offered; fall back to the first SHOWN one rather than a
+        # hardcoded name that might itself be hidden one day.
+        bm   = BASEMAPS.get(basemap) or BASEMAPS[_BASEMAPS_SHOWN[0]]
 
         # Center priority:
         #   1. _drawn_bounds — set by circle Haversine drill or cell Commit.
@@ -6546,7 +8157,7 @@ def run(engine=None):
                 # so we shouldn't auto-zoom into wherever the legacy
                 # dv_well data happens to live. Zoom 3 gives a comfortable
                 # USA-wide view that fits typical screens better than 4.
-                lat0, lon0, zoom0 = 39.0, -98.0, 3   # US centroid
+                lat0, lon0, zoom0 = 39.5, -98.35, 4  # CONUS centroid, lower-48 frame
             elif st.session_state.get("map_mode", "none") == "h3":
                 # H3 mode shows a continental density layer — a precise
                 # centroid doesn't help here, and the only way to get one
@@ -6557,7 +8168,7 @@ def run(engine=None):
                 # "All Schemas" + H3 — diagnosed 2026-05-27. Read from
                 # session_state directly because the local _map_mode
                 # variable isn't assigned until ~80 lines below this block.
-                lat0, lon0, zoom0 = 39.0, -98.0, 4
+                lat0, lon0, zoom0 = 39.5, -98.35, 4
             elif "main" in active_area.get("sources", []):
                 # An area that uses the main dv_well source IS selected.
                 # Use the dv_well centroid as the initial view (cheap
@@ -6569,9 +8180,9 @@ def run(engine=None):
                         lon0 = float(_center_grid["center_lon"].mean())
                         zoom0 = 7
                     else:
-                        lat0, lon0, zoom0 = 39.0, -98.0, 4
+                        lat0, lon0, zoom0 = 39.5, -98.35, 4
                 except Exception:
-                    lat0, lon0, zoom0 = 39.0, -98.0, 4
+                    lat0, lon0, zoom0 = 39.5, -98.35, 4
             else:
                 # An area is selected that doesn't include "main" (e.g. GOM).
                 # Use that area's registered center as the fallback. The
@@ -6591,6 +8202,24 @@ def run(engine=None):
         m = folium.Map(location=[lat0, lon0], zoom_start=zoom0,
                        tiles=bm["tiles"], attr=bm["attr"],
                        max_zoom=bm.get("max_zoom", 19))
+
+        # Every OTHER basemap as a selectable layer, so the map's own layer
+        # control offers satellite/topo/street without a rerun. Only the
+        # chosen one was ever added, which is why the control listed a single
+        # entry and the alternatives looked like they had been removed — they
+        # were still in the 🖼 Background selector all along, one page rerun
+        # away instead of one click.
+        for _bm_name in _BASEMAPS_SHOWN:
+            if _bm_name == basemap:
+                continue
+            _bm = BASEMAPS[_bm_name]
+            try:
+                folium.TileLayer(
+                    tiles=_bm["tiles"], attr=_bm["attr"], name=_bm_name,
+                    max_zoom=_bm.get("max_zoom", 19), overlay=False,
+                    control=True, show=False).add_to(m)
+            except Exception:
+                pass
 
         # If we have a viewport, fit the map exactly to its bounds (overrides
         # the initial location/zoom_start with proper bbox-based zoom).
@@ -6624,6 +8253,52 @@ def run(engine=None):
                 name="Labels", overlay=True,
                 control=False, opacity=1.0,
             ).add_to(m)
+
+        # ── REGION OUTLINE (us_geo) ──────────────────────────────────────
+        # A petroleum region IS its counties — the registry defines Eagle Ford
+        # as a state plus a county list, so drawing those counties draws the
+        # play. Without it, "go to Eagle Ford" moves the camera to a rectangle
+        # and the region itself is invisible: you see wells, or empty basemap,
+        # with nothing saying where the play begins or ends.
+        #
+        # Distinct from the county overlay below, which follows the "Constrain
+        # to" state selector. This follows the Go-to picker, and it is drawn
+        # FIRST so the constrain-to highlight stays on top of it.
+        if (_us_geo is not None and HAS_US_GEO and HAS_PETROLEUM_REGIONS):
+            _rg_pick = st.session_state.get("wm_place_pick", "")
+            _rg_key = str(_rg_pick).replace(" (wells)", "")
+            _rg_val = (PETROLEUM_REGIONS or {}).get(_rg_key)
+            if _rg_val and not str(_rg_key).startswith("—"):
+                try:
+                    _rg_st = _rg_val[0]
+                    # Compare case- and space-insensitively: registries spell
+                    # counties as they were typed, the Census file as it
+                    # publishes them, and "DE WITT" vs "DEWITT" is the kind of
+                    # mismatch that silently draws nothing.
+                    _rg_co = {re.sub(r"[^A-Z]", "", str(c).upper())
+                              for c in (_rg_val[1] or [])}
+                    _rg_fc = _us_geo.state_feature_collection(_rg_st) if _rg_st else None
+                    if _rg_fc and _rg_co:
+                        _feats = [f for f in _rg_fc.get("features", [])
+                                  if re.sub(r"[^A-Z]", "",
+                                            str(f["properties"].get("county", "")).upper())
+                                  in _rg_co]
+                        if _feats:
+                            folium.GeoJson(
+                                {"type": "FeatureCollection", "features": _feats},
+                                name=f"{_rg_key} counties",
+                                style_function=lambda f: {
+                                    "color": "#C77D28", "weight": 2.0,
+                                    "fillColor": "#C77D28", "fillOpacity": 0.10},
+                                tooltip=folium.GeoJsonTooltip(
+                                    fields=["county"], aliases=["County:"]),
+                                control=True,
+                            ).add_to(m)
+                except Exception:
+                    # A missing county file or an unexpected property name must
+                    # not take the map down with it — the region still works as
+                    # a camera move.
+                    pass
 
         # ── County boundary overlay (us_geo) ─────────────────────────────
         # When a state is chosen in the "Constrain to" control, draw that
@@ -6700,9 +8375,52 @@ def run(engine=None):
             # Cold-start gate: no sources selected → no H3 query. Mirrors
             # Grid's "main"/"gom" gate so an empty selection shows only the
             # basemap rather than firing the cross-schema density view.
+            # AN EMPTY SOURCE IS A CHOICE THAT GOES NOWHERE — the same fault
+            # as listing a database with no dv_well, one level down. The GOM
+            # schema is wired into both federation views and currently holds
+            # nothing, so offering it produces an empty map and no explanation.
+            if "gom" in _h3_sources:
+                try:
+                    from sqlalchemy import text as _gomt
+                    with engine.connect() as _gomc:
+                        _gom_any = _gomc.execute(_gomt(
+                            "SELECT TOP 1 1 FROM dataview_gom.well "
+                            "WHERE surface_latitude IS NOT NULL")).scalar()
+                except Exception:
+                    _gom_any = None          # missing table counts as empty
+                if not _gom_any:
+                    _h3_sources = [x for x in _h3_sources if x != "gom"]
+
             _h3_has_sources = bool(_h3_sources)
-            if "main" in _h3_sources and "gom" in _h3_sources:
-                _h3_schema = None   # cross-schema (SUM both)
+
+            # ── WHICH SOURCE'S DENSITY ────────────────────────────────────
+            # The density views now union a THIRD source: the ~4M-well master
+            # header reference (WELL_REF), carrying dv_schema = 'well_ref'.
+            # Without a way to choose, every hexagon blends loaded wells with
+            # reference wells and the count means nothing anyone can act on.
+            #
+            # The whole mechanism was already here — _qry_h3_grid has taken a
+            # schema_filter since it was written, and this dispatch maps an
+            # area selection onto it. Only the reference case was missing.
+            _h3_src_pick = st.selectbox(
+                "Density source",
+                ["Loaded wells", "Reference (4M)", "Everything"],
+                key="h3_density_source",
+                help="Which wells the hexagons count. The density views union "
+                     "this database, the Gulf schema and the national "
+                     "reference; blending them makes a count nobody can "
+                     "interpret, so pick one.")
+            if _h3_src_pick == "Reference (4M)":
+                _h3_schema = "well_ref"
+                _h3_has_sources = True      # the reference needs no area pick
+            elif _h3_src_pick == "Everything":
+                _h3_schema = None           # SUM every arm
+                _h3_has_sources = True
+            elif "main" in _h3_sources and "gom" in _h3_sources:
+                # 'Loaded wells' with both areas: sum this database and the
+                # Gulf, but NOT the reference — which is the point of the
+                # setting, and is why this cannot simply pass None.
+                _h3_schema = "dataview"
             elif "main" in _h3_sources:
                 _h3_schema = "dataview"
             elif "gom" in _h3_sources:
@@ -6938,11 +8656,50 @@ def run(engine=None):
                      "geo_boundaries": "boundaries", "geo_pipelines": "pipelines",
                      "geo_seismic": "seismic"}
         _geo_on = [k for k in _geo_keys if k in active_db]
-        if _geo_on or "geo_wellpts" in active_db:
+        # Every geography-layer chip must appear in this guard. A layer
+        # whose only trigger is missing here renders ONLY when some other
+        # layer happens to be on — which looks exactly like a broken layer.
+        if _geo_on or "geo_wellpts" in active_db \
+                or "geo_wellpath" in active_db:
             try:
                 from dataview.mapping.geography_layers import add_geography_layer, add_well_points
                 for _ak in _geo_on:
                     add_geography_layer(m, engine, _geo_keys[_ak], show=True)
+                # Real 2D line paths ride along with the Seismic pill. The
+                # geog layer above holds SURVEY footprints; these are the
+                # individual LINES inside them, which is the thing you
+                # actually pick when you want a section.
+                if "geo_seismic" in active_db:
+                    for _sl in _seismic_line_paths(engine):
+                        folium.PolyLine(
+                            locations=_sl["pts"], color="#B36A00", weight=2,
+                            opacity=0.9,
+                            tooltip=folium.Tooltip(
+                                f"<b>📈 2D line</b><br>{_sl['survey']}<br>"
+                                f"{_sl['line']}"),
+                            popup=folium.Popup(
+                                f"<b>📈 2D seismic line</b><br>"
+                                f"<b>{_sl['survey']}</b><br>{_sl['line']}<br>"
+                                f"EPSG {_sl['epsg'] or '—'}<br>"
+                                f"{_sl['traces'] or '?'} traces",
+                                max_width=280),
+                        ).add_to(m)
+                if "geo_wellpath" in active_db:
+                    # Wellbore paths are a geography layer like any other:
+                    # minimum-curvature geometry computed by well_path_sql
+                    # and STORED, so drawing is a SELECT. Only wells with
+                    # real horizontal displacement have one — a vertical
+                    # hole is a dot at map scale and stays a marker.
+                    try:
+                        from dataview.mapping.well_path import add_well_paths
+                        _np = add_well_paths(
+                            m, engine, name="🌀 Well paths (survey)")
+                        _msg.info(f"🌀 Drew {_np:,} wellbore path(s)…"
+                                  if _np else
+                                  "🌀 No stored paths — run well_path_sql "
+                                  "apply to compute them.")
+                    except Exception as _pe:
+                        _msg.warning(f"Well paths skipped: {_pe}")
                 if "geo_wellpts" in active_db:
                     add_well_points(m, engine, show=True)
             except Exception as _ge:
@@ -7450,6 +9207,98 @@ def run(engine=None):
         # only repaints on a real browser event, so the drilled wells appeared
         # on the user's SECOND draw. The cell-selection hash stays because cell
         # border highlights are a subtle change st_folium can miss otherwise.
+        # ── Reset the VIEW (not the data) ────────────────────────────────
+        # Sits here, immediately above the map and at mapcol level, so it is
+        # ALWAYS on screen. The first attempt put it beside "✗ Clear wells",
+        # which turned out to live inside a collapsed help expander AND only
+        # in wells mode — present in the code, invisible in practice.
+        #
+        # Distinct from Clear: that removes what is displayed, this only moves
+        # the camera. Changing a filter re-queries but does not re-frame,
+        # because the view-persist JS restores the previous pan/zoom on every
+        # rerun — which is what makes drawing usable, and also what can leave
+        # you looking at the old area with the new wells off-screen.
+        # Reset on the left, Map display filling the space beside it — that
+        # row was a button and a wide gap, and the display toggles were the
+        # last thing left in the control rail.
+        # SAVED PLACES sit beside Reset view because they are the same kind of
+        # control: both move the CAMERA and neither touches the wells. One
+        # click to a known field beats hunting for a county on a world map,
+        # which is how every demo currently opens.
+        _pl1, _pl2, _pl3, _pl4 = st.columns([2.4, 0.8, 0.8, 1.2])
+        _places = _saved_places(engine)
+        _pick = _pl1.selectbox(
+            "Go to", ["— pick a place —"] + sorted(_places),
+            key="wm_place_pick", label_visibility="collapsed")
+        if _pl2.button("📍 Go", key="wm_place_go", use_container_width=True,
+                       disabled=_pick.startswith("—")):
+            _go_to_place(_places[_pick])
+            st.rerun()
+        # Deleting is offered only for entries that CAN be deleted. A built-in
+        # or a region would come straight back on the next run, and a control
+        # that appears to work and does not is worse than one that is absent.
+        _own = _pick in ((_load_user_prefs().get("places") or {}))
+        if _pl3.button("🗑", key="wm_place_del", use_container_width=True,
+                       disabled=not _own,
+                       help=("Remove this saved place" if _own else
+                             "Built-in places and petroleum regions cannot be "
+                             "removed — they come from code and from your data")):
+            if _delete_place(_pick):
+                st.rerun()
+        # Saving takes the CURRENT view, so a place is whatever you were
+        # looking at — no coordinates to type and nothing to get wrong.
+        # KEY IS VERSIONED, NOT REASSIGNED. Clearing the box after a save by
+        # writing st.session_state["wm_place_new"] = "" is illegal — Streamlit
+        # refuses to let a widget's own key be set once the widget exists, and
+        # it raises on the NEXT run, on whatever page happens to draw first.
+        # That is scar #6 in this codebase and I wrote it again here. Bumping a
+        # counter gives a fresh widget, which starts empty by itself.
+        _pv = st.session_state.get("wm_place_ver", 0)
+        _newname = _pl4.text_input("Save current view as",
+                                   key=f"wm_place_new_{_pv}",
+                                   placeholder="save this view as…",
+                                   label_visibility="collapsed")
+        if _newname.strip():
+            _b = (st.session_state.get("_drawn_bounds")
+                  or st.session_state.get("_active_drill_bbox"))
+            if not _b:
+                st.caption("Draw a box or run a search first — there is no "
+                           "current extent to save yet.")
+            else:
+                _p = _load_user_prefs()
+                _p.setdefault("places", {})[_newname.strip()] = _b
+                _save_user_prefs(_p)
+                st.session_state["wm_place_ver"] = _pv + 1   # fresh, empty box
+                st.success(f"Saved “{_newname.strip()}”.")
+                st.rerun()
+
+        _rv1, _rv2 = st.columns([1.1, 5])
+        if _rv1.button("🎯 Reset view", key="wells_reset_view",
+                       use_container_width=True,
+                       help="Re-frame the map on what is currently selected. "
+                            "Wells, tray and Results are kept — only the "
+                            "pan/zoom is reset."):
+            # Tell the view-persist JS to wipe its sessionStorage copy BEFORE
+            # it tries to restore, or the browser puts the old view straight
+            # back and the button appears to do nothing.
+            st.session_state["_reset_saved_view"] = True
+            # Drop the bounds that pin the camera so the auto-fit recomputes,
+            # and reset the area tracker so its one-shot fit fires again.
+            st.session_state.pop("_drawn_bounds", None)
+            st.session_state.pop("_active_drill_bbox", None)
+            st.session_state.pop("_zoom_target_label", None)
+            st.session_state["_wm_prev_area_id"] = "none"
+            st.rerun()
+
+        with _rv2.expander("🏷 Map display", expanded=False):
+            _show_legend = st.checkbox(
+                "🏷 Status legend", key="wm_show_legend", value=True,
+                help="Show a colour/symbol key for well status on the map")
+            _ppdm_symbols = st.checkbox(
+                "🛢 PPDM well symbols", key="wm_ppdm_symbols", value=False,
+                help="Draw wells as standard PPDM/API symbols (shape = status) "
+                     "instead of plain coloured dots")
+
         _sel_for_key = st.session_state.get("selected_cells", [])
         _sel_key_hash = hash(tuple(sorted(
             f"{c[0]:.4f}|{c[1]:.4f}" for c in _sel_for_key
@@ -7970,6 +9819,33 @@ def run(engine=None):
                     _bbox = _h3_cell_bbox(_clicked_h3)
                     if _bbox:
                         _bb_min_lat, _bb_max_lat, _bb_min_lon, _bb_max_lon = _bbox
+                        # ── THE BBOX IS NOT THE CELL ────────────────────────
+                        # A hexagon's bounding box is about 25-30% larger than
+                        # the hexagon, so drilling the box alone returns the
+                        # corner wells too — visibly outside the shape that was
+                        # clicked. Perry: "when I pick a cell the wells are not
+                        # constrained by the cell shape."
+                        #
+                        # dv_well already holds the exact answer: h3_r4..h3_r7
+                        # are latlng_to_cell of that well's own coordinates, so
+                        # `h3_r<res> = <clicked cell>` IS containment in the
+                        # hexagon that was drawn — the boundary comes from
+                        # cell_to_boundary of the same index.
+                        #
+                        # The bbox STAYS as a cheap pre-filter: it is sargable
+                        # on the lat/lon composite index, while the cell column
+                        # is not indexed. Box first, then the exact test.
+                        _cell_col = f"h3_r{_h3_res_active}"
+                        _cell_pred = ""
+                        if _h3_res_active in (4, 5, 6, 7) and _clicked_h3:
+                            # _clicked_h3 comes from h3.latlng_to_cell — 15 hex
+                            # characters, nothing to quote-escape, but bound as
+                            # a literal only because these helpers take a WHERE
+                            # fragment rather than parameters.
+                            _safe = "".join(ch for ch in str(_clicked_h3)
+                                            if ch in "0123456789abcdefABCDEF")
+                            if len(_safe) == 15:
+                                _cell_pred = f" AND w.{_cell_col} = '{_safe}'"
                         _h3_drill_src = active_area.get("sources", [])
                         _h3_drilled_uwis = []
                         _h3_drill_shadow = {}
@@ -7983,7 +9859,8 @@ def run(engine=None):
                                     _bb_min_lat, _bb_max_lat,
                                     _bb_min_lon, _bb_max_lon,
                                     limit=_MAX_H3,
-                                    where_extra=st.session_state.get("_active_where_extra", ""),
+                                    where_extra=st.session_state.get(
+                                        "_active_where_extra", "") + _cell_pred,
                                 )
                                 for _r in _dm:
                                     _h3_drilled_uwis.append(_r["uwi"])
@@ -8196,6 +10073,26 @@ def run(engine=None):
                 "Results view", ["🛢 Wells", "📄 Documents"],
                 horizontal=True, key="results_mode:v1",
                 label_visibility="collapsed")
+
+            # PICKING "Documents" GOES TO THE DOCUMENTS PAGE.
+            #
+            # It used to render a scannable table here plus an "Open in
+            # Documents page →" button underneath — two clicks to reach the
+            # thing the radio already named, and a preview of the page you
+            # were about to open. The radio is a destination, so treat it
+            # as one.
+            #
+            # _render_results_documents is left in place, unused: it is a
+            # perfectly good compact list and may be wanted somewhere that
+            # is NOT a navigation control.
+            if _res_mode == "📄 Documents":
+                st.session_state["selected_entities"] = [
+                    {"type": "well", "id": _u, "name": _u}
+                    for _u in result_uwis]
+                st.session_state["wm_docs_page"] = True
+                st.session_state["_export_scroll_pending"] = True
+                st.rerun()
+
             selected_in_results = []
             if _res_mode == "🛢 Wells":
                 # Tray grid — tick wells to scope Scout Tickets / Documents.
@@ -8226,8 +10123,10 @@ def run(engine=None):
                     "to scope <b>Documents</b> / <b>Scout Tickets</b> to just those."
                     "</div>",
                     unsafe_allow_html=True)
-            else:
-                _render_results_documents(engine, list(result_uwis))
+            # (no else: picking "Documents" navigated away above, so this
+            # branch could only ever be reached by a third radio option
+            # that does not exist. Leaving a second Documents path here is
+            # how the next person ends up debugging the wrong one.)
 
             #   Scout Tickets → picked wells only
             #   Documents     → picked wells (fallback all results)
@@ -8327,11 +10226,44 @@ def run(engine=None):
             _hdr = ("Scout Ticket" if len(_summary_uwis) == 1
                     else f"Scout Tickets — {len(_summary_uwis)} wells")
             st.markdown(f"#### 📋 {_hdr}")
-            b1, b2, _ = st.columns([1, 1, 4])
+            b1, bp, b2, _ = st.columns([1, 1, 1, 3])
             b1.download_button(
                 "⬇ Save Report", data=full_doc.encode(),
                 file_name=fn, mime="text/html",
                 key="save_report_dl", use_container_width=True)
+
+            # ── PDF, generated not printed ──────────────────────────────────
+            # _build_batch_pdf() has existed since the multi-well panel was
+            # written and was never wired to a button, so the only route to a
+            # PDF was "Save Report" -> open the HTML -> browser Print. That
+            # path (and Windows' "Microsoft Print to PDF" in particular)
+            # flattens the text to vector outlines: the file looks right and
+            # has ZERO extractable characters, so the File Catalog can't read
+            # a single field out of it. WeasyPrint writes a real text layer.
+            #
+            # Cached in session_state against the same cache_key the HTML uses,
+            # so switching wells invalidates it and re-rendering the page
+            # doesn't regenerate a PDF nobody asked for.
+            _pdf_key = f"_summary_pdf_{cache_key}"
+            if bp.button("⬇ PDF", key="summary_pdf_btn",
+                         use_container_width=True,
+                         help="Generate a PDF with a real text layer. Prefer "
+                              "this over printing the saved HTML — printed "
+                              "PDFs contain no searchable or extractable text."):
+                with st.spinner(f"Rendering {len(_summary_uwis)} ticket(s)…"):
+                    _pdf, _err = _scout_ticket_pdf(
+                        all_html, f"Scout Tickets — {len(_summary_uwis)} wells",
+                        return_error=True)
+                st.session_state[_pdf_key] = _pdf
+                st.session_state[f"{_pdf_key}_err"] = _err
+            if st.session_state.get(_pdf_key):
+                st.download_button(
+                    "📄 Save PDF", data=st.session_state[_pdf_key],
+                    file_name=f"Scout_Tickets_{len(_summary_uwis)}_wells.pdf",
+                    mime="application/pdf", key="summary_pdf_dl")
+            elif st.session_state.get(f"{_pdf_key}_err"):
+                st.error(st.session_state[f"{_pdf_key}_err"])
+
             if b2.button("✕ Close", key="close_summary", use_container_width=True):
                 st.session_state["show_summary"] = False
                 st.session_state["_summary_uwis"] = []

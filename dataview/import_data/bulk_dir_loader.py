@@ -1,5 +1,7 @@
 """
-bulk_dir_loader.py — set-based directory loader (BCP staging pipeline).
+bulk_dir_loader.py — Bulk Tabular Loader: set-based CSV/Excel directory loader
+(BCP staging pipeline). Constrained to tabular intake 2026-07-20; LAS/PDF/DOCX/
+DLIS/LIS/WITSML are handled by the File Catalog.
 
 PHASE 1 (this file): scan a directory of well files, extract + fingerprint each, re-emit
 each as a safe-delimited file (correct quote handling — no naive comma splitting),
@@ -75,14 +77,12 @@ _qa = _opt_import("staging_qa")           # data-quality report over staging
 # which extractor owns which extension, and what it needs — so a scan that finds files
 # it cannot extract SAYS SO instead of silently skipping them.
 def _extractor_status():
-    return [
-        ("LAS",    [".las"],                 _las,     "las_header_loader",   "lasio"),
-        ("DLIS",   [".dlis"],                _dlis,    "dlis_header_loader",  "dlisio"),
-        ("LIS",    [".lis"],                 _lis,     "lis_header_loader",   "—"),
-        ("WITSML", [".xml", ".wml"],         _witsml,  "witsml_header_loader", "—"),
-        ("PDF",    [".pdf"],                 _pdf,     "pdf_document_loader", "pdfplumber"),
-        ("Word",   [".docx", ".doc", ".odt"], _docx,   "docx_document_loader", "python-docx"),
-    ]
+    # Directory Loader is CONSTRAINED TO CSV/EXCEL. The LAS/DLIS/LIS/WITSML/PDF/Word
+    # extractors were removed here on 2026-07-20: those formats are owned by the File
+    # Catalog (crawl + capture), and the document/log extractors were proven to
+    # produce the same rows (compare_extractors.py: PDF/DOCX identical, LAS consistent).
+    # Empty list => no non-tabular extraction, no missing-extractor warnings for them.
+    return []
 
 
 def _missing_extractors(directory, recursive):
@@ -97,6 +97,32 @@ def _missing_extractors(directory, recursive):
     return out
 
 STG_SCHEMA = "stg"
+
+# Don't read a file bigger than this just to populate the "filled" column in a grid. Over the
+# cap the column shows the header count only — honest about what it didn't look at.
+_FILLED_MAX_BYTES = 50 * 1024 * 1024
+
+# ── the loader's own work folder ────────────────────────────────────────────────
+# Everything this loader creates — extract CSVs, .bcp files, the OCR do-later bucket — goes
+# under ONE directory that we own, inside the configured bulk folder.
+#
+# It used to write straight into the bulk folder: _las_extract\, _pdf_extract\, and every
+# .bcp file loose at the top level. That worked while C:\Bulk was scratch. It isn't: on
+# 2026-07-17 it held 5,073 MB of .segy, 1,987 MB of .sgy, 1,710 MB of .csv across 632 files,
+# 541 MB of .ld and 281 .las — roughly 10 GB of SOURCE DATA sharing a folder with our temp
+# files. Any "delete files older than a week" pointed at that folder would have destroyed it.
+#
+# One containment root makes the sweep safe: it can refuse to run anywhere whose basename
+# isn't this. A cleanup that can only ever delete inside a directory it created is a cleanup
+# that cannot eat your seismic.
+_WORK_SUBDIR = "_dv_work"
+
+
+def work_dir(bulk_dir, *parts):
+    """<bulk_dir>/_dv_work/<parts...> — the only place this loader writes."""
+    p = os.path.join(bulk_dir, _WORK_SUBDIR, *parts)
+    os.makedirs(p, exist_ok=True)
+    return p
 FS = "\x01"          # field separator written into the safe file
 FS_BCP = "0x01"      # tell bcp the field terminator in hex (unambiguous)
 RT = "\r"            # row terminator written into the safe file (bare CR)
@@ -118,8 +144,15 @@ def make_engine(server, database):
     cs = f"DRIVER={{{drv}}};SERVER={server};DATABASE={database};Trusted_Connection=yes;"
     if "18" in drv:
         cs += "Encrypt=no;TrustServerCertificate=yes;"
+    # fast_executemany at the ENGINE level (every executemany benefits, not
+    # just the ones that remember to set it) and no pre-ping: pre_ping costs
+    # a round trip on every checkout, which is pure overhead against a local
+    # instance that isn't going away mid-session. pool_recycle keeps a stale
+    # connection from being handed out after a long idle. (July 31 — chasing
+    # "why is everything slow".)
     return create_engine("mssql+pyodbc:///?odbc_connect=" + urllib.parse.quote_plus(cs),
-                         pool_pre_ping=True)
+                         fast_executemany=True, pool_pre_ping=False,
+                         pool_recycle=1800)
 
 def get_engine(server, database):
     """One engine per (server,db) per session — avoids leaking a new connection pool on
@@ -190,7 +223,12 @@ def build_safe_file(csv_path, out_path, src_name, out_cols):
                 # raw lookup silently misses whenever the CSV's casing/punctuation differs
                 # from out_cols (e.g. 'uwi' vs 'UWI'), and every field comes out empty.
                 j = idx.get(pdl._norm(c), idx.get(c))
-                vals.append(_clean(row[j]) if (j is not None and j < len(row)) else "")
+                _v = _clean(row[j]) if (j is not None and j < len(row)) else ""
+                # canonicalize UWI to 14 chars AT THE WRITE POINT, so every staged (and
+                # therefore promoted) uwi is uniform — matching the gate's _uwi14 lookups.
+                if _v and str(c).strip().lower() == "uwi":
+                    _v = _uwi14(_v)
+                vals.append(_v)
             out.write(FS.join(vals) + RT)
             n += 1
     return n
@@ -219,8 +257,15 @@ def load_catalog_live(engine, schema="dataview"):
         "WHERE s.name=:s ORDER BY fk.name, fkc.constraint_column_id"),
         engine, params={"s": schema})
 
-    table_cols = {}
+    # ONE PLACE, EVERY DROPDOWN. Every target list in the mapping UI is
+    # built from this map, so dropping derived columns here removes them
+    # from all of them at once — and from fingerprint recall, which
+    # replays saved mappings.
+    table_cols, _dropped = {}, []
     for r in cols.itertuples(index=False):
+        if is_derived(r.c):
+            _dropped.append(f"{r.n}.{r.c}")
+            continue
         table_cols.setdefault(r.n, []).append(r.c)
 
     grouped = {}
@@ -237,7 +282,37 @@ def load_catalog_live(engine, schema="dataview"):
         if tl in ("dv_business_associate", "dv_field"): return "entity"
         return "data"
     return {"schema": schema, "fk_constraints": fk_constraints, "table_cols": table_cols,
-            "table_kind": {t: kind(t) for t in table_cols}}
+            "table_kind": {t: kind(t) for t in table_cols},
+            "derived_excluded": sorted(_dropped)}
+
+
+# DERIVED COLUMNS ARE NOT LOADABLE.
+#
+# h3_r4..h3_r7 and h3_coord_hash are COMPUTED from surface_latitude and
+# surface_longitude; geog/geometry/shape are computed from the same. A file
+# has no business supplying them, and letting one do so is worse than
+# leaving them empty: the database can then hold a cell index that
+# contradicts its own coordinates, and nothing will ever notice. A well can
+# sit in an H3 cell that is not where it is.
+#
+# This is not hypothetical. The synthetic generator's type fallback wrote
+# "h3_r4-869" into dv_well.csv, the loader mapped it faithfully, and the
+# column now holds a placeholder that LOOKS like data. Worse, backfill_h3
+# defaults to only_missing=True keyed on `h3_r5 IS NULL`, so those rows are
+# SKIPPED by the very tool that would compute them correctly — loading the
+# junk also disables the repair.
+#
+# So they are removed from the target list the mapping UI offers. NULL is
+# honest; a wrong H3 index is not. Compute them after load with
+# dataview.mapping.h3_grids.backfill_h3.
+DERIVED_PREFIXES = ("h3_",)
+DERIVED_EXACT = {"geog", "geometry", "shape", "h3_coord_hash"}
+
+
+def is_derived(col):
+    """True for a column the database computes and no file may supply."""
+    c = (col or "").strip().lower()
+    return c in DERIVED_EXACT or c.startswith(DERIVED_PREFIXES)
 
 
 def _kind_of(table):
@@ -453,8 +528,7 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
     # Everything the loader can read — CSV/Excel included. They reach the scan through
     # pdl.profile_directory rather than _glob_ext, so they were invisible to the catalog:
     # dv_global_file_catalog claimed to track what had been loaded and silently omitted them.
-    _ALL_EXTS = [".las", ".dlis", ".lis", ".xml", ".wml", ".pdf", ".docx", ".doc", ".odt",
-                 ".csv", ".xlsx", ".xlsm", ".xltx", ".xls"]
+    _ALL_EXTS = [".csv", ".xlsx", ".xlsm", ".xltx", ".xls"]   # CSV/Excel only (loader is tabular-intake)
     skip_files, gate_dec = set(), {}
     if _gate is not None:
         try:
@@ -514,185 +588,80 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
             r["kind"] = "reference"
             r["score"] = score
             r["name_matched"] = True
-    # ensure every matched target is in the promote order (references sort first)
-    order = list(scan.get("order") or [])
-    for r in scan.get("rows", []):
-        t = r.get("table")
-        if t and t not in order:
-            order.insert(0, t)
-    scan["order"] = order
+    # Promote order = a real topological sort over the FK graph (defined as _topo_order below),
+    # computed ONCE after every extractor has added its rows. It used to be five separate
+    # hand-maintained `order.insert/remove/append` sites — one per extractor — plus a stale
+    # `order` carried across scans. That's how DV_WELL_DIR_SRVY_HDR ended up scheduled after
+    # its own child DV_WELL_DIR_SRVY_STA: the stations promoted against a parent not yet
+    # inserted, and every station orphaned. Position must come from the FK graph, not from the
+    # order rows happen to be appended in. Provisional here; finalized after extraction.
+    #
+    # Use the PARSED FK catalog (child -> [{parent_table}]), which has the same shape whether
+    # the catalog came from JSON or live introspection. The raw JSON dict (cat) keys its FKs
+    # differently, so reading cat["fk_constraints"] would be {} on the JSON path — the topo
+    # sort would silently see no parents and fall back to alphabetical, re-introducing the bug
+    # on exactly the common path. _fk_parsed is authoritative.
+    _fk_why = ""
+    try:
+        _fk_parsed = _live_catalog_parsed(engine, schema)[0] or {}
+        if not _fk_parsed:
+            _fk_why = "live introspection returned no FK constraints"
+    except Exception as _e:
+        _fk_parsed = cat.get("fk_constraints", {})            # last-ditch; never crash the scan
+        _fk_why = f"live introspection failed ({type(_e).__name__}: {_e}); fell back to the catalog"
+    # An empty FK graph makes _topo_order silently emit ALPHABETICAL order — every parent
+    # looks unparented, so children promote ahead of their parents and the load fails on a
+    # constraint that was two positions from being satisfied. It is the exact bug the block
+    # above was written to prevent, so it is recorded and surfaced rather than absorbed.
+    scan["fk_edges"] = sum(len(v or []) for v in _fk_parsed.values())
+    scan["fk_warning"] = (_fk_why or "") if not scan["fk_edges"] else ""
+
+    def _topo_order(rows):
+        targets = {(r.get("table") or "").upper() for r in rows if r.get("table")}
+
+        def parents(tu):
+            out = set()
+            for fk in _fk_parsed.get(tu, []) or _fk_parsed.get(tu.lower(), []):
+                p = (fk.get("parent_table") or fk.get("parent") or "").upper()
+                if p and p != tu and p in targets:       # self-refs / off-batch parents don't gate
+                    out.add(p)
+            return out
+
+        out, seen, stack = [], set(), set()
+
+        def visit(tu):
+            if tu in seen or tu in stack:                # seen, or a cycle we break rather than hang
+                return
+            stack.add(tu)
+            for p in sorted(parents(tu)):                # parents first
+                visit(p)
+            stack.discard(tu)
+            seen.add(tu)
+            out.append(tu)
+
+        for tu in sorted(targets, key=lambda t: (0 if t.startswith("DV_R_") else 1, t)):
+            visit(tu)
+        return out
+
+    scan["_topo_order"] = _topo_order                     # extractors add rows; we re-sort at the end
+    scan["order"] = _topo_order(scan.get("rows", []))
     scan["all_tables"] = sorted(t.upper() for t in cat["table_cols"])
 
-    # auto-detect LAS files → two rows (dv_well_log, dv_well_log_curve), staged separately
-    import csv as _csv
-    las_files = _ungated(_glob_ext(directory, [".las"], recursive))
-    if las_files and _las is not None:
-        try:
-            las_out = os.path.join(bulk_dir, "_las_extract")     # accessible to bcp, unlike os temp
-            os.makedirs(las_out, exist_ok=True)
-            with _ph.phase("extract: LAS", count=len(las_files)):
-                lp, cp, nl, nc = _call_extractor(_las.write_staging_csvs, directory, las_out,
-                                                 "LAS", las_files, recursive)
-            log_cols = next(_csv.reader(open(lp, encoding="utf-8")))
-            curve_cols = next(_csv.reader(open(cp, encoding="utf-8")))
-            scan["rows"].append({"file": f"LAS → log  ({nl} files)", "path": lp, "cols": log_cols,
-                                 "table": "DV_WELL_LOG", "kind": "data", "score": 1.0,
-                                 "las": True, "stg_table": "stg.dv_well_log_las"})
-            scan["rows"].append({"file": f"LAS → curve  ({nc} curves)", "path": cp, "cols": curve_cols,
-                                 "table": "DV_WELL_LOG_CURVE", "kind": "data", "score": 1.0,
-                                 "las": True, "stg_table": "stg.dv_well_log_curve_las"})
-            for t in ("DV_WELL_LOG", "DV_WELL_LOG_CURVE"):   # parent (log) BEFORE child (curve)
-                if t in scan["order"]:
-                    scan["order"].remove(t)
-                scan["order"].append(t)
-            scan["las_count"] = len(las_files)
-        except Exception as e:
-            scan["las_error"] = str(e)
-            scan.setdefault("extract_errors", {})["las"] = str(e)   # or it never reaches the UI
-
-    # DLIS / LIS → dv_well_log + dv_well_log_curve (like LAS, separate _<fmt> staging)
-    def _detect_logfmt(ext, mod, tag):
-        files = _ungated(_glob_ext(directory, [ext], recursive))
-        if not files or mod is None:
-            return
-        try:
-            out = os.path.join(bulk_dir, f"_{tag}_extract"); os.makedirs(out, exist_ok=True)
-            # Pass the GATED, de-duplicated, recursion-aware list the loader just computed.
-            # Calling write_staging_csvs(directory, ...) instead threw that list away and let
-            # the extractor re-glob the folder itself — re-reading files the gate said to
-            # skip, missing subfolders on a recursive scan, and (with a case-insensitive
-            # double glob) counting every file twice. _call_extractor also warns loudly when
-            # an extractor has no `files` parameter, instead of silently swallowing it.
-            with _ph.phase(f"extract: {tag.upper()}", count=len(files)):
-                lp, cp, nl, nc = _call_extractor(mod.write_staging_csvs, directory, out,
-                                                 tag.upper(), files, recursive)
-            log_cols = next(_csv.reader(open(lp, encoding="utf-8")))
-            curve_cols = next(_csv.reader(open(cp, encoding="utf-8")))
-            scan["rows"].append({"file": f"{tag.upper()} → log  ({nl} files)", "path": lp, "cols": log_cols,
-                                 "table": "DV_WELL_LOG", "kind": "data", "score": 1.0,
-                                 "extracted": tag, "needs_uwi": True,
-                                 "stg_table": f"stg.dv_well_log_{tag}"})
-            scan["rows"].append({"file": f"{tag.upper()} → curve  ({nc} curves)", "path": cp, "cols": curve_cols,
-                                 "table": "DV_WELL_LOG_CURVE", "kind": "data", "score": 1.0,
-                                 "extracted": tag, "needs_uwi": True,
-                                 "stg_table": f"stg.dv_well_log_curve_{tag}"})
-            for t in ("DV_WELL_LOG", "DV_WELL_LOG_CURVE"):
-                if t in scan["order"]:
-                    scan["order"].remove(t)
-                scan["order"].append(t)
-        except Exception as e:
-            scan.setdefault("extract_errors", {})[tag] = str(e)
-
-    _detect_logfmt(".dlis", _dlis, "dlis")
-    _detect_logfmt(".lis", _lis, "lis")
-
-    # WITSML → multiple targets depending on object type (log/trajectory/mudlog)
-    wml_files = _ungated(_glob_ext(directory, [".xml", ".wml"], recursive))
-    if wml_files and _witsml is not None:
-        try:
-            out = os.path.join(bulk_dir, "_witsml_extract"); os.makedirs(out, exist_ok=True)
-            with _ph.phase("extract: WITSML", count=len(wml_files)):
-                written = _witsml.write_staging_csvs(directory, out_dir=out, source="WITSML")
-            # kind → (target table, staging table, parent-order hint)
-            wmap = {
-                "log":       ("DV_WELL_LOG", "stg.dv_well_log_witsml"),
-                "curve":     ("DV_WELL_LOG_CURVE", "stg.dv_well_log_curve_witsml"),
-                "srvy_hdr":  ("DV_WELL_DIR_SRVY_HDR", "stg.dv_well_dir_srvy_hdr_witsml"),
-                "srvy_sta":  ("DV_WELL_DIR_SRVY_STA", "stg.dv_well_dir_srvy_sta_witsml"),
-                "formation": ("DV_WELL_FORMATION_TOP", "stg.dv_well_formation_top_witsml"),
-            }
-            for kind, (path, n) in written.items():
-                if kind not in wmap:
-                    continue
-                target, stg = wmap[kind]
-                cols = next(_csv.reader(open(path, encoding="utf-8")))
-                scan["rows"].append({"file": f"WITSML {kind}  ({n} rows)", "path": path, "cols": cols,
-                                     "table": target, "kind": "data", "score": 1.0,
-                                     "extracted": "witsml", "needs_uwi": True, "stg_table": stg})
-            # parent-before-child ordering for the WITSML targets present
-            for parent, child in (("DV_WELL_LOG", "DV_WELL_LOG_CURVE"),
-                                  ("DV_WELL_DIR_SRVY_HDR", "DV_WELL_DIR_SRVY_STA")):
-                present = [r["table"] for r in scan["rows"]]
-                for t in (parent, child):
-                    if t in present:
-                        if t in scan["order"]:
-                            scan["order"].remove(t)
-                        scan["order"].append(t)
-        except Exception as e:
-            scan.setdefault("extract_errors", {})["witsml"] = str(e)
-
-    # PDF documents → many targets depending on doc type (scout/eow/survey/pressure/welltest/casing/petro)
-    pdf_files = _ungated(_glob_ext(directory, [".pdf"], recursive))
-    if pdf_files and _pdf is not None:
-        try:
-            out = os.path.join(bulk_dir, "_pdf_extract"); os.makedirs(out, exist_ok=True)
-            with _ph.phase("extract: PDF (pdfplumber; OCR if no text layer)",
-                           count=len(pdf_files)):
-                written = _call_extractor(_pdf.write_staging_csvs, directory, out, "PDF",
-                                          pdf_files, recursive)
-            # PDFs whose OCR blew the budget: copied to the do-later bucket, NOT extracted.
-            # Surfaced here because the whole point of deferring rather than grinding is that
-            # you find out. `res["ocr"] = True` has existed all along and displayed nowhere —
-            # which is how three test scans hid 72% of a 35s scan.
-            if getattr(_pdf, "LAST_DEFERRED", None):
-                scan["pdf_deferred"] = list(_pdf.LAST_DEFERRED)
-            for kind, (path, n) in written.items():
-                target = _pdf.TARGET.get(kind)
-                if not target:
-                    continue
-                cols = next(_csv.reader(open(path, encoding="utf-8")))
-                needs = "UWI" in [c.upper() for c in cols]
-                scan["rows"].append({"file": f"PDF {kind}  ({n} rows)", "path": path, "cols": cols,
-                                     "table": target, "kind": "data", "score": 1.0,
-                                     "extracted": "pdf", "needs_uwi": needs,
-                                     "stg_table": f"stg.{target.lower()}_pdf"})
-            # parent-before-child order for the PDF target families present
-            present = [r["table"] for r in scan["rows"]]
-            pdf_order = ["DV_WELL", "DV_WELL_DIR_SRVY_HDR", "DV_WELL_DIR_SRVY_STA",
-                         "DV_WELL_DST", "DV_WELL_DST_PERIOD", "DV_WELL_PETRO_INTERP", "DV_WELL_PETRO_ZONE",
-                         "DV_WELL_FORMATION_TOP", "DV_WELL_CASING", "DV_WELL_STIMULATION",
-                         "DV_WELL_PRESSURE"]
-            for t in pdf_order:
-                if t in present:
-                    if t in scan["order"]:
-                        scan["order"].remove(t)
-                    scan["order"].append(t)
-        except Exception as e:
-            scan.setdefault("extract_errors", {})["pdf"] = str(e)
-
-    # Word documents (final well reports, completion/geological summaries) → well, tops,
-    # log + curves, core, survey. Same review → map → promote path as the PDF suite.
-    docx_files = _ungated(_glob_ext(directory, [".docx", ".doc", ".odt"], recursive))
-    docx_files = [f for f in docx_files if not os.path.basename(f).startswith("~$")]
-    if docx_files and _docx is not None:
-        try:
-            out = os.path.join(bulk_dir, "_docx_extract"); os.makedirs(out, exist_ok=True)
-            with _ph.phase("extract: Word", count=len(docx_files)):
-                written = _call_extractor(_docx.write_staging_csvs, directory, out, "DOCX",
-                                          docx_files, recursive)
-            for kind, (path, n) in written.items():
-                target = _docx.TARGET.get(kind)
-                if not target:
-                    continue
-                cols = next(_csv.reader(open(path, encoding="utf-8")))
-                needs = "UWI" in [c.upper() for c in cols]
-                scan["rows"].append({"file": f"DOCX {kind}  ({n} rows)", "path": path, "cols": cols,
-                                     "table": target, "kind": "data", "score": 1.0,
-                                     "extracted": "docx", "needs_uwi": needs,
-                                     "stg_table": f"stg.{target.lower()}_docx"})
-            present = [r["table"] for r in scan["rows"]]
-            docx_order = ["DV_WELL", "DV_WELL_FORMATION_TOP", "DV_WELL_LOG", "DV_WELL_LOG_CURVE",
-                          "DV_WELL_CORE", "DV_WELL_DIR_SRVY_HDR", "DV_WELL_DIR_SRVY_STA"]
-            for t in docx_order:
-                if t in present:
-                    if t in scan["order"]:
-                        scan["order"].remove(t)
-                    scan["order"].append(t)
-        except Exception as e:
-            scan.setdefault("extract_errors", {})["docx"] = str(e)
+    # ── Non-CSV/Excel extraction REMOVED (2026-07-20) ──────────────────────────
+    # LAS/DLIS/LIS/WITSML/PDF/Word extraction previously ran here. Removed to
+    # constrain the Directory Loader to bulk CSV/Excel intake; those formats are
+    # handled by the File Catalog. Only CSV/Excel rows (already in scan['rows']
+    # from pdl.profile_directory above) proceed from here.
 
     # formats present on disk that no working extractor can read → reported, never silent
     scan["missing_extractors"] = _missing_extractors(directory, recursive)
+    # Finalize the promote order NOW, after every extractor (CSV, LAS, DLIS, WITSML, PDF, DOCX)
+    # has added its rows — one topological sort over the FK graph. The CSV-time sort above was
+    # provisional; the extractors add tables (survey headers, log curves, DST periods) whose
+    # parents must precede them, and re-sorting once here is what guarantees it. This replaces
+    # five hand-maintained per-extractor `order.remove/append` blocks that had drifted out of
+    # agreement — the drift is what scheduled DV_WELL_DIR_SRVY_STA ahead of its own parent.
+    scan["order"] = _topo_order(scan.get("rows", []))
     # Wall clock for the whole call, so `unaccounted` is honest — it's whatever the named
     # phases don't explain (reference-table name matching, ordering, row bookkeeping, and
     # anything nobody has thought to measure yet). A big unaccounted number is a finding.
@@ -759,9 +728,33 @@ def _required_missing(engine, table, cmap, functions, schema="dataview"):
 
 # safe wrappers — newer page_dir_loader helpers may be absent on an older deploy
 def _syn(engine, table, valid):
+    """{normalized source name: db column}.
+
+    Two sources, in priority order: dv_column_map (a human confirmed THIS
+    file's mapping — strongest) then the column-level synonym store (seeded
+    or learned across all files, July 31 wiring). The store fills names this
+    table has never seen from a confirmed load, which is the whole point of
+    having it: a new vendor's headers arrive already mapped.
+    """
+    out = {}
     fn = getattr(pdl, "_synonym_lookup", None)
-    try: return fn(engine, table, valid) if fn else {}
-    except Exception: return {}
+    try:
+        out = dict(fn(engine, table, valid) or {}) if fn else {}
+    except Exception:
+        out = {}
+    try:
+        from dataview.import_data import synonym_store as _sstore
+        for sn, tgt in _sstore.synonyms_for(engine, "dataview", table).items():
+            if valid is not None and tgt not in valid:
+                continue
+            if _sstore.is_system_column(tgt):
+                continue
+            key = pdl._norm(sn)
+            if key and key not in out:        # never outrank a confirmation
+                out[key] = tgt
+    except Exception:
+        pass
+    return out
 
 def _remember(engine, table, fp, cmap):
     fn = getattr(pdl, "_remember_mapping", None)
@@ -952,6 +945,397 @@ def _near_matches(unmapped_srcs, free_db_cols):
         out[s] = (db_col, f"`{s}` and `{db_col}` are the same name once abbreviations are "
                           f"expanded (`{_canon_col(s)}`)")
     return out
+
+
+# ── projected X/Y → lat/long (stage-time derivation) ────────────────────────
+# Files like the Teapot Dome well headers carry Northing/Easting in a projected
+# CRS (NAD27 Wyoming East Central ft = EPSG 32056) and no latitude/longitude.
+# Loading them as-is makes every well coordless, REQUIRE_WELL_COORDS holds them
+# out of dv_well, and the EXISTS gate then holds every child row — a total
+# promote stall with no error. So the conversion happens AT STAGE TIME: distinct
+# N/E pairs → pyproj → temp table → ONE set-based UPDATE writing __LAT/__LON
+# staging columns, which then map to surface_latitude/longitude like any source
+# column. T-SQL cannot project coordinates, hence the Python pass.
+_LATLON_TARGETS = [("surface_latitude", "surface_longitude"),
+                   ("latitude", "longitude")]
+
+
+def _detect_ne(src_cols):
+    """(north_col, east_col) guessed by canonical name, else Nones. Guess only —
+    the UI always shows the pick so a wrong guess is one click to fix."""
+    north = east = None
+    for c in src_cols:
+        toks = set(_canon_col(c).split("|"))
+        if north is None and "northing" in toks:
+            north = c
+        if east is None and "easting" in toks:
+            east = c
+    return north, east
+
+
+def _latlon_target_pair(db_cols):
+    have = {str(c).lower() for c in db_cols}
+    for la, lo in _LATLON_TARGETS:
+        if la in have and lo in have:
+            return la, lo
+    return None, None
+
+
+def derive_latlong(engine, stg, north_col, east_col, epsg):
+    """Reproject staged north/east (projected CRS `epsg`) into __LAT/__LON
+    staging columns. Set-based: DISTINCT pairs -> pyproj (Python) -> #llmap ->
+    one UPDATE...JOIN on the raw staged strings. Returns (rows_updated,
+    distinct_pairs, unusable_pairs). Raises ImportError without pyproj."""
+    from sqlalchemy import text
+    from pyproj import Transformer
+    tf = Transformer.from_crs(f"EPSG:{int(epsg)}", "EPSG:4326", always_xy=True)
+    with engine.connect() as cx:
+        pairs = cx.execute(text(
+            f"SELECT DISTINCT LTRIM(RTRIM([{north_col}])) AS n, "
+            f"LTRIM(RTRIM([{east_col}])) AS e FROM {stg} "
+            f"WHERE NULLIF(LTRIM(RTRIM([{north_col}])),'') IS NOT NULL "
+            f"AND NULLIF(LTRIM(RTRIM([{east_col}])),'') IS NOT NULL")).fetchall()
+    rows, bad = [], 0
+    for n_raw, e_raw in pairs:
+        try:
+            n_v = float(str(n_raw).replace(",", ""))
+            e_v = float(str(e_raw).replace(",", ""))
+        except ValueError:
+            bad += 1
+            continue
+        # transform takes (x, y) = (EASTING, NORTHING); always_xy pins it.
+        lon, lat = tf.transform(e_v, n_v)
+        if not (abs(lat) <= 90 and abs(lon) <= 180):   # inf on failed transform
+            bad += 1
+            continue
+        rows.append({"n": str(n_raw), "e": str(e_raw),
+                     "la": f"{lat:.7f}", "lo": f"{lon:.7f}"})
+    with engine.begin() as cx:
+        for col in ("__LAT", "__LON"):
+            cx.execute(text(
+                f"IF COL_LENGTH('{stg}', '{col}') IS NULL "
+                f"ALTER TABLE {stg} ADD [{col}] varchar(32) NULL"))
+        n_upd = 0
+        if rows:
+            cx.execute(text("IF OBJECT_ID('tempdb..#llmap') IS NOT NULL DROP TABLE #llmap"))
+            cx.execute(text("CREATE TABLE #llmap (n varchar(400), e varchar(400), "
+                            "la varchar(32), lo varchar(32))"))
+            cx.execute(text("INSERT INTO #llmap (n, e, la, lo) "
+                            "VALUES (:n, :e, :la, :lo)"), rows)
+            n_upd = cx.execute(text(
+                f"UPDATE s SET s.[__LAT] = t.la, s.[__LON] = t.lo "
+                f"FROM {stg} s JOIN #llmap t "
+                f"ON LTRIM(RTRIM(s.[{north_col}])) = t.n "
+                f"AND LTRIM(RTRIM(s.[{east_col}])) = t.e")).rowcount or 0
+            cx.execute(text("IF OBJECT_ID('tempdb..#llmap') IS NOT NULL DROP TABLE #llmap"))
+    return n_upd, len(rows), bad
+
+
+# ── vendor vocabulary (RMOTC / Teapot Dome et al.) ──────────────────────────
+# Files from outside this shop use their own headers ("API Number", "Common
+# Well Name", "Plugback Depth") that the matcher has never been taught — the
+# Teapot well headers matched almost nothing. The fix is vocabulary, not a new
+# matcher: these pairs are seeded into dv_column_map, the SAME synonym store
+# human confirmations land in and _synonym_lookup reads, so BOTH loaders learn
+# them at once and the ranking (hits/recency) still lets a human confirmation
+# outvote a seed.
+#
+# Each entry: NORMALIZED source header (pdl._norm: strip/upper/space→_) →
+# ordered target CANDIDATES. Only the first candidate that exists on the LIVE
+# table is seeded — checked against INFORMATION_SCHEMA at seed time, never a
+# DDL snapshot — so a wrong guess about a column name seeds nothing rather
+# than a bad synonym. Sources that exact-match after normalization (SPUD_DATE,
+# COMPLETION_DATE, WELL_NAME, OPERATOR…) need no entry.
+_VENDOR_SYNONYMS = {
+    "DV_WELL": [
+        ("API_NUMBER",        ["uwi"]),
+        ("API_NO",            ["uwi"]),
+        ("API",               ["uwi"]),
+        ("API_#",             ["uwi"]),
+        ("WELL_API",          ["uwi"]),
+        ("COMMON_WELL_NAME",  ["well_name"]),
+        ("WELL_NUMBER",       ["well_num", "well_number"]),
+        ("WELL_STATUS",       ["current_status", "well_status", "status"]),
+        ("CLASS",             ["well_class", "class_code"]),
+        ("TOTAL_DEPTH",       ["total_depth", "final_td", "drill_td"]),
+        ("DATUM_ELEVATION",   ["datum_elev", "datum_elevation", "kb_elev", "kb_elevation"]),
+        ("DATUM_TYPE",        ["datum_type", "elev_datum"]),
+        ("GROUND_ELEVATION",  ["ground_elev", "ground_elevation", "gl_elev"]),
+        ("PLUGBACK_DEPTH",    ["plugback_depth", "plug_back_depth"]),
+        ("LEASE_NAME",        ["lease_name"]),
+        ("BASIN",             ["basin_name", "basin"]),
+        ("STATE",             ["province_state", "state"]),
+        ("LEGAL_SURVEY_TYPE", ["legal_survey_type"]),
+        # already-converted files (xy_to_latlong / the 🧭 pass) carry these:
+        ("LATITUDE",          ["surface_latitude"]),
+        ("LONGITUDE",         ["surface_longitude"]),
+    ],
+    # Tops vocabulary: unambiguous WITHIN this table — "BASE" in a formation-
+    # tops file can only mean base_depth. File-agnostic matching rightly
+    # refuses one-token→two-token guesses; a per-table synonym is not a guess.
+    "DV_WELL_FORMATION_TOP": [
+        ("API_NUMBER",  ["uwi"]),
+        ("API",         ["uwi"]),
+        ("TOP",         ["top_depth"]),
+        ("BASE",        ["base_depth"]),
+        ("TOP_MD",      ["top_depth"]),
+        ("BASE_MD",     ["base_depth"]),
+        ("FORMATION",   ["formation_name", "formation"]),
+        ("FM",          ["formation_name", "formation"]),
+        ("HORIZON",     ["formation_name", "formation"]),
+        ("PICK_DEPTH",  ["top_depth"]),
+    ],
+}
+
+
+def seed_vendor_synonyms(engine, schema="dataview"):
+    """Seed _VENDOR_SYNONYMS into dv_column_map (idempotent MERGE, keyed on
+    map_id = SHA1('VENDOR|src|table|col')). Tagged source_file_pattern='VENDOR'
+    / confirmed_by='VENDOR_SEED' so seeds are distinguishable from human
+    confirmations and can be retired wholesale:
+        DELETE FROM dataview.dv_column_map WHERE confirmed_by='VENDOR_SEED'
+    Returns (n_seeded, skipped_list). Never raises."""
+    if engine is None:
+        return 0, []
+    from sqlalchemy import text
+    up = text(
+        "MERGE dataview.dv_column_map AS t USING (SELECT :mid AS map_id) s "
+        "ON t.map_id = s.map_id "
+        "WHEN NOT MATCHED THEN INSERT (map_id, source_file_pattern, source_column, "
+        "  target_table, target_column, confidence_score, mapping_method, confirmed_ind, "
+        "  confirmed_by, confirmed_date, active_ind, row_created_by, row_created_date, source) "
+        "VALUES (:mid,'VENDOR',:sc,:tt,:tc,0.9,'VENDOR','Y','VENDOR_SEED',SYSUTCDATETIME(),"
+        "        'Y','VENDOR_SEED',SYSUTCDATETIME(),NULL);")
+    seeded, skipped = 0, []
+    try:
+        with engine.begin() as cx:
+            for tt, pairs in _VENDOR_SYNONYMS.items():
+                live = {r[0].lower() for r in cx.execute(text(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA=:s AND TABLE_NAME=:t"),
+                    {"s": schema, "t": tt.lower()}).fetchall()}
+                if not live:
+                    skipped.append(f"{tt}: table not found")
+                    continue
+                for sc, cands in pairs:
+                    tc = next((c for c in cands if c.lower() in live), None)
+                    if tc is None:
+                        skipped.append(f"{tt}.{sc}: none of {cands} on the live table")
+                        continue
+                    mid = pdl.entity_id(f"VENDOR|{sc}|{tt}|{tc.lower()}")
+                    cx.execute(up, {"mid": mid, "sc": sc, "tt": tt, "tc": tc.lower()})
+                    seeded += 1
+    except Exception as e:
+        skipped.append(f"seed failed: {str(e)[:120]}")
+    return seeded, skipped
+
+
+# ── 🤖 AI-assisted table mapping ────────────────────────────────────────────
+# The operator provides a HINT ("this is a well header"); the model proposes
+# the target table + column map, choosing ONLY from the live catalog it is
+# fed, and the reply is validated against that same catalog. Proposals land
+# in the review grid as ⚠ for human confirmation — Save is what persists to
+# dv_column_map, so a confirmed AI proposal teaches the synonym store exactly
+# like a hand-picked one, and the deterministic matcher needs the AI less
+# every time.
+def _ai_api_key():
+    """ANTHROPIC_API_KEY from the environment, else the repo .env — the same
+    discovery page_well_map's AI filter uses, so one config governs both."""
+    import os
+    k = os.environ.get("ANTHROPIC_API_KEY", "")
+    if k:
+        return k
+    try:
+        with open(".env", encoding="utf-8") as f:
+            for line in f:
+                if line.strip().startswith("ANTHROPIC_API_KEY"):
+                    return line.split("=", 1)[-1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def ai_suggest_table_map(engine, schema, hint, src_cols, sample_rows,
+                         review_target=None, prior=None,
+                         transforms_catalog=None):
+    """(table, {src: target}, notes) for one staged file, from a human hint +
+    the LIVE schema. Raises with a readable message on any failure — the
+    caller shows it, nothing is guessed."""
+    import json as _json
+    import os
+    import re as _re2
+    import anthropic
+    key = _ai_api_key()
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set (env or .env)")
+    FKC, COLS, KIND = _live_catalog_parsed(engine, schema)
+
+    def _toks(s):
+        return {t for t in _re2.split(r"[^a-z0-9]+", str(s).lower()) if len(t) > 2}
+    want = _toks(hint)
+    for c in src_cols:
+        want |= _toks(c)
+    scored = sorted(((len(want & (_toks(t) | {w for c in cols for w in _toks(c)})), t)
+                     for t, cols in COLS.items()), reverse=True)
+    cand = [t for _, t in scored[:10]]
+    if review_target and review_target.upper() not in cand:
+        cand.insert(0, review_target.upper())
+    # Tables the OPERATOR NAMES (hint or Refine feedback) are always
+    # candidates — the top-10 trim is a prompt-size optimization and must
+    # never outrank an explicit instruction ("The target table is
+    # dv_prod_volume" was rejected because it missed the token cut, July 30).
+    _named = f"{hint or ''} {(prior or {}).get('feedback', '')}".upper()
+    for _t in COLS:
+        if _t.upper() in _named and _t not in cand:
+            cand.insert(0, _t)
+    catalog = {t: sorted(c.lower() for c in COLS.get(t, set())) for t in cand}
+    # Required NOT-NULL columns (no default, not identity/computed) and
+    # single-col FK parents per candidate — so the model can judge what's
+    # MISSING, what's GENERATABLE, and which PARENT must be populated first,
+    # from the live schema rather than its imagination.
+    required, parents = {}, {}
+    try:
+        from sqlalchemy import text as _tq
+        with engine.connect() as _cq:
+            for t in cand:
+                try:
+                    required[t] = sorted(r0[0].lower() for r0 in _cq.execute(_tq(
+                        "SELECT c.name FROM sys.columns c "
+                        "WHERE c.object_id=OBJECT_ID(:t) AND c.is_nullable=0 "
+                        "AND c.default_object_id=0 AND c.is_identity=0 "
+                        "AND c.is_computed=0"), {"t": f"{schema}.{t.lower()}"}).fetchall())
+                except Exception:
+                    required[t] = []
+                parents[t] = sorted({f'{fk["child_cols"][0].lower()} -> {fk["parent_table"]}'
+                                     for fk in FKC.get(t, []) if len(fk["child_cols"]) == 1})
+    except Exception:
+        pass
+
+    sample_txt = ""
+    if sample_rows:
+        sample_txt = "\nSample rows (values truncated):\n" + "\n".join(
+            " | ".join(str(v)[:24] for v in r) for r in sample_rows[:5])
+    tf_txt = ""
+    if transforms_catalog:
+        # The registered row-shape transforms, so "derive the header" can be
+        # a PLAN STEP with arguments — not prose in shape_note that a human
+        # then translates into button clicks (Perry, July 30: "the Assistant
+        # can only plan simple file-to-table — can't derive headers as part
+        # of the plan"). The model SELECTS and PARAMETERIZES from this shelf;
+        # it never invents transforms, and the caller validates every param.
+        tf_txt = ("\nRegistered row-shape transforms (choose AT MOST ONE, "
+                  "only when the file's shape mismatches the table; param "
+                  "values naming columns MUST be actual source columns):\n"
+                  + _json.dumps(transforms_catalog, indent=1)
+                  + '\nAdd to your JSON: "transform": {"name": '
+                    '"<registered name>", "params": {"<param>": "<source '
+                    'column or constant>"}} — or "transform": null.\n')
+    prior_txt = ""
+    if prior:
+        # A REVISION turn: the previous plan + the operator's objection ride
+        # along, so "ask it differently" is a conversation, not a restart.
+        prior_txt = ("\nYour PREVIOUS plan for this same file:\n"
+                     + _json.dumps(prior.get("plan", {}), indent=1)
+                     + f"\nOperator feedback on it: {prior.get('feedback', '')}\n"
+                     "Produce a REVISED plan that addresses the feedback. Keep "
+                     "what the feedback did not object to.\n")
+    prompt = (
+        "You map a source data table onto a SQL Server schema.\n"
+        f"Operator hint about the file: {hint or '(none)'}\n"
+        f"Source columns: {', '.join(src_cols)}\n{sample_txt}\n\n"
+        "Candidate target tables and their columns (choose ONLY from these):\n"
+        + _json.dumps(catalog, indent=1)
+        + "\nRequired NOT-NULL columns per table:\n" + _json.dumps(required, indent=1)
+        + "\nForeign keys per table (child col -> parent table):\n"
+        + _json.dumps(parents, indent=1)
+        + "\n\nRespond with ONLY a JSON object, no markdown fences, shaped:\n"
+          '{"table": "<one candidate table>", '
+          '"colmap": {"<source col>": "<target col>"}, '
+          '"skip": ["<source cols with no sensible target>"], '
+          '"required_gaps": [{"column": "<required col with no source>", '
+          '"can_generate": true, "how": "<seq_num per X / constant / concat — or '
+          'why it needs real source data>"}], '
+          '"parents": [{"table": "<parent>", "why": "<one sentence: which column '
+          'references it and whether it must be populated first>"}], '
+          '"shape_note": "<empty string, OR one short paragraph if the file ROW '
+          'SHAPE mismatches the table — e.g. one-pick-per-row vs top/base '
+          'interval columns — and what transform would reconcile them>", '
+          '"notes": "<one short sentence>"}\n'
+          "Rules: every colmap value must be a column of the chosen table; map "
+          "only when confident; unmapped sources go in skip; judge required_gaps "
+          "against the actual sample values; never invent columns or tables."
+        + tf_txt + prior_txt)
+    model = os.environ.get("DATAVIEW_AI_MODEL", "claude-sonnet-5")
+    client = anthropic.Anthropic(api_key=key)
+
+    # Reply handling, three lessons deep (each earned live):
+    #   cap check       — a capped reply truncates MID-JSON ("Unterminated
+    #                     string", July 29); 8000 tokens + explicit check.
+    #   fence + raw_decode — fences and trailing prose despite "ONLY JSON"
+    #                     ("Extra data", July 30); parse the FIRST object.
+    #   self-repair     — genuinely malformed JSON (unescaped quote →
+    #                     "Expecting ',' delimiter", July 30): quote the parse
+    #                     error back, ONE retry, then fail readable.
+    def _ask(msgs):
+        m = client.messages.create(model=model, max_tokens=8000, messages=msgs)
+        if getattr(m, "stop_reason", "") == "max_tokens":
+            raise RuntimeError("AI reply hit the token cap and is incomplete — "
+                               "try a shorter hint, or tell Perry the cap "
+                               "needs raising again")
+        return "".join(b.text for b in m.content
+                       if getattr(b, "type", "") == "text").strip()
+
+    def _parse(t):
+        if t.startswith("```"):
+            t = t.split("```", 2)[1]
+            t = t[4:] if t.lower().startswith("json") else t
+        return _json.JSONDecoder().raw_decode(t.strip())[0]
+
+    msgs = [{"role": "user", "content": prompt}]
+    txt = _ask(msgs)
+    try:
+        data = _parse(txt)
+    except Exception as _pe:
+        msgs += [{"role": "assistant", "content": txt},
+                 {"role": "user", "content":
+                  f"That reply was not valid JSON ({str(_pe)[:120]}). Respond "
+                  f"again with ONLY the corrected JSON object — no fences, no "
+                  f"prose, all string values properly escaped."}]
+        try:
+            data = _parse(_ask(msgs))
+        except Exception as _pe2:
+            raise RuntimeError(f"AI returned malformed JSON twice "
+                               f"({str(_pe2)[:100]}); first reply began: "
+                               f"{txt[:150]!r}")
+    table = str(data.get("table", "")).upper()
+    if table in catalog:
+        live = set(catalog[table])
+    elif table in COLS:
+        # A real LIVE table outside the trimmed candidate list: accept. The
+        # trim keeps the prompt small; it does not define legality — legality
+        # is "the table exists in the live schema", and the colmap is still
+        # validated against ITS real columns.
+        live = {c.lower() for c in COLS[table]}
+    else:
+        raise RuntimeError(f"AI chose {table!r}, which is not a live table")
+    cmap, dropped = {}, []
+    for s, t in (data.get("colmap") or {}).items():
+        if s in src_cols and str(t).lower() in live:
+            cmap[s] = str(t).lower()
+        else:
+            dropped.append(f"{s}→{t}")
+    notes = str(data.get("notes", ""))[:300]
+    if dropped:
+        notes += f" (dropped invalid: {', '.join(dropped[:6])})"
+    extra = {
+        "transform": data.get("transform") if isinstance(data.get("transform"), dict) else None,
+        "required_gaps": [g for g in (data.get("required_gaps") or [])
+                          if isinstance(g, dict) and g.get("column")][:12],
+        "parents": [p for p in (data.get("parents") or [])
+                    if isinstance(p, dict) and p.get("table")][:8],
+        "shape_note": str(data.get("shape_note", ""))[:600],
+    }
+    return table, cmap, notes, extra
 
 
 def _stg_nonnull_counts(engine, stg_table, cols):
@@ -1173,7 +1557,11 @@ def build_map_review(engine, scan_rows, schema="dataview", with_data=False):
         _tag = os.path.basename(str(r.get("path") or r.get("file") or "")) or "row"
         skey = f"{stg_tbl}#{_ri}#{_tag}"
         review.append({"target": t, "skey": skey, "stg_table": stg_tbl,
-                       "src_file": r.get("file", ""),
+                       # the row number the operator SEES in Files → tables. Warnings that say
+                       # "re-target one of them" are useless without it: this tree has eight
+                       # filenames that appear twice, so a name doesn't identify a row.
+                       "row_no": _ri + 1,
+                       "src_file": r.get("file", ""), "path": r.get("path", ""),
                        "src_cols": src_cols, "db_cols": db_cols, "rows": rows,
                        "funcs": funcs, "required_missing": req_missing, "suggested_funcs": suggested,
                        "auto": auto,
@@ -1302,8 +1690,20 @@ def _file_key(d):
     return _os.path.basename(fp) if fp else ""
 
 
+def _uwi14(u):
+    """Canonical UWI: strip separators/blanks, then standardize to 14 characters —
+    right-pad trailing zeros when short, keep the first 14 when long. Empty stays
+    empty (blank UWIs are handled by the resolution gate, not here). Used on BOTH
+    the write side (build_safe_file, staging) and the match side (_uwi_exists /
+    the gate) so stored and looked-up UWIs are always the same 14-digit form."""
+    d = "".join(ch for ch in str(u) if ch not in "-. ").strip()
+    return (d + "0" * 14)[:14] if d else ""
+
+
+# _desep kept as an alias — historically "de-separate only"; now also standardizes
+# to 14 so match and storage agree. Any remaining caller gets the canonical form.
 def _desep(u):
-    return "".join(ch for ch in str(u) if ch not in "-. ").strip()
+    return _uwi14(u)
 
 
 def _uwi_exists(engine, uwis, schema="dataview"):
@@ -1442,8 +1842,150 @@ def render_review_uwi(ss, server, database, schema="dataview"):
     if _msg:
         (st.error if _msg[0] == "error" else st.success)(_msg[1])
 
+    def _stamp_csvs(files):
+        """Write each document's resolved UWI into every extract CSV row it produced, and drop
+        skipped documents' rows entirely.
+
+        This lives OUT here, not inside the Validate & apply button, because the gate can now
+        resolve with no click at all: saved assignments are read back from
+        GLOBAL_FILE_CATALOG.UWI14 and prefilled, every document comes up valid, `unresolved` is
+        empty, and the gate returns True. Before assignments persisted, a click was the only
+        way to resolve — so the stamp lived in the click and that was fine. Adding persistence
+        removed the click and took the stamp with it: the CSVs kept their blank uwi and staged
+        1,610 blanks into a NOT NULL column. The gate said resolved; the data said otherwise.
+        """
+        paths = set()
+        for v in files.values():
+            paths |= v["paths"]
+
+        def _rewrite(path):
+            try:
+                hdr, data = _read_uwi_rows(path)
+            except Exception:
+                return
+            # find the UWI column AS IT IS SPELLED in this file. Extractors emit lowercase
+            # `uwi` since the DDL alignment; older ones emit `UWI`. Testing for the literal
+            # "UWI" made this bail on every realigned extract — so the assigned UWIs were
+            # never stamped and skipped files were never dropped, with no error either way.
+            ucol = next((h for h in (hdr or []) if str(h).strip().lower() == "uwi"), None)
+            if not ucol:
+                return
+            keep = []
+            for d in data:
+                lg = _file_key(d)
+                v = files.get(lg)
+                if v and v["skip"]:
+                    continue                                   # drop skipped file's rows
+                if v and v["uwi"]:
+                    d[ucol] = v["uwi"]                          # stamp/overwrite the resolved UWI
+                keep.append(d)
+            with open(path, "w", newline="", encoding="utf-8") as fh:
+                w = csv.DictWriter(fh, fieldnames=hdr); w.writeheader(); w.writerows(keep)
+
+        # rewrite every extract CSV in the extract folders (log AND curve), matched by document
+        seen_dirs = set()
+        for p in paths:
+            _rewrite(p)
+            d = os.path.dirname(p)
+            if d in seen_dirs:
+                continue
+            seen_dirs.add(d)
+            for sib in os.listdir(d):                          # catch sibling curve/other CSVs
+                sp = os.path.join(d, sib)
+                if sp != p and sib.endswith(".csv"):
+                    _rewrite(sp)
+
     unresolved = [v for v in files.values() if not v.get("valid") and not v["skip"]]
+    ss["bdl_uwi_pending"] = [v["label"] for v in unresolved]
     if not unresolved:
+        # Resolved without a click — every document's UWI came from its own header or from a
+        # saved assignment. The CSVs still hold whatever the extractor wrote (blank, for the
+        # saved case), so they MUST be stamped before staging. Once per scan: _stamp_csvs is
+        # idempotent, but re-reading every extract CSV on each Streamlit rerun is not free.
+        # Stamp once per version of the files on disk — not once per session.
+        #
+        # This was a boolean, and a boolean has to be cleared by hand at every point the world
+        # changes. It wasn't: a re-scan rewrote every extract CSV with a blank uwi, the flag
+        # was still True from the previous scan, so the stamp was skipped and the gate happily
+        # reported "resolved" over blank data. The screen said one thing, the CSV said another.
+        #
+        # A signature over (path, mtime) can't go stale the way a flag can: stamping bumps the
+        # mtimes, so the signature we record afterwards is the signature of the STAMPED files.
+        # A rerun matches it and skips. A scan rewrites them, the signature stops matching, and
+        # the stamp runs again — with no one having to remember to clear anything.
+        def _sig(paths):
+            out = []
+            for p in sorted(paths):
+                try:
+                    out.append((p, os.path.getmtime(p)))
+                except OSError:
+                    out.append((p, 0))
+            return tuple(out)
+
+        _paths = set()
+        for _v in files.values():
+            _paths |= _v["paths"]
+        if ss.get("bdl_uwi_stamp_sig") != _sig(_paths):
+            try:
+                _stamp_csvs(files)
+                ss["bdl_uwi_stamp_sig"] = _sig(_paths)     # signature of the STAMPED files
+            except Exception as e:
+                st.error(f"Couldn't write the resolved UWIs into the extract CSVs: {e}  "
+                         f"Staging would load blank UWIs — fix this before continuing.")
+                ss["bdl_uwi_pending"] = None       # NOT "go assign something" — see the error
+                return False
+        # Don't just vanish. Before assignments persisted, "no gate" meant "every file carried
+        # its own valid UWI" — nothing to show. Now it can also mean "we silently reused what
+        # you typed last time", and that is worth being able to SEE. It also makes FORGET
+        # reachable: an assignment you can't find is an assignment you can't take back, and
+        # these are currently random wells picked to watch the data flow.
+        _saved = [v for v in files.values() if v.get("origin") == "saved" and not v["skip"]]
+        _shown = [v for v in files.values() if not v["skip"]]
+        if _shown:
+            _n_saved = len(_saved)
+            with st.expander(
+                    f"✅ UWI gate — {len(_shown)} document(s) resolved"
+                    + (f", {_n_saved} from a saved assignment" if _n_saved else ""),
+                    expanded=False):
+                st.caption("Every document has a UWI that exists in **dv_well**, so staging "
+                           "isn't blocked. `saved` means you assigned it on a previous run and "
+                           "it was remembered — the file itself didn't carry it.")
+                _g = pd.DataFrame([{"action": "keep", "UWI": v["uwi"], "document": v["label"],
+                                    "format": v["fmt"], "tables": len(v["paths"]),
+                                    "UWI from": v.get("origin", "—")} for v in _shown])
+                _e = st.data_editor(
+                    _g, hide_index=True, use_container_width=True, key="bdl_uwi_done",
+                    column_order=["action", "UWI", "UWI from", "document", "tables", "format"],
+                    column_config={
+                        "action": st.column_config.SelectboxColumn(
+                            "action", options=["keep", "FORGET"], required=True, width="small",
+                            help="FORGET erases the remembered assignment for this document. "
+                                 "Use it when a UWI was assigned just to watch the data flow."),
+                        "UWI": st.column_config.TextColumn(disabled=True, width="small"),
+                        "UWI from": st.column_config.TextColumn(disabled=True, width="small"),
+                        "document": st.column_config.TextColumn(disabled=True),
+                        "tables": st.column_config.NumberColumn(disabled=True, width="small"),
+                        "format": st.column_config.TextColumn(disabled=True, width="small")})
+                if st.button("Apply", key="bdl_uwi_done_apply"):
+                    _forget = [v["log_id"] for v, r in zip(_shown, _e.to_dict("records"))
+                               if str(r.get("action") or "").upper() == "FORGET"]
+                    if _forget and _gate is not None:
+                        try:
+                            _gate.set_identity(eng, {lg: "" for lg in _forget})
+                            for lg in _forget:
+                                files[lg]["uwi"] = files[lg]["assigned"] = ""
+                                files[lg]["valid"] = False
+                                files[lg]["origin"] = "—"
+                            ss["bdl_uwi_files"] = files
+                            ss.pop("bdl_uwi_stamp_sig", None)  # they must be re-stamped
+                            ss["bdl_uwi_msg"] = ("success", f"Forgot {len(_forget)} "
+                                                            f"assignment(s) — they're back in "
+                                                            f"the gate above.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Couldn't forget: {e}")
+                    elif not _forget:
+                        st.caption("Nothing marked FORGET.")
         return True                                            # all resolved → staging may proceed
 
     st.divider()
@@ -1464,11 +2006,15 @@ def render_review_uwi(ss, server, database, schema="dataview"):
                       "header UWI", "UWI from"],
         column_config={
             "action": st.column_config.SelectboxColumn(
-                "action", options=["keep", "SKIP", "FORGET"], required=True, width="small",
-                help="SKIP = drop this DOCUMENT from the run.  FORGET = erase the remembered "
-                     "assignment for it (use when a UWI was assigned just to see how the data "
-                     "flowed — otherwise it persists into every future run of that file)"),
-            "assign UWI": st.column_config.TextColumn(help="a UWI that exists in dv_well — it is "
+                "action", options=["keep", "NEW", "SKIP", "FORGET"], required=True,
+                width="small",
+                help="keep = attach to a UWI that already exists in dv_well.  "
+                     "NEW = this document ESTABLISHES a well not yet in dv_well (a scout "
+                     "ticket for a brand-new well) — the UWI is accepted and the well is "
+                     "created on promote.  SKIP = drop this document from the run.  "
+                     "FORGET = erase the remembered assignment for it."),
+            "assign UWI": st.column_config.TextColumn(help="a UWI that exists in dv_well (keep) "
+                                                           "or a new 14-digit API-14 (NEW) — it is "
                                                            "stamped on EVERY row this document "
                                                            "produced, in every target table, and "
                                                            "remembered for the next run"),
@@ -1496,6 +2042,12 @@ def render_review_uwi(ss, server, database, schema="dataview"):
         acts = {v["log_id"]: str(r.get("action") or "").upper() for v, r in pairs}
         skips = {k: (a == "SKIP") for k, a in acts.items()}
         forgets = [k for k, a in acts.items() if a == "FORGET"]
+        # NEW = the operator asserts this document establishes a well not yet in dv_well.
+        # A scout ticket is frequently the FIRST record of a well, so requiring the well to
+        # pre-exist is backwards. But an unknown UWI must NOT pass silently — that turns a typo
+        # into a phantom well. So it's an explicit action: `keep` still requires the UWI to
+        # exist; `NEW` accepts an absent one and flags the well to be created on promote.
+        news = {k for k, a in acts.items() if a == "NEW"}
         good = _uwi_exists(eng, {u for lg, u in assigns.items() if u and not skips.get(lg)}, schema)
         invalid = []
         for lg, v in files.items():
@@ -1503,12 +2055,25 @@ def render_review_uwi(ss, server, database, schema="dataview"):
                 continue
             v["skip"] = skips.get(lg, False)
             u = assigns.get(lg, "").strip(); v["assigned"] = u
+            v["new_well"] = False
             if v["skip"]:
                 continue
             if u and _desep(u) in good:
-                v["uwi"] = _desep(u); v["valid"] = True
+                v["uwi"] = _desep(u); v["valid"] = True         # exists in dv_well
+            elif u and lg in news:
+                # operator asserts a new well: accept the UWI, mark it to be created. The
+                # document's well-header row promotes into dv_well and every child attaches to
+                # it. Basic sanity only — a UWI is 14 digits after de-separation; anything else
+                # is almost certainly a typo, not a new well.
+                du = _desep(u)
+                if du.isdigit() and len(du) == 14:
+                    v["uwi"] = du; v["valid"] = True; v["new_well"] = True
+                else:
+                    invalid.append(f"{v['label']} (‘{u}’ isn’t a 14-digit UWI — "
+                                   f"NEW needs a valid API-14)")
             elif u:
-                invalid.append(v["label"])
+                invalid.append(f"{v['label']} (‘{u}’ not in dv_well — set action to NEW to "
+                               f"create the well, or fix the UWI)")
         # Remember the VALID assignments against the document's INVENTORY_ID — and erase the
         # ones marked FORGET. Only ever UWI14; MATCHED_UWI / MATCH_METHOD / TRIAGE_* / PROC_*
         # belong to the pipeline and are not touched.
@@ -1531,46 +2096,13 @@ def render_review_uwi(ss, server, database, schema="dataview"):
         except Exception as e:
             st.caption(f"⚠ couldn't save assignments to the file catalog: {e}  "
                        f"(this run is unaffected — you'd just be asked again next time)")
-        # rewrite each extract CSV: stamp assigned UWIs, DROP skipped files' rows (never stage)
-        paths = set()
-        for v in files.values():
-            paths |= v["paths"]
-        # a log CSV and its curve CSV share the UWI/skip decision via log_id
-        def _rewrite(path):
-            try:
-                hdr, data = _read_uwi_rows(path)
-            except Exception:
-                return
-            # find the UWI column AS IT IS SPELLED in this file. Extractors emit lowercase
-            # `uwi` since the DDL alignment; older ones emit `UWI`. Testing for the literal
-            # "UWI" made this bail on every realigned extract — so the assigned UWIs were
-            # never stamped and skipped files were never dropped, with no error either way.
-            ucol = next((h for h in (hdr or []) if str(h).strip().lower() == "uwi"), None)
-            if not ucol:
-                return
-            keep = []
-            for d in data:
-                lg = _file_key(d)
-                v = files.get(lg)
-                if v and v["skip"]:
-                    continue                                   # drop skipped file's rows
-                if v and v["uwi"]:
-                    d[ucol] = v["uwi"]                          # stamp/overwrite the resolved UWI
-                keep.append(d)
-            with open(path, "w", newline="", encoding="utf-8") as fh:
-                w = csv.DictWriter(fh, fieldnames=hdr); w.writeheader(); w.writerows(keep)
-        # rewrite every extract CSV in the extract folders (log AND curve), matched by log_id
-        seen_dirs = set()
-        for p in paths:
-            _rewrite(p)
-            d = os.path.dirname(p)
-            if d in seen_dirs:
-                continue
-            seen_dirs.add(d)
-            for sib in os.listdir(d):                          # catch sibling curve/other CSVs
-                sp = os.path.join(d, sib)
-                if sp != p and sib.endswith(".csv"):
-                    _rewrite(sp)
+        # stamp assigned UWIs into every extract CSV, and DROP skipped documents' rows
+        _stamp_csvs(files)
+        _p = set()
+        for _v in files.values():
+            _p |= _v["paths"]
+        ss["bdl_uwi_stamp_sig"] = tuple(sorted(
+            (x, (os.path.getmtime(x) if os.path.exists(x) else 0)) for x in _p))
         ss["bdl_uwi_files"] = files
         # st.rerun() RAISES — anything rendered here is discarded before it reaches the
         # screen. So st.error("Not found in dv_well: ...") was written and never seen: you
@@ -1599,6 +2131,16 @@ def render_match_map(ss, server, database, schema="dataview"):
     if st.button("Build mappings", type="primary"):
         try:
             eng = get_engine(server, database)
+            # Vendor vocabulary first, so this very build already benefits.
+            # Once per session; the MERGE is idempotent anyway.
+            if not ss.get("bdl_vendor_seeded"):
+                _n_seed, _seed_skips = seed_vendor_synonyms(eng, schema)
+                ss["bdl_vendor_seeded"] = True
+                if _n_seed:
+                    st.caption(f"synonym store: {_n_seed} vendor pair(s) present "
+                               f"(RMOTC/Teapot vocabulary)")
+                for _sk in _seed_skips:
+                    st.caption(f"  (vendor synonym skipped — {_sk})")
             review = build_map_review(eng, scan["rows"], schema, with_data=True)
             # Carry forward what's still in the scan — and ONLY that. `maps` used to accumulate
             # and never drop, so a table auto-mapped here BEFORE you ticked its skip in
@@ -1657,26 +2199,130 @@ def render_match_map(ss, server, database, schema="dataview"):
     review_needed = [r for r in review if r["skey"] not in auto_set]
     if not review_needed:
         st.success(f"All {len(review)} tables auto-mapped (exact matches) — nothing *needs* "
-                   "review. Open a table below to change a mapping anyway, then Save.")
+                   f"review. ⚠ Auto-mapping is PER-RUN: press 💾 **Save all mappings** below "
+                   f"to REMEMBER these shapes (fingerprint recall next scan); unsaved shapes "
+                   f"are re-decided every time.")
     # Render the editor for EVERY table, not just the ones needing review: an exact match is
     # a good default, not a decision the operator is stuck with. Auto tables stay collapsed.
 
-    # Two scan rows landing on the SAME staging table would BCP into one physical table with
-    # two different column shapes. Name them here rather than let it surface as a bcp error
-    # three phases later — and the skip control below is how you resolve it without going back
-    # to the top of the page.
+    # Two scan rows landing on the same staging table only CLASH if their column shapes differ.
+    # Identical shapes are normal and handled: stage_directory groups files by (target,
+    # fingerprint) and bcp's them into one table together — that is what a group's `files` list
+    # is for. Warning on those was wrong, and worse than useless: it told you three files
+    # "would stage into the same table with different column shapes" while listing the same
+    # 11-col file twice.
     _by_stg = {}
     for r in review:
         _by_stg.setdefault(r["stg_table"], []).append(r)
-    _clash = {k: v for k, v in _by_stg.items() if len(v) > 1}
+    _clash = {k: v for k, v in _by_stg.items()
+              if len({x["fp"] for x in v}) > 1}          # >1 DISTINCT shape, not >1 file
     if _clash:
         for stg, rs in _clash.items():
+            # group by shape so the message shows the real split, and disambiguate same-named
+            # files by their folder (this tree has eight filenames that appear twice)
+            shapes = {}
+            for x in rs:
+                shapes.setdefault(x["fp"], []).append(x)
+            bullets = []
+            for _fp, xs in shapes.items():
+                names = []
+                for x in xs:
+                    p = x.get("path") or ""
+                    par = os.path.basename(os.path.dirname(p)) if p else ""
+                    nm = x.get("src_file") or os.path.basename(p) or "?"
+                    tag = f"**#{x['row_no']}**" if x.get("row_no") else ""
+                    names.append(f"{tag} `{par}\\{nm}`" if par else f"{tag} `{nm}`")
+                bullets.append(f"- **{len(xs[0]['src_cols'])} cols** — " + ", ".join(names))
+            _nums = ", ".join(f"#{x['row_no']}" for x in rs if x.get("row_no"))
             st.warning(
-                f"⚠ **{len(rs)} files both map to `{rs[0]['target']}`** and would stage into "
-                f"the same table `{stg}` with different column shapes:\n\n"
-                + "\n".join(f"- `{x.get('src_file') or '?'}` — {len(x['src_cols'])} cols"
-                            for x in rs)
-                + "\n\nRe-target one of them in **Files → tables**, or **⏭ skip** it below.")
+                f"⚠ **{len(rs)} files map to `{rs[0]['target']}` in "
+                f"{len(shapes)} different column shapes**, and would stage into the same table "
+                f"`{stg}`. `create_stg` does DROP+CREATE, so the last shape wins and the "
+                f"others' rows are lost:\n\n"
+                + "\n".join(bullets)
+                + f"\n\n**Fix:** in **Files → tables** above, find row {_nums} and either "
+                  f"change its **→ table** or tick its **skip**. (Files with the SAME shape "
+                  f"are fine — they stage together.)")
+
+    # ── 🤖 AI assist — a hint + the live schema → a proposed mapping ─────────
+    with st.expander("🤖 AI assist — describe a file, get a proposed mapping",
+                     expanded=False):
+        st.caption("Give a hint like `well header`, `formation tops`, `deviation "
+                   "survey` and the AI proposes the target table and column map — "
+                   "choosing only from the live schema. Proposals land in the grid "
+                   "below as ⚠ for YOUR review; nothing persists until 💾 Save, and "
+                   "Save teaches dv_column_map, so next time the deterministic "
+                   "matcher won't need the AI for this shape at all.")
+        _ai_lbl = {r["skey"]: (r.get("src_file") or r["target"]) for r in review}
+        _ai_pick = st.selectbox("File / staged table",
+                                [_ai_lbl[r["skey"]] for r in review], key="bdl_ai_pick")
+        _ai_hint = st.text_input("Hint (what IS this table?)", key="bdl_ai_hint",
+                                 placeholder="e.g. well header for Teapot Dome wells")
+        if st.button("🤖 Propose mapping", key="bdl_ai_go"):
+            _r = next(x for x in review if _ai_lbl[x["skey"]] == _ai_pick)
+            eng = get_engine(server, database)
+            _stg = (ss.get("bdl_mapmeta", {}).get(_r["skey"])
+                    or (None, _r.get("stg_table")))[1]
+            _samples = []
+            try:
+                if _stg:
+                    from sqlalchemy import text as _t
+                    with eng.connect() as _c:
+                        _samples = [tuple(row) for row in _c.execute(
+                            _t(f"SELECT TOP 5 * FROM {_stg}")).fetchall()]
+            except Exception:
+                _samples = []
+            try:
+                _t_ai, _cmap_ai, _notes, _extra = ai_suggest_table_map(
+                    eng, schema, _ai_hint, list(_r["src_cols"]), _samples,
+                    _r.get("target"))
+            except Exception as _ae:
+                st.error(f"AI assist failed: {str(_ae)[:250]}")
+            else:
+                ss["bdl_ai_prop"] = {"skey": _r["skey"], "table": _t_ai,
+                                     "cmap": _cmap_ai, "notes": _notes,
+                                     "extra": _extra}
+        _prop = ss.get("bdl_ai_prop")
+        if _prop:
+            _r = next((x for x in review if x["skey"] == _prop["skey"]), None)
+            if _r is not None:
+                st.markdown(f"**Proposal for `{_ai_lbl.get(_prop['skey'], _prop['skey'])}` "
+                            f"→ {_prop['table']}**  \n{_prop['notes']}")
+                st.dataframe(pd.DataFrame(
+                    [{"source": s, "→ column": t} for s, t in _prop["cmap"].items()]
+                    or [{"source": "(nothing mapped)", "→ column": ""}]),
+                    hide_index=True, use_container_width=True)
+                _ex = _prop.get("extra") or {}
+                if _ex.get("shape_note"):
+                    st.warning("📐 " + _ex["shape_note"])
+                if _ex.get("required_gaps"):
+                    st.markdown("**Required columns with no source:**")
+                    st.dataframe(pd.DataFrame([{
+                        "column": g.get("column", ""),
+                        "generatable": "✅" if g.get("can_generate") else "✗",
+                        "how": g.get("how", "")} for g in _ex["required_gaps"]]),
+                        hide_index=True, use_container_width=True)
+                    st.caption("Generatable ones go in ④ Derived columns "
+                               "(seq_num/constant/concat) — the AI's `how` is "
+                               "the suggested rule, verify before saving.")
+                for _p in (_ex.get("parents") or []):
+                    st.info(f"⛓ **{_p.get('table')}** — {_p.get('why', '')}")
+                if _prop["table"] != _r["target"].upper():
+                    st.warning(f"AI reads this file as **{_prop['table']}**, but the scan "
+                               f"staged it as **{_r['target']}**. Change its → table in "
+                               f"Files → tables (Phase 1) and rebuild; a column map only "
+                               f"applies to the table it was made for.")
+                elif st.button("✅ Apply to the grid below (still needs your 💾 Save)",
+                               key="bdl_ai_apply"):
+                    for _row in _r["rows"]:
+                        _t_new = _prop["cmap"].get(_row["source"])
+                        if _t_new and _row["status"] not in ("exact", "confirmed"):
+                            _row["target"] = _t_new
+                            _row["status"] = "ai"          # not settled -> shows ⚠
+                    ss["bdl_review"] = review
+                    ss["bdl_grid_ver"] = int(ss.get("bdl_grid_ver", 0)) + 1
+                    ss.pop("bdl_ai_prop", None)
+                    st.rerun()
 
     with st.form("bdl_phase2"):
         editors = {}
@@ -1688,14 +2334,15 @@ def render_match_map(ss, server, database, schema="dataview"):
             settled = ("exact", "confirmed", "skip")
             slabel = r["target"] if r["stg_table"] == stg_name(r["target"].upper()) \
                 else f"{r['target']} ⟵ {r['stg_table'].split('.')[-1]}"
-            with st.expander(f"{flag}  {slabel}  ·  {len(r['src_cols'])} cols, "
+            _no = f"#{r['row_no']}  " if r.get("row_no") else ""
+            with st.expander(f"{flag}  {_no}{slabel}  ·  {len(r['src_cols'])} cols, "
                              f"{n_exc} to review",
                              expanded=bool(n_exc or r["required_missing"] or r.get("dropped_cols"))):
                 # Skip HERE, not only in Files → tables at the top of the page. This is where
                 # you find out a table is wrong — a mis-matched target, a shape clash, a file
                 # you never meant to load — so this is where the decision belongs.
                 skip_tbl[r["skey"]] = st.checkbox(
-                    f"⏭ Skip **{r['target']}**"
+                    f"⏭ Skip {_no}**{r['target']}**"
                     + (f"  ⟵ `{r.get('src_file')}`" if r.get("src_file") else "")
                     + " — don't map, don't promote",
                     key=f"bdlskip_{r['skey']}",
@@ -1749,7 +2396,7 @@ def render_match_map(ss, server, database, schema="dataview"):
                 label = r["target"] if r["stg_table"] == stg_name(r["target"].upper()) \
                     else f"{r['target']}  ⟵  {r['stg_table'].split('.')[-1]}"
                 editors[r["skey"]] = (r["target"], st.data_editor(
-                    grid, hide_index=True, use_container_width=True, key=f"bdlmap_{r['skey']}",
+                    grid, hide_index=True, use_container_width=True, key=f"bdlmap_{r['skey']}_v{ss.get('bdl_grid_ver', 0)}",
                     column_config={
                         "⚠": st.column_config.TextColumn(disabled=True, width="small"),
                         "source": st.column_config.TextColumn(disabled=True),
@@ -1772,7 +2419,7 @@ def render_match_map(ss, server, database, schema="dataview"):
                                          "Argument": f.get("arg", "")} for f in seed_rules])
                 fn_editors[r["skey"]] = st.data_editor(
                     fn_grid, hide_index=True, use_container_width=True, num_rows="dynamic",
-                    key=f"bdlfn_{r['skey']}",
+                    key=f"bdlfn_{r['skey']}_v{ss.get('bdl_grid_ver', 0)}",
                     column_config={
                         "Target column": st.column_config.SelectboxColumn(options=[""] + r["db_cols"]),
                         "Function": st.column_config.SelectboxColumn(options=[""] + FUNCTIONS),
@@ -1834,6 +2481,98 @@ def render_match_map(ss, server, database, schema="dataview"):
                     + ", ".join(f"`{_lbl.get(k, k)}`" for k in _skipped)
                     + ".  Their staged rows are untouched — nothing was deleted. Clear the "
                       "checkbox and Save again to put one back.")
+
+
+def _assert_work_root(root):
+    """Refuse to delete anything under a path that isn't our own work folder.
+
+    Containment already comes from construction — sweep_work builds
+    <bulk_dir>/_dv_work and walks only that. So this can't fire today, and a check that
+    can't fail is worth being honest about: it is a TRIPWIRE for a future edit, not a
+    guarantee about the present. The day someone passes a root in from outside, or renames
+    the subdir, this is what stops a recursive delete from running somewhere real. Given the
+    folder next door holds ~10 GB of seismic, a tripwire is cheap.
+    """
+    norm = os.path.normpath(root)
+    if os.path.basename(norm) != _WORK_SUBDIR:
+        raise ValueError(f"refusing to sweep {root!r}: not the loader's work folder "
+                         f"(basename must be {_WORK_SUBDIR!r})")
+    parent = os.path.dirname(norm)
+    if not parent or parent == norm:
+        raise ValueError(f"refusing to sweep {root!r}: no parent directory — a bare or "
+                         f"filesystem-root work folder is never what was meant")
+    return norm
+
+
+def sweep_work(bulk_dir, days=7, dry_run=True, keep_do_later=True):
+    """Delete loader artifacts older than `days`. Returns [(path, age_days, bytes)].
+
+    dry_run=True lists what WOULD go and touches nothing. That is the default, on purpose.
+
+    What this function is really about is where it CANNOT reach:
+
+      * It only walks <bulk_dir>/_dv_work/ — a folder this loader created. The bulk folder
+        itself is never touched. C:\\Bulk holds ~10 GB of SOURCE DATA — 5,073 MB of .segy,
+        1,987 MB of .sgy, 1,710 MB of .csv, 281 .las. "Delete everything older than a week"
+        pointed at that folder would be a catastrophe, and it is exactly what gets written
+        by someone who didn't look first.
+      * It refuses to follow symlinks/junctions out of the tree.
+      * The OCR do-later bucket is kept by default: those documents were deferred FOR work,
+        and a queue that empties itself after a week isn't a queue.
+
+    The extract CSVs are safe to lose — the next scan rewrites them. But they're also the
+    evidence when staging_qa reports a blank column, so this is opt-in, never automatic.
+    """
+    import time as _t
+    root = _assert_work_root(os.path.join(bulk_dir, _WORK_SUBDIR))
+    if not os.path.isdir(root):
+        return []
+    cutoff = _t.time() - days * 86400
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        if os.path.islink(dirpath):
+            dirnames[:] = []
+            continue
+        if keep_do_later and "_do_later" in dirpath.split(os.sep):
+            continue
+        for fn in filenames:
+            p = os.path.join(dirpath, fn)
+            try:
+                if os.path.islink(p):
+                    continue
+                stt = os.stat(p)
+                if stt.st_mtime >= cutoff:
+                    continue
+                age = (_t.time() - stt.st_mtime) / 86400.0
+                out.append((p, round(age, 1), stt.st_size))
+                if not dry_run:
+                    os.remove(p)
+            except OSError:
+                continue
+    if not dry_run:                       # drop directories left empty, never the root
+        for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+            if os.path.normpath(dirpath) == os.path.normpath(root):
+                continue
+            try:
+                if not os.listdir(dirpath):
+                    os.rmdir(dirpath)
+            except OSError:
+                pass
+    return out
+
+
+def work_usage(bulk_dir):
+    """(n_files, bytes) under the work folder — nothing outside it."""
+    root = os.path.join(bulk_dir, _WORK_SUBDIR)
+    n = tot = 0
+    for dirpath, _d, filenames in os.walk(root):
+        for fn in filenames:
+            try:
+                tot += os.path.getsize(os.path.join(dirpath, fn))
+                n += 1
+            except OSError:
+                pass
+    return n, tot
 
 
 def stg_name(target, fp=None):
@@ -1936,7 +2675,8 @@ def stage_directory(engine, server, database, rows, bulk_dir=r"C:\Bulk", progres
         for fname, path in g["files"]:
             import re as _re
             safe_name = _re.sub(r"[^A-Za-z0-9._-]", "_", f"{tbl.split('.')[-1]}__{fname}")
-            safe = os.path.join(bulk_dir, safe_name + ".bcp")
+            # .bcp files used to sit loose in the bulk folder, mixed in with source data
+            safe = os.path.join(work_dir(bulk_dir, "_bcp"), safe_name + ".bcp")
             n = build_safe_file(path, safe, fname, g["cols"])
             rc, out, err, cmd = run_bcp(server, database, tbl, safe)
             logs.append({"file": fname, "safe": safe, "cmd": cmd, "rc": rc, "expected": n,
@@ -1961,6 +2701,26 @@ def _table_cols_db(engine, table, schema="dataview"):
     from sqlalchemy import text
     try:
         df = pd.read_sql(text("SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(:t)"),
+                         engine, params={"t": f"{schema}.{table.lower()}"})
+        return {str(r.name).lower() for r in df.itertuples()}
+    except Exception:
+        return set()
+
+
+def _computed_cols(engine, table, schema="dataview"):
+    """Lowercase names of COMPUTED columns — these cannot be written.
+
+    SQL Server rejects the whole statement with "The column ... cannot be
+    modified because it is either a computed column or is the result of a UNION
+    operator" (271), so a single source header matching a computed column fails
+    the ENTIRE table load, not just that column. dv_well_formation_top
+    .gross_thickness is one, derived from base_depth minus top_depth.
+    """
+    import pandas as pd
+    from sqlalchemy import text
+    try:
+        df = pd.read_sql(text("SELECT name FROM sys.columns "
+                              "WHERE object_id=OBJECT_ID(:t) AND is_computed=1"),
                          engine, params={"t": f"{schema}.{table.lower()}"})
         return {str(r.name).lower() for r in df.itertuples()}
     except Exception:
@@ -1999,6 +2759,21 @@ def _id_sql(value_expr):
 def _id_expr(alias, col):
     return _id_sql(f"[{alias}].[{col}]")
 
+def _uwi14_sql(expr: str) -> str:
+    """The UWI-14 pad, as ONE expression both sides of an FK comparison use.
+
+    promote right-pads uwi to 14 (build_promote_sql). Any check comparing a
+    child value against a parent must apply the SAME transform to BOTH, or it
+    compares a padded 12-digit API against an unpadded one and concludes they
+    differ. That is the third site this pad has to agree on, after
+    build_promote_sql and the repair UPDATE — and it is why every one of
+    Teapot's 1,188 staged wells reported as unmatched while sitting in the
+    staging table two panels up the same screen.
+    """
+    return (f"CASE WHEN NULLIF({expr}, '') IS NULL THEN NULL "
+            f"ELSE LEFT(CONCAT({expr}, REPLICATE('0', 14)), 14) END")
+
+
 def analyze_fks(engine, maps, schema="dataview", staged=None, meta=None):
     """For every mapped table's FKs, find distinct promote-time values with no parent match.
     Groups results by parent table. Returns {parent: {kind, pk, values:{val:{n, froms}}}}."""
@@ -2036,10 +2811,53 @@ def analyze_fks(engine, maps, schema="dataview", staged=None, meta=None):
             else:
                 disp = _val_expr("s", src_col, is_ident)
                 match = disp
+                if child_col == "uwi":
+                    # The analysis MUST compare what promote will write, or it
+                    # lies in both directions. Promote pads uwi to UWI-14
+                    # (build_promote_sql); comparing the unpadded 12-digit API
+                    # against a repaired 14-char dv_well.uwi reported every
+                    # Teapot top as "unmatched" (July 29). Same expression,
+                    # same semantics as _uwi14.
+                    match = _uwi14_sql(match)
+                    disp = match
+
+            # A parent staged in THIS batch will exist by the time the child is
+            # promoted — Phase 1 already put it earlier in the topological order.
+            # Checking only the live target reports every parent as missing on a
+            # freshly reset schema, which is a wall of false violations and
+            # teaches the user to click past a warning that is sometimes real.
+            staged_ok = ""
+            for _k, (_t, _s) in meta.items():
+                if _t.lower() != parent.lower():
+                    continue
+                _pinv = {db.lower(): src for src, db in (maps.get(_k) or {}).items()}
+                _pcol = _pinv.get(pkc.lower())
+                if _pcol:
+                    # Must mirror the promote-time transform, or a staged parent
+                    # that WILL match after promote looks unmatched here.
+                    _pexpr = (_id_expr("q", _pcol) if kind == "entity"
+                              else _val_expr("q", _pcol, pkc.lower() in _IDENT))
+                    # 🔑 AND THAT INCLUDES THE UWI-14 PAD. The child side is
+                    # padded a few lines above; without the same pad here the
+                    # comparison is 14 chars against 12 and NEVER matches, so
+                    # this whole clause silently does nothing and every staged
+                    # parent reads as missing. Teapot: 1,188 false unmatched
+                    # values on a screen whose own Staged panel showed the
+                    # 1,317 wells sitting there. With the pad: 52, which are real.
+                    if pkc.lower() == "uwi":
+                        _pexpr = _uwi14_sql(_pexpr)
+                    staged_ok = (f" AND NOT EXISTS (SELECT 1 FROM {_s} q "
+                                 f"WHERE {_pexpr} = {match})")
+                    break
+                # No break here: a parent mapped in a LATER file still counts.
+                # Breaking on the first meta entry that merely NAMES the parent
+                # abandoned the search when that entry had no PK mapping.
+
             q = text(
                 f"SELECT {disp} AS val, COUNT(*) AS n FROM {stg} s "
                 f"WHERE NULLIF(LTRIM(RTRIM([s].[{src_col}])),'') IS NOT NULL "
-                f"AND NOT EXISTS (SELECT 1 FROM {schema}.{parent.lower()} p WHERE p.[{pkc}] = {match}) "
+                f"AND NOT EXISTS (SELECT 1 FROM {schema}.{parent.lower()} p WHERE p.[{pkc}] = {match})"
+                f"{staged_ok} "
                 f"GROUP BY {disp}")
             try:
                 df = pd.read_sql(q, engine)
@@ -2052,6 +2870,42 @@ def analyze_fks(engine, maps, schema="dataview", staged=None, meta=None):
                 cell["n"] += int(r.n)
                 cell["froms"].append(f"{target}.{child_col}")
     return by_parent
+
+
+def _anchor(name: str):
+    """An invisible target the page can be scrolled to."""
+    st.markdown(f'<div id="{name}"></div>', unsafe_allow_html=True)
+
+
+def _scroll_to(ss, name: str):
+    """Scroll the page to _anchor(name), ONCE.
+
+    Streamlit renders top to bottom and leaves the viewport where it was, so
+    on a long page a result 4,000 pixels below the button that produced it is
+    invisible — the operator sees nothing happen and presses the button again.
+    Phase 3 finding violations is exactly that case: the analysis worked, and
+    what it found is off screen.
+
+    ONCE is the whole design. The flag is POPPED, not read — a scroll that
+    re-fires on every rerun would drag the viewport back every time the
+    operator touched a checkbox, which is worse than not scrolling at all.
+
+    Components run in an iframe, hence window.parent.document. If the browser
+    blocks that, nothing happens and the page behaves exactly as it does
+    today — this is a convenience, and it must not be able to break a load.
+    """
+    if ss.pop("bdl_scroll_to", None) != name:
+        return
+    try:
+        import streamlit.components.v1 as _c
+        _c.html(
+            "<script>"
+            "const d = window.parent.document;"
+            f"const el = d.getElementById({name!r});"
+            "if (el) el.scrollIntoView({behavior:'smooth', block:'start'});"
+            "</script>", height=0)
+    except Exception:
+        pass
 
 
 def render_fk_analysis(ss, server, database, schema="dataview"):
@@ -2068,6 +2922,11 @@ def render_fk_analysis(ss, server, database, schema="dataview"):
         try:
             eng = get_engine(server, database)
             ss["bdl_fk"] = analyze_fks(eng, maps, schema, ss.get("bdl_staged"), ss.get("bdl_mapmeta"))
+            # Everything else about this batch is settled; the FK violations
+            # are the only thing left needing a person. Take them there rather
+            # than leaving the answer below the fold.
+            if ss["bdl_fk"]:
+                ss["bdl_scroll_to"] = "fk-violations"
         except Exception as e:
             st.error(f"FK analysis failed: {e}")
 
@@ -2095,7 +2954,12 @@ def render_fk_analysis(ss, server, database, schema="dataview"):
                                         "from": ", ".join(sorted(set(c["froms"])))}
                                        for v, c in sorted(d["values"].items())]),
                          hide_index=True, use_container_width=True)
-    st.info("Next: Phase 4 — one Add / Remap / Null grid per parent, applied as set-based UPDATEs.")
+    _n_vals = sum(len(d["values"]) for d in by_parent.values())
+    _n_rows = sum(c["n"] for d in by_parent.values() for c in d["values"].values())
+    st.warning(f"**Everything else is ready.** {_n_vals:,} unmatched value(s) across "
+               f"{len(by_parent)} parent(s) affect {_n_rows:,} row(s) and are the only thing "
+               f"left to decide. Phase 4 is directly below — one Add / Remap / Null grid per "
+               f"parent, applied as set-based UPDATEs.")
 
 
 def _existing_options(engine, parent, kind, schema="dataview", limit=2000):
@@ -2200,6 +3064,7 @@ def render_fk_resolution(ss, server, database, schema="dataview"):
     by_parent = ss.get("bdl_fk")
     if not by_parent:
         return
+    _anchor("fk-violations")
     st.header("Phase 4 — resolve FK violations")
     st.caption("Per parent: Add (seed the parent), Remap (fold onto an existing value), or Null "
                "(blank it). Applied as set-based UPDATEs to staging / INSERTs to the parent. "
@@ -2210,6 +3075,23 @@ def render_fk_resolution(ss, server, database, schema="dataview"):
     if not open_parents:
         st.success("No FK violations to resolve — all parents matched. Clear to promote (Phase 5).")
         return
+    # CHECK ALL, per parent. The Add column defaults to on for seedable
+    # parents, which is right for a handful of status codes and wrong the
+    # moment there are eighty — so the operator needs one move in BOTH
+    # directions. Outside the form on purpose: a form reports only on
+    # submit, and this has to change the grid's defaults beforehand.
+    _seedable = [p_ for p_, i_ in sorted(open_parents.items())
+                 if i_["kind"] in ("entity", "reference")]
+    _allmap = {}
+    if _seedable:
+        _cols = st.columns(min(3, len(_seedable)))
+        for _n, _p in enumerate(_seedable):
+            _allmap[_p] = _cols[_n % len(_cols)].checkbox(
+                f"☑ Add all — {_p} ({len(open_parents[_p]['values'])})",
+                value=True, key=f"bdlfkall_{_p}",
+                help="Seed every unmatched value into this parent. Untick "
+                     "to clear them all and decide row by row.")
+
     with st.form("bdl_phase4"):
         editors = {}
         for parent, info in sorted(open_parents.items()):
@@ -2219,8 +3101,9 @@ def render_fk_resolution(ss, server, database, schema="dataview"):
             with st.expander(f"{parent}  ({kind}) · {len(info['values'])} unmatched"
                              + ("" if can_add else "  — Remap/Null only"), expanded=True):
                 rows = []
+                _tick = can_add and bool(_allmap.get(parent, True))
                 for v, c in sorted(info["values"].items()):
-                    rows.append({"☑ Add": can_add, "value": v, "rows": c["n"],
+                    rows.append({"☑ Add": _tick, "value": v, "rows": c["n"],
                                  "Map to existing": "— skip —", "☑ Remap": False, "☑ Null": False})
                 grid = pd.DataFrame(rows)
                 cfg = {"value": st.column_config.TextColumn(disabled=True),
@@ -2230,8 +3113,13 @@ def render_fk_resolution(ss, server, database, schema="dataview"):
                        "Map to existing": st.column_config.SelectboxColumn(options=opts),
                        "☑ Remap": st.column_config.CheckboxColumn(help="Use 'Map to existing'"),
                        "☑ Null": st.column_config.CheckboxColumn(help="Blank the value in staging")}
-                editors[parent] = st.data_editor(grid, hide_index=True, use_container_width=True,
-                                                 key=f"bdlfk_{parent}", column_config=cfg)
+                # The key carries the check-all state: a fixed-key
+                # data_editor keeps its old cell values forever, so without
+                # this the toggle would appear to do nothing.
+                editors[parent] = st.data_editor(
+                    grid, hide_index=True, use_container_width=True,
+                    key=f"bdlfk_{parent}_{int(bool(_allmap.get(parent, True)))}",
+                    column_config=cfg)
         applied = st.form_submit_button("✅ Apply resolutions (set-based)", type="primary",
                                         use_container_width=True)
 
@@ -2363,11 +3251,56 @@ def _table_col_types(engine, table, schema="dataview"):
         return {}
 
 
+def _table_col_widths(engine, table, schema="dataview"):
+    """{col_lower: (type, max_len)} — the LENGTH matters, not just the type.
+
+    Staging columns are NVARCHAR; a target like dv_well.uwi is CHAR(14).
+    Comparing nvarchar to char makes SQL Server convert the INDEXED COLUMN
+    (nvarchar wins precedence), so every seek degrades to a scan: a 5,061-row
+    tops promote took 154 SECONDS against 7,904 existing rows (July 31).
+    Casting the inserted expression to the target's own type restores the
+    seek."""
+    import pandas as pd
+    from sqlalchemy import text
+    try:
+        df = pd.read_sql(text(
+            "SELECT COLUMN_NAME n, DATA_TYPE t, CHARACTER_MAXIMUM_LENGTH L "
+            "FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA=:s AND TABLE_NAME=:tb"),
+            engine, params={"s": schema, "tb": table.lower()})
+        return {str(r.n).lower(): (str(r.t).lower(),
+                                   None if pd.isna(r.L) else int(r.L))
+                for r in df.itertuples()}
+    except Exception:
+        return {}
+
+
+def _cast_char(expr, tw):
+    """Wrap expr in a CAST to a char/varchar target's exact type, so the
+    comparison is type-aligned and indexes are seekable. Non-char targets and
+    unknown widths are returned untouched."""
+    if not tw:
+        return expr
+    t, ln = tw
+    if t in ("char", "varchar") and ln and ln > 0:
+        return f"CAST({expr} AS {t}({ln}))"
+    if t in ("nchar", "nvarchar") and ln and ln > 0:
+        return f"CAST({expr} AS {t}({ln}))"
+    return expr
+
+
 def _typed(expr, sqltype):
     """Wrap a trimmed varchar expression in TRY_CONVERT for date/numeric targets, so a bad
     value becomes NULL (auditable) instead of aborting the whole INSERT. Strings pass through."""
     if sqltype in ("date", "datetime", "datetime2", "smalldatetime", "datetimeoffset", "time"):
-        return f"TRY_CONVERT({sqltype}, {expr})"
+        # Day-first-safe date parse. Source dates in this data are DD-MM-YYYY (e.g.
+        # 18-09-1992 — no month 18), but TRY_CONVERT's default reads US MM-DD-YYYY,
+        # which REJECTS day>12 rows and silently TRANSPOSES the rest. So try style
+        # 105 (dd-mm-yyyy) first, then fall back to the default parse (ISO 'YYYY-MM-DD'
+        # and other unambiguous forms still convert), then NULL if neither works —
+        # a bad value stays auditable instead of aborting the INSERT.
+        return (f"COALESCE(TRY_CONVERT({sqltype}, {expr}, 105), "
+                f"TRY_CONVERT({sqltype}, {expr}))")
     if sqltype in ("int", "bigint", "smallint", "tinyint"):
         return f"TRY_CONVERT({sqltype}, {expr})"
     if sqltype in ("numeric", "decimal", "float", "real", "money", "smallmoney"):
@@ -2377,25 +3310,43 @@ def _typed(expr, sqltype):
     return expr
 
 
-def build_promote_sql(engine, target, cmap, functions, schema="dataview", stg=None, parsed=None):
+def build_promote_sql(engine, target, cmap, functions, schema="dataview", stg=None, parsed=None,
+                      holds_out=None, inventory_id=None):
     """Build the idempotent INSERT…SELECT that promotes stg → dataview.<target>.
     Transforms: de-sep identifiers, entity SHA1, function rules, audit stamp; NOT EXISTS on PK.
-    Pass `parsed` (FKC, COLS, KIND) to avoid re-introspecting the whole schema per table."""
+    Pass `parsed` (FKC, COLS, KIND) to avoid re-introspecting the whole schema per table.
+
+    HOLD, DON'T FAIL (July 30): single-column FKs to DATA parents (kind
+    'parent' — uwi→dv_well, srvy_id→hdr, prod_entity_id→entity; NOT entity/
+    reference, which Phase 4 seeds and should fail loudly) become EXISTS
+    filters on the promoted SELECT. Rows whose parent is absent are LEFT IN
+    STAGING instead of failing the whole INSERT with an FK violation and
+    rolling back everything (the July-29 tops load: 50 absent wells sank all
+    5,061 rows). Pass holds_out=[] to receive (parent, parent_col, child_col,
+    filter_expr) per filter so the caller can COUNT and report the held rows;
+    they promote automatically on a re-run once the parent is loaded."""
     FKC, COLS, KIND = parsed if parsed is not None else _live_catalog_parsed(engine, schema)
     tu = target.upper()
     tcols = {c.lower() for c in COLS.get(tu, set())}
+    # Computed columns are removed from the target set rather than filtered at
+    # INSERT time: a column that isn't in tcols simply doesn't map, so a CSV
+    # that happens to carry the header is ignored instead of failing the load.
+    tcols -= _computed_cols(engine, target, schema)
     stg = stg or stg_name(target)
     cmap_inv = {db.lower(): src for src, db in cmap.items()}     # db col -> staging col
     ident = lambda name: name.lower() in _IDENT
     coltypes = _table_col_types(engine, target, schema)
+    colwidths = _table_col_widths(engine, target, schema)
 
     select_cols, insert_cols, collisions = [], [], []
     seen_targets = {}                    # target col -> what first claimed it
+    col_exprs = {}                       # target col -> the SELECT expression
     def _add(dbl, expr, who=None):
         if dbl in seen_targets:
             collisions.append((dbl, seen_targets[dbl], who or "a derived rule"))
             return
         seen_targets[dbl] = who or "a derived rule"
+        col_exprs[dbl] = expr
         insert_cols.append(dbl); select_cols.append(f"{expr} AS [{dbl}]")
     # 1) mapped columns (with transforms)
     for src, db in cmap.items():
@@ -2407,8 +3358,24 @@ def build_promote_sql(engine, target, cmap, functions, schema="dataview", stg=No
             expr = _id_sql(f"[s].[{src}]")                        # name -> ba_id/field_id (char)
         elif ident(dbl):
             expr = f"REPLACE(REPLACE(REPLACE(LTRIM(RTRIM([s].[{src}])),'-',''),' ',''),'.','')"
+            if dbl == "uwi":
+                # Canonical UWI-14 in T-SQL, matching _uwi14 exactly: de-sep,
+                # then right-pad zeros / keep first 14. _uwi14 guards the
+                # EXTRACTED-file path (build_safe_file), but a direct CSV's
+                # only transform is THIS expression — Teapot's 12-digit APIs
+                # promoted as 12 chars (July 29) and broke every 14-vs-14
+                # uwi join downstream. Only `uwi` gets this: padding other
+                # identifier keys (log_id, curve_id) would corrupt them.
+                expr = (f"CASE WHEN NULLIF({expr}, '') IS NULL THEN NULL "
+                        f"ELSE LEFT(CONCAT({expr}, REPLICATE('0', 14)), 14) END")
+            # CAST to the target's OWN char type. Without it the expression is
+            # nvarchar (staging is nvarchar) and every comparison against a
+            # char/varchar key column converts the COLUMN, killing the index
+            # seek — the 154-second tops promote (July 31).
+            expr = _cast_char(expr, colwidths.get(dbl))
         else:
             expr = _typed(f"NULLIF(LTRIM(RTRIM([s].[{src}])),'')", coltypes.get(dbl, ""))
+            expr = _cast_char(expr, colwidths.get(dbl))
         _add(dbl, expr, f"source column `{src}` (① Map columns)")
     # 2) function-derived columns
     for f in (functions or []):
@@ -2426,6 +3393,16 @@ def build_promote_sql(engine, target, cmap, functions, schema="dataview", stg=No
                  ("row_created_date", "SYSUTCDATETIME()")):
         if c in dbcols and c not in seen_targets:
             _add(c, v)
+    # 3b) PROVENANCE. inventory_id says which document produced this row and
+    # WHICH CATALOG holds it: a bare 40-char SHA-1 is the File Catalog's
+    # (hashed from the path), "DV-" + SHA-1 is the loader's own ledger
+    # (dataview.dv_global_file_catalog, hashed from the file's CONTENT).
+    # Only stamped when the caller supplies one — an unverified load has no
+    # business claiming provenance, and a mapped source column always wins.
+    if inventory_id and "inventory_id" in dbcols \
+            and "inventory_id" not in seen_targets:
+        _add("inventory_id", "'" + str(inventory_id).replace("'", "''") + "'",
+             "the load ledger (provenance)")
 
     if collisions:
         # Name BOTH claimants. "survey_id is doubled" makes the operator hunt; "SRVY_ID and
@@ -2439,11 +3416,43 @@ def build_promote_sql(engine, target, cmap, functions, schema="dataview", stg=No
               "source column to `— skip —` in ① Map columns, or delete the rule in "
               "④ Derived columns. A rule is only needed when NO source column has the data.")
 
+    # HOLD filters — see docstring. The filter uses the SAME expression that
+    # will be inserted (padded uwi etc.), so it compares what promote writes.
+    hold_filters = []
+    for fk in FKC.get(tu, []):
+        ccols = [c.lower() for c in fk.get("child_cols", [])]
+        if len(ccols) != 1:
+            continue
+        ccol = ccols[0]
+        if ccol not in col_exprs:
+            continue                      # not inserted -> NULL -> FK passes
+        info = pdl._fk_of(tu, ccol, FKC)
+        if not info or info[1] != "parent":
+            continue                      # entity/reference: seedable, fail loudly
+        parent = str(info[0]).upper()
+        if parent == tu:
+            continue                      # self-FK: intra-batch order unknowable
+        ppk = _table_pk_live(engine, parent, schema) or []
+        if len(ppk) == 1:
+            pcol = ppk[0]
+        elif ccol in {c.lower() for c in COLS.get(parent, set())}:
+            pcol = ccol                   # same-named column fallback
+        else:
+            continue                      # can't determine the join -> old behavior
+        e = col_exprs[ccol]
+        hold_filters.append((parent, pcol,ccol,
+                             f"({e} IS NULL OR EXISTS (SELECT 1 FROM "
+                             f"{schema}.{parent.lower()} p WHERE p.[{pcol}] = {e}))"))
+    if holds_out is not None:
+        holds_out.extend(hold_filters)
+
     pk = _table_pk_live(engine, target, schema)
     pk_in = [p for p in (pk or []) if p in insert_cols]
     pk_join = " AND ".join(f"d.[{p}] = src.[{p}]" for p in pk_in)
     sel = ",\n       ".join(select_cols)
     inner = f"SELECT {sel}\n  FROM {stg} s"
+    if hold_filters:
+        inner += "\n  WHERE " + "\n    AND ".join(f[3] for f in hold_filters)
     if pk_in:
         # keep one row per PK — staging may contain duplicate keys (common in reference data),
         # and NOT EXISTS only guards against rows already in the target, not within the batch
@@ -2476,6 +3485,90 @@ def render_promote(ss, server, database, schema="dataview"):
     order = scan.get("order", [])
     funcs_all = ss.get("bdl_functions", {})
     eng = get_engine(server, database)
+
+    # ── projected coordinates → lat/long, before anything else ──────────────────────
+    # Eligible: the target has an unmapped lat/long pair AND the staging table exists.
+    meta_ll = ss.get("bdl_mapmeta", {})
+    _ll_cands = []
+    for skey, cmap in maps.items():
+        target, stg = meta_ll.get(skey, (skey, skey))
+        try:
+            db_cols = _table_cols_db(eng, target, schema)
+        except Exception:
+            continue
+        la, lo = _latlon_target_pair(db_cols)
+        if not la:
+            continue
+        mapped = {str(v).lower() for v in (cmap or {}).values()}
+        if la in mapped or lo in mapped:
+            continue
+        try:
+            with eng.connect() as _c0:
+                scols = [r0[0] for r0 in _c0.execute(text(
+                    "SELECT name FROM sys.columns WHERE object_id=OBJECT_ID(:t) "
+                    "ORDER BY column_id"), {"t": stg}).fetchall()]
+        except Exception:
+            continue
+        scols = [c for c in scols if c not in ("__LAT", "__LON")]
+        if not scols:
+            continue
+        n_g, e_g = _detect_ne(scols)
+        _ll_cands.append((skey, target, stg, scols, la, lo, n_g, e_g))
+    if _ll_cands:
+        with st.expander(f"🧭 Derive lat/long from projected X/Y — "
+                         f"{len(_ll_cands)} table(s) eligible", expanded=False):
+            st.caption("For files carrying Northing/Easting in a projected CRS but no "
+                       "latitude/longitude (Teapot Dome = EPSG 32056, NAD27 Wyoming East "
+                       "Central, US survey ft — feed values as-is, never pre-convert to "
+                       "meters). Converts distinct pairs with pyproj into __LAT/__LON "
+                       "staging columns and maps them to the target. Without coordinates, "
+                       "REQUIRE_WELL_COORDS holds the wells and the EXISTS gate then holds "
+                       "every child row — the silent total stall.")
+            for skey, target, stg, scols, la, lo, n_g, e_g in _ll_cands:
+                st.markdown(f"**{target}**  ⟵  `{stg.split('.')[-1]}`")
+                c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
+                nsel = c1.selectbox("Northing", ["—"] + scols,
+                                    index=(scols.index(n_g) + 1) if n_g in scols else 0,
+                                    key=f"bdl_ll_n_{skey}")
+                esel = c2.selectbox("Easting", ["—"] + scols,
+                                    index=(scols.index(e_g) + 1) if e_g in scols else 0,
+                                    key=f"bdl_ll_e_{skey}")
+                epsg_v = c3.text_input("EPSG", key=f"bdl_ll_epsg_{skey}",
+                                       help="source CRS, e.g. 32056")
+                if c4.button("Convert", key=f"bdl_ll_go_{skey}"):
+                    if (nsel == "—" or esel == "—" or nsel == esel
+                            or not str(epsg_v).strip().isdigit()):
+                        st.error("Pick two different columns and a numeric EPSG.")
+                    else:
+                        try:
+                            n_upd, n_pairs, n_bad = derive_latlong(
+                                eng, stg, nsel, esel, int(epsg_v))
+                        except ImportError:
+                            st.error("pyproj is not installed in this environment — "
+                                     "pip install pyproj")
+                        except Exception as _le:
+                            st.error(f"conversion failed: {str(_le)[:200]}")
+                        else:
+                            _cm = dict(maps.get(skey) or {})
+                            _cm["__LAT"], _cm["__LON"] = la, lo
+                            maps[skey] = _cm
+                            ss["bdl_maps"] = maps
+                            st.success(f"{n_upd} staged row(s) updated from {n_pairs} "
+                                       f"distinct pair(s), {n_bad} unusable → "
+                                       f"__LAT→{la}, __LON→{lo} added to the map "
+                                       f"(this run only; the store keeps no synthetic "
+                                       f"columns).")
+                            with eng.connect() as _c1:
+                                ext = _c1.execute(text(
+                                    f"SELECT MIN(TRY_CONVERT(float,[__LAT])), "
+                                    f"MAX(TRY_CONVERT(float,[__LAT])), "
+                                    f"MIN(TRY_CONVERT(float,[__LON])), "
+                                    f"MAX(TRY_CONVERT(float,[__LON])) FROM {stg}")).fetchone()
+                            if ext and ext[0] is not None:
+                                st.caption(f"extent: lat {ext[0]:.4f}..{ext[1]:.4f} · "
+                                           f"lon {ext[2]:.4f}..{ext[3]:.4f} — Teapot "
+                                           f"should read ~43.25..43.40 / −106.30..−106.10; "
+                                           f"anything else = wrong EPSG or swapped columns.")
 
     # ── data quality, before anything is promoted ────────────────────────────────────
     # The rows are already in SQL Server as nvarchar, so profiling them is one set-based
@@ -2634,10 +3727,17 @@ def render_promote(ss, server, database, schema="dataview"):
         parsed = _live_catalog_parsed(eng, schema)          # introspect ONCE, reuse per table
         parse_t = time.perf_counter() - t0
         meta = ss.get("bdl_mapmeta", {})                    # skey → (target, stg_table)
-        # promote each staged table (skey); order by its target's position in the FK topo order
-        order_ix = {t: i for i, t in enumerate(order)}
+        # promote each staged table (skey); order by its target's position in the FK topo order.
+        # BOTH SIDES ARE UPPERCASED. _topo_order builds `order` from table names it has already
+        # uppercased, while bdl_mapmeta stores the target exactly as the scan row had it — so a
+        # case difference made every lookup miss, every table tie on the 999 default, and the
+        # stable sort leave them in maps.keys() order. That reads as alphabetical, which is
+        # precisely the symptom the topological sort exists to prevent: DV_PROD_ENTITY promoted
+        # ahead of DV_WELL, failing on a parent that was two positions away from being there.
+        order_ix = {str(t).upper(): i for i, t in enumerate(order)}
         skeys = sorted(maps.keys(),
-                       key=lambda k: order_ix.get(meta.get(k, (k, ""))[0], 999))
+                       key=lambda k: order_ix.get(
+                           str(meta.get(k, (k, ""))[0]).upper(), 999))
         for skey in skeys:
             target, stg_tbl = meta.get(skey, (skey, skey))
             try:
@@ -2647,8 +3747,53 @@ def render_promote(ss, server, database, schema="dataview"):
                         f"something that looks like a column name. Correct its → table in "
                         f"Files → tables, or ↻ Reset run to clear stale scan state.")
                 tb = time.perf_counter()
-                sql, cols, pk = build_promote_sql(eng, target, maps[skey], funcs_all.get(skey, []),
-                                                  schema, stg=stg_tbl, parsed=parsed)
+                _holds = []
+                # PROVENANCE — FIRST ONE IN WINS (Perry's rule).
+                # Several files of the same column shape share one staging
+                # table, so at promote time a row cannot say which of them
+                # it came from. Rather than abandon provenance, stamp the
+                # FIRST file's id: promote is insert-only with a NOT EXISTS
+                # guard, so whichever load inserts a row owns it and later
+                # ones skip it — the rule is already how the mechanism
+                # behaves, this just records it.
+                # The computed id also BEATS a mapped INVENTORY_ID column:
+                # that column is a claim about which file a row came from,
+                # and only the loader reading the file can know it (the
+                # synthetic exports carry "INVENTORY_ID-641", which
+                # resolves to nothing).
+                _cmap_p = dict(maps[skey])
+                _inv_p = None
+                _inv_err = None
+                try:
+                    # bdl_review is a LIST of per-table dicts, each with its
+                    # own "skey" and "path" — NOT a dict keyed by skey. The
+                    # first cut called .get(skey) on the list, which raises,
+                    # and the except below swallowed it: no stamp, no drop,
+                    # and SQL identical to having made no change at all.
+                    _revp = next((x for x in (ss.get("bdl_review") or [])
+                                  if x.get("skey") == skey), None)
+                    _src_path = (_revp or {}).get("path") or ""
+                    if _src_path:
+                        from dataview.import_data.file_gate import (
+                            inventory_id as _iid_p)
+                        _inv_p = _iid_p(os.path.abspath(_src_path))
+                    else:
+                        _inv_err = "no source path on the review row"
+                except Exception as _ie:
+                    _inv_p, _inv_err = None, f"{type(_ie).__name__}: {_ie}"
+                if _inv_err:
+                    # SAY SO. A silent except here is what made this bug
+                    # survive four rounds of "it should work now".
+                    st.caption(f"⚠ {target}: provenance id not stamped — "
+                               f"{_inv_err}")
+                if _inv_p:
+                    for _s_p in [s for s, t in _cmap_p.items()
+                                 if str(t).lower() == "inventory_id"]:
+                        _cmap_p.pop(_s_p, None)
+                sql, cols, pk = build_promote_sql(eng, target, _cmap_p, funcs_all.get(skey, []),
+                                                  schema, stg=stg_tbl, parsed=parsed,
+                                                  holds_out=_holds,
+                                                  inventory_id=_inv_p)
                 build_t = time.perf_counter() - tb
                 tc = time.perf_counter()
                 with eng.connect() as cx:
@@ -2667,7 +3812,8 @@ def render_promote(ss, server, database, schema="dataview"):
                 count_t = time.perf_counter() - tc
                 label = target if stg_tbl == stg_name(target) else f"{target} ⟵ {stg_tbl.split('.')[-1]}"
                 prev.append({"table": label, "target": target, "staged": staged,
-                             "cols": len(cols), "sql": sql,
+                             "cols": len(cols), "sql": sql, "stg": stg_tbl,
+                             "holds": _holds,
                              "err": None, "build_t": build_t, "count_t": count_t})
             except Exception as e:
                 label = f"{meta.get(skey,(skey,''))[0]}"
@@ -2777,7 +3923,23 @@ def render_promote(ss, server, database, schema="dataview"):
                             before = cx.execute(text(f"SELECT COUNT(*) FROM {schema}.{t.lower()}")).scalar()
                             cx.execute(text(p["sql"]))
                             after = cx.execute(text(f"SELECT COUNT(*) FROM {schema}.{t.lower()}")).scalar()
-                        log.append((label, after - before, round(time.perf_counter() - ti, 2), None))
+                        held_msgs = []
+                        for parent, pcol, ccol, _f in (p.get("holds") or []):
+                            try:
+                                # the filter expr references alias [s]
+                                n_held = cx.execute(text(
+                                    f"SELECT COUNT(*) FROM {p['stg']} s "
+                                    f"WHERE NOT {_f}")).scalar() or 0
+                            except Exception:
+                                n_held = None
+                            if n_held:
+                                held_msgs.append(
+                                    f"⏸ {n_held} row(s) HELD in staging — "
+                                    f"[{ccol}] has no match in {parent}. They "
+                                    f"promote automatically on the next run "
+                                    f"once {parent} has those rows.")
+                        log.append((label, after - before, round(time.perf_counter() - ti, 2), None,
+                                    held_msgs))
                     except Exception as e:
                         import traceback as _tb
                         log.append((label, 0, 0, str(e)))
@@ -2800,7 +3962,9 @@ def render_promote(ss, server, database, schema="dataview"):
     if log:
         st.subheader("Promote results")
         for row in log:
-            t, n, secs, err = row
+            t, n, secs, err = row[0], row[1], row[2], row[3]
+            for _hm in (row[4] if len(row) > 4 else []):
+                st.warning(_hm)
             if err:
                 # A wall of generated SQL is not a diagnosis. Explain it in loader terms —
                 # which column, which rule, what to change — and tuck the raw text away.
@@ -2809,6 +3973,11 @@ def render_promote(ss, server, database, schema="dataview"):
                 if exc and exc[0] == t:
                     shown = _render_diag(exc[1], table=t,
                                          tb=(exc[2] if len(exc) > 2 else None))
+                    # A constraint name is not a diagnosis. Phase 3 (analyze_fks) already found
+                    # the exact unmatched values and their row counts and where they came from
+                    # — pull that detail in here, keyed to the failing table, so "Unresolved
+                    # foreign key (fk_srvy_sta_hdr)" comes with WHICH values, from WHICH column.
+                    _fk_detail_for_error(t, err)
                     if shown and len(exc) > 3 and exc[3]:
                         with st.expander("The SQL that failed"):
                             st.code(exc[3], language="sql")
@@ -2820,6 +3989,136 @@ def render_promote(ss, server, database, schema="dataview"):
                 st.success(f"{t}: +{n} rows  ({secs}s)")
         if not any(r[3] for r in log):
             st.success("Promote complete — all tables loaded into dataview.")
+
+    # ── derived columns, AFTER promote ────────────────────────────────────────────
+    _render_h3_backfill(eng, schema)
+
+
+def _render_h3_backfill(eng, schema="dataview"):
+    """Compute the H3 grid cells for wells that don't have them.
+
+    HERE, AND AFTER PROMOTE, for three reasons. It needs the rows to be IN
+    dv_well, so it cannot sit beside the lat/long derivation at the top of
+    the phase — that one works on STAGING, this one on the loaded table.
+    It belongs in the loader rather than a maintenance page because the
+    moment wells arrive is the moment their cells are missing, and a
+    derived column nobody computes is the same silent gap as one holding a
+    placeholder. And it is a BUTTON, not an automatic post-load hook, per
+    the rule the FK seeding established: automation may skip ceremony,
+    never a decision.
+
+    Shown only when there is something to do. A phase that always displays
+    one more thing to click trains people to ignore it.
+    """
+    from sqlalchemy import text
+    try:
+        with eng.connect() as cx:
+            n_missing = cx.execute(text(
+                f"SELECT COUNT(*) FROM {schema}.dv_well "
+                f"WHERE surface_latitude IS NOT NULL "
+                f"  AND surface_longitude IS NOT NULL "
+                f"  AND h3_r5 IS NULL")).scalar() or 0
+            # Junk counts as missing: 'h3_r4-869' is a generator placeholder,
+            # and backfill_h3's default only_missing=True SKIPS non-null rows
+            # — so the rows most needing repair are the ones it passes over.
+            n_junk = cx.execute(text(
+                f"SELECT COUNT(*) FROM {schema}.dv_well "
+                f"WHERE h3_r5 IS NOT NULL "
+                f"  AND (LEN(h3_r5) <> 15 OR h3_r5 LIKE '%[^0-9a-f]%')")).scalar() or 0
+            n_nocoord = cx.execute(text(
+                f"SELECT COUNT(*) FROM {schema}.dv_well "
+                f"WHERE surface_latitude IS NULL "
+                f"   OR surface_longitude IS NULL")).scalar() or 0
+    except Exception:
+        return                       # no dv_well, or no h3 columns — nothing to offer
+
+    if not (n_missing or n_junk):
+        return
+
+    # ONE NUMBER, NO DIAGNOSIS. Perry's call: this is a master database and
+    # the operator does not need to hear about placeholder values, skipped
+    # rows or unresolvable wells. The panel says what will happen and how
+    # many wells it affects. Everything else is handled silently below —
+    # the behaviour is unchanged, only the narration is gone.
+    n_todo = n_missing + n_junk
+    with st.expander(f"🔷 Compute H3 grid cells — {n_todo:,} well(s)",
+                     expanded=False):
+        st.caption(
+            "Wells are clustered in hexagonal shapes for visualizing "
+            "wells in densely drilled areas.")
+        if st.button("🔷 Compute now", type="primary", key="bdl_h3_go"):
+            try:
+                from dataview.mapping.h3_grids import backfill_h3
+            except Exception as e:
+                st.error(f"h3_grids not importable: {e}")
+                return
+            try:
+                # Any value that is not a valid cell is cleared first —
+                # backfill_h3 skips rows that already hold something, so
+                # without this the rows needing it most are passed over.
+                # Silent: it is housekeeping, not news.
+                if n_junk:
+                    with eng.begin() as cx:
+                        cx.execute(text(
+                            f"UPDATE {schema}.dv_well "
+                            f"   SET h3_r4=NULL, h3_r5=NULL, h3_r6=NULL, "
+                            f"       h3_r7=NULL, h3_coord_hash=NULL "
+                            f" WHERE h3_r5 IS NOT NULL "
+                            f"   AND (LEN(h3_r5) <> 15 "
+                            f"        OR h3_r5 LIKE '%[^0-9a-f]%')"))
+                with st.spinner("Computing cells…"):
+                    backfill_h3(eng, only_missing=True)
+                with eng.connect() as cx:
+                    done = cx.execute(text(
+                        f"SELECT COUNT(*) FROM {schema}.dv_well "
+                        f"WHERE h3_r5 IS NOT NULL")).scalar() or 0
+                st.success(f"{done:,} well(s) clustered.")
+            except Exception as e:
+                st.error(f"Could not compute grid cells: {e}")
+
+
+def _fk_detail_for_error(table, err):
+    """Turn a bare promote-time FK failure into the concrete detail Phase 3 already computed.
+
+    A FOREIGN KEY error from SQL Server names the constraint and the child table and nothing
+    else — 'Unresolved foreign key (fk_srvy_sta_hdr) · DV_WELL_DIR_SRVY_STA'. But Phase 3 ran
+    the exact NOT EXISTS query per FK and knows the unmatched VALUES, their row counts, and the
+    staging column they came from. It's sitting in ss['bdl_fk']. Surface it here so the error
+    says what to fix instead of only which rule was broken.
+    """
+    import streamlit as st
+    import pandas as pd
+    err_l = str(err or "").lower()
+    if "foreign key" not in err_l and "reference" not in err_l:
+        return
+    by_parent = st.session_state.get("bdl_fk") or {}
+    # analyze_fks groups by PARENT and records each source's child table — find the parents
+    # whose sources include this failing child table.
+    tu = str(table or "").upper().split("⟵")[0].strip()
+    hits = []
+    for parent, d in by_parent.items():
+        for src in d.get("sources", []):
+            if str(src.get("target", "")).upper() == tu:
+                hits.append((parent, d, src))
+    if not hits:
+        st.info("Phase 3 didn't flag this FK — run **Analyze FKs** before promoting and it "
+                "will list the exact unmatched values instead of only the constraint name.")
+        return
+    for parent, d, src in hits:
+        vals = d.get("values", {})
+        st.error(
+            f"**{tu}.{src['child_col']}** references **{parent}**, and **{len(vals)} "
+            f"value(s)** in the staged data have no matching row there — that's what the FK "
+            f"rejected. Add them to {parent}, remap them, or null the column (Phase 4), then "
+            f"re-promote.")
+        if vals:
+            st.dataframe(pd.DataFrame(
+                [{"unmatched value": v, "rows": c["n"],
+                  "from": ", ".join(sorted(set(c["froms"])))}
+                 for v, c in sorted(vals.items(), key=lambda kv: -kv[1]["n"])][:50]),
+                hide_index=True, use_container_width=True)
+            if len(vals) > 50:
+                st.caption(f"…and {len(vals) - 50} more distinct value(s)")
 
 
 def verify_promote(engine, maps, schema="dataview", staged=None, meta=None, since=None):
@@ -2884,6 +4183,85 @@ def verify_promote(engine, maps, schema="dataview", staged=None, meta=None, sinc
                         "missing": (staged_n - present) if (present is not None and staged_n is not None) else None,
                         "err": err})
     return out
+
+
+# ─────────────────────── bulk triage (Perry's rebuild) ─────────────────────
+# One screen, three honest groups, per-FILE skips, nothing hidden. Files that
+# need a transform are HANDED to the assistant rather than half-loaded here
+# (Perry, July 31: "direct them to the other side").
+def clean_path(p):
+    """A pasted path, as pasted. Explorer's "Copy as path" wraps in double
+    quotes, PowerShell's Copy-as-path can add a leading `& `, and Word or
+    a chat window may have turned the quotes into smart ones. Every one of
+    those makes os.path.exists say no about a file that is plainly there,
+    and the operator gets to hunt an invisible character.
+    """
+    s = str(p or "").strip()
+    if s.startswith("& "):                      # PowerShell call operator
+        s = s[2:].strip()
+    for q in ('"', "'", "\u201c", "\u201d", "\u2018", "\u2019"):
+        if s.startswith(q):
+            s = s[1:]
+        if s.endswith(q):
+            s = s[:-1]
+    s = s.strip()
+    return os.path.expandvars(os.path.expanduser(s)) if s else s
+
+
+import hashlib as _hashlib
+
+
+_SKIP_SENTINEL = "__SKIP__"          # a target that means "deliberately not loaded"
+
+
+def remember_fp_skip(engine, fps, unskip_fps=()):
+    """Record, against a file's COLUMN FINGERPRINT, that it is not to be loaded.
+
+    WHY THE FINGERPRINT AND NOT THE PATH: the decision is about the SHAPE of
+    the file, not that one copy of it. Next month's export has a new name, new
+    rows and the same columns — and it is the same decision. A path-keyed skip
+    would ask again every month.
+
+    Stored in dv_column_map beside the mapping recall, under the same
+    source_file_pattern, with target_table = '__SKIP__'. That table already
+    answers "what did we decide about this shape"; a skip is one of the
+    answers. A separate table would be a second place to look and a second
+    thing to keep in step.
+
+    Best-effort: a memory that fails to write must never fail a scan.
+    """
+    if not fps and not unskip_fps:
+        return 0
+    import hashlib as _h
+    from sqlalchemy import text as _t
+    n = 0
+    try:
+        with engine.begin() as cx:
+            for _fp in set(unskip_fps or ()):
+                cx.execute(_t("UPDATE dataview.dv_column_map SET active_ind='N' "
+                              "WHERE source_file_pattern=:fp AND target_table=:sk"),
+                           {"fp": _fp, "sk": _SKIP_SENTINEL})
+            for _fp in set(fps or ()):
+                _mid = _h.sha1(f"{_fp}|{_SKIP_SENTINEL}".encode("utf-8")).hexdigest()[:40]
+                cx.execute(_t(
+                    "MERGE dataview.dv_column_map AS t "
+                    "USING (SELECT :mid AS map_id) s ON t.map_id = s.map_id "
+                    "WHEN MATCHED THEN UPDATE SET active_ind='Y', confirmed_ind='Y' "
+                    "WHEN NOT MATCHED THEN INSERT "
+                    "  (map_id, source_file_pattern, source_column, target_table, "
+                    "   target_column, confirmed_ind, active_ind, row_created_by, "
+                    "   row_created_date) "
+                    "VALUES (:mid, :fp, '*', :sk, '*', 'Y', 'Y', SUSER_SNAME(), "
+                    "        SYSUTCDATETIME());"),
+                    {"mid": _mid, "fp": _fp, "sk": _SKIP_SENTINEL})
+                n += 1
+    except Exception:
+        return 0
+    return n
+
+
+
+
 
 
 def render_verify(ss, server, database, schema="dataview"):
@@ -2959,15 +4337,33 @@ def render_verify(ss, server, database, schema="dataview"):
                     "Every row already existed (row_created_date pre-dates this promote) and the "
                     "NOT EXISTS guard skipped them. That's a clean re-run, not a new load.")
     elif bad:
-        st.warning("Not fully loaded: " + ", ".join(f"{r['table']} (−{r['missing']})" for r in bad)
-                   + ". Re-run Promote (idempotent) or check the mapping.")
+        # Missing = staged − present. Since the hold filters (July 30), rows
+        # whose data parent is absent are ⏸ HELD in staging ON PURPOSE and
+        # count here too — that is the system working, not a broken load.
+        # Cross-reference the promote results' ⏸ warnings before suspecting
+        # the mapping.
+        _held_tables = {str(r2[0]).split("⟵")[0].strip()
+                        for r2 in (ss.get("bdl_promote_log") or [])
+                        if len(r2) > 4 and r2[4]}
+        _lines = []
+        for r in bad:
+            _t0 = str(r["table"]).split("⟵")[0].strip()
+            if _t0 in _held_tables:
+                _lines.append(f"{r['table']} (−{r['missing']} — includes ⏸ held "
+                              f"rows awaiting their parent; loads on a later "
+                              f"run once the parent arrives)")
+            else:
+                _lines.append(f"{r['table']} (−{r['missing']})")
+        st.warning("Not fully loaded: " + ", ".join(_lines)
+                   + ". Held rows are expected and safe; for the rest, re-run "
+                     "Promote (idempotent) or check the mapping.")
 
 
 def run():
     import pandas as pd
     ss = st.session_state
     hc1, hc2 = st.columns([4, 1])
-    hc1.header("Directory Loader")
+    hc1.header("Bulk Tabular Loader")
     if hc2.button("↻ Reset run", help="Clear scan, mappings and staged state and start over "
                                        "(keeps server/database/paths)"):
         keep = {k: ss[k] for k in ("bdl_server", "bdl_db", "bdl_dir", "bdl_cat", "bdl_bulk",
@@ -2976,37 +4372,204 @@ def run():
             del ss[k]
         ss.update(keep)
         st.rerun()
-    st.caption("Scan a directory — CSV · Excel · LAS · DLIS · LIS · WITSML · PDF · Word — "
-               "extract to staging, then map → FK → check → dry run → promote → verify. "
-               "Excel workbooks are exploded to one CSV per sheet. For the per-table flow "
-               "with inline value repair, use ⇄ (the tabular loader) above.")
+    # CSV AND EXCEL ONLY (caption corrected Aug 10, Perry: "the loader does not
+    # load LAS · DLIS · LIS · WITSML · PDF · Word that I am aware of"). He is
+    # right — that extraction was removed on 20 July when the role split landed,
+    # and the caption kept advertising it. A format list is a PROMISE about what
+    # a folder will do; naming formats this loader has not touched in three
+    # weeks sends someone to the wrong app with the wrong files and leaves them
+    # wondering why nothing was found.
+    st.caption("Scan a directory of **CSV or Excel** files — extract to staging, then "
+               "map → FK → check → dry run → promote → verify. Excel workbooks are "
+               "exploded to one CSV per sheet. Logs (LAS · DLIS · LIS), seismic and "
+               "documents (PDF · Word) are the **File Catalog's** job, not this one. "
+               "For the per-table flow with inline value repair, use ⇄ (the tabular "
+               "loader) above.")
 
     c1, c2 = st.columns(2)
     server = c1.text_input("Server", value=ss.get("bdl_server", r"localhost\SQLEXPRESS"))
     database = c2.text_input("Database", value=ss.get("bdl_db", "DataView_Demo"))
-    directory = st.text_input("Directory (CSV / Excel / LAS / DLIS / LIS / WITSML / PDF / Word)",
-                              value=ss.get("bdl_dir", ""))
-    recursive = st.checkbox("Include subdirectories (recursive scan)", value=ss.get("bdl_recursive", False))
-    force = st.checkbox("Force re-extract (ignore the file catalog)",
-                        value=ss.get("bdl_force", False),
-                        help="Unchanged files are normally skipped — their content hash already "
-                             "matches dv_global_file_catalog and their rows are loaded. Tick this "
-                             "when the EXTRACTOR changed rather than the data: the bytes are "
-                             "identical, so the gate would skip files that now extract differently.")
-    ss["bdl_force"] = force
+    # MODE FIRST, then only the inputs that mode uses. The Directory field
+    # and the scan options belong to 📦 Load; drawing them in 🧭 gave the
+    # assistant page two path boxes and no way to tell which mattered
+    # (Perry, July 31: "do I have to fill both path boxes").
+    _MODES = ["🧭 Plan & derive (Phase 0) — the AI assistant",
+              "📦 Load (Phases 1–6) — scan → stage → promote → verify"]
+    # honour a pending request from elsewhere (the triage handoff) BEFORE the
+    # widget is created — after that its key is read-only
+    _want = ss.pop("bdl_want_mode", None)
+    if _want in ("plan", "load"):
+        ss["bdl_mode"] = _MODES[0 if _want == "plan" else 1]
+    _mode = st.radio("Mode", _MODES,
+                     index=0 if not ss.get("bdl_scan") else 1,
+                     horizontal=True, key="bdl_mode",
+                     label_visibility="collapsed")
+    _planning = _mode.startswith("🧭")
+
+    if _planning:
+        directory = ss.get("bdl_dir", "")
+        recursive = ss.get("bdl_recursive", False)
+        force = ss.get("bdl_force", False)
+    else:
+        directory = clean_path(st.text_input(
+            "Directory or single file (CSV / Excel)",
+            value=ss.get("bdl_dir", ""),
+            help="A folder scans everything in it; a single FILE scans just "
+                 "that one and runs the same six phases. Quotes from "
+                 "Explorer's 'Copy as path' are stripped for you, as is a "
+                 "leading '& ' from PowerShell."))
+        if directory and os.path.isfile(directory):
+            st.caption(f"📄 Single file — {os.path.basename(directory)}. "
+                       f"Phases 1–6 run on it alone.")
+        recursive = st.checkbox("Include subdirectories (recursive scan)",
+                                value=ss.get("bdl_recursive", False))
+        force = st.checkbox(
+            "Force re-extract (ignore the file catalog)",
+            value=ss.get("bdl_force", False),
+            help="Unchanged files are normally skipped — their content hash already "
+                 "matches dv_global_file_catalog and their rows are loaded. Tick this "
+                 "when the EXTRACTOR changed rather than the data: the bytes are "
+                 "identical, so the gate would skip files that now extract differently.")
+        ss["bdl_force"] = force
+    # Persist the shared config NOW. The 🧭 branch below renders and
+    # returns, so the assignment further down never ran in assistant mode and
+    # the assistant read a stale (or empty) directory — "Directory not found"
+    # (Perry, July 31). Paths also arrive quoted when pasted from Explorer's
+    # "Copy as path", so strip that here once for everyone.
+    directory = str(directory or "").strip().strip('"').strip("'")
+    ss["bdl_server"], ss["bdl_db"], ss["bdl_dir"] = server, database, directory
+    ss["bdl_recursive"], ss["bdl_force"] = recursive, force
+
+    # ── TWO MODES, ONE PAGE — radio pills in the app's house style
+    # (Perry, July 30: expected the File Catalog-style mode selector, not a
+    # tab strip). Station 1 preps and teaches; station 2 loads. Selecting
+    # 🧭 renders the assistant and RETURNS — the loader body below never
+    # runs that pass, no re-indent needed. Lazy import ON PURPOSE (July
+    # circular-import scar).
+    if _planning:
+        try:
+            from dataview.import_data import page_load_assistant as _pla
+            _pla.render(ss, server, database, ss.get("bdl_schema", "dataview"),
+                        directory=directory)
+            st.caption("Derived CSVs land BESIDE their source file. When "
+                       "done here: switch to 📦 Load, point the Directory "
+                       "at that folder, tick Force re-extract if it's seen "
+                       "the names before, and scan.")
+        except Exception as _pla_e:
+            st.caption(f"(Load Assistant unavailable — {str(_pla_e)[:90]})")
+        return
+
     catalog = st.text_input("FK catalog JSON (fast; blank = introspect live)",
                             value=ss.get("bdl_cat", r"dataview\schema_registry\dataview_fk_catalog.json"))
-    bulk_dir = st.text_input("Bulk staging folder (safe files kept here)", value=ss.get("bdl_bulk", r"C:\Bulk"))
+    bulk_dir = clean_path(st.text_input("Bulk staging folder (safe files kept here)", value=ss.get("bdl_bulk", r"C:\Bulk")))
+
+    # ── the loader's work folder ────────────────────────────────────────────────
+    try:
+        _wn, _wb = work_usage(bulk_dir)
+    except Exception:
+        _wn, _wb = 0, 0
+    if _wn:
+        with st.expander(f"🧹 Work folder — {_wn:,} file(s), {_wb / 1048576:,.1f} MB",
+                         expanded=False):
+            st.caption(
+                f"Everything this loader creates lives in "
+                f"`{os.path.join(bulk_dir, _WORK_SUBDIR)}` — extract CSVs, .bcp files, the OCR "
+                f"do-later bucket. **Nothing else in `{bulk_dir}` is touched**, by this panel "
+                f"or by the loader. (That folder holds your source data — ~10 GB of it.)\n\n"
+                "Extract CSVs are rewritten by the next scan, so they're safe to delete — but "
+                "they're also what you read when the data-quality check says a column is "
+                "blank. So this is opt-in, never automatic.")
+            _c1, _c2 = st.columns([1, 2])
+            _days = _c1.number_input("older than (days)", min_value=0, max_value=365, value=7,
+                                     step=1, key="bdl_sweep_days")
+            _keep = _c2.checkbox("keep the OCR do-later bucket", value=True, key="bdl_sweep_keep",
+                                 help="Those documents were deferred FOR work. A queue that "
+                                      "empties itself after a week isn't a queue.")
+            if st.button("Preview sweep", key="bdl_sweep_prev"):
+                try:
+                    ss["bdl_sweep_list"] = sweep_work(bulk_dir, int(_days), dry_run=True,
+                                                      keep_do_later=bool(_keep))
+                except Exception as e:
+                    st.error(str(e))
+            _lst = ss.get("bdl_sweep_list")
+            if _lst is not None:
+                if not _lst:
+                    st.success(f"Nothing older than {int(_days)} day(s).")
+                else:
+                    _tb = sum(x[2] for x in _lst)
+                    st.dataframe(pd.DataFrame(
+                        [{"file": os.path.relpath(p, bulk_dir), "age (days)": f"{a:.1f}",
+                          "MB": f"{b / 1048576:,.2f}"} for p, a, b in _lst[:200]]),
+                        hide_index=True, use_container_width=True)
+                    if len(_lst) > 200:
+                        st.caption(f"…and {len(_lst) - 200:,} more")
+                    st.warning(f"**{len(_lst):,} file(s), {_tb / 1048576:,.1f} MB** would be "
+                               f"deleted. This cannot be undone.")
+                    if st.button(f"🗑 Delete these {len(_lst):,} file(s)", type="primary",
+                                 key="bdl_sweep_go"):
+                        gone = sweep_work(bulk_dir, int(_days), dry_run=False,
+                                          keep_do_later=bool(_keep))
+                        ss.pop("bdl_sweep_list", None)
+                        ss["bdl_sweep_msg"] = (f"Deleted {len(gone):,} file(s), "
+                                               f"{sum(x[2] for x in gone) / 1048576:,.1f} MB.")
+                        st.rerun()
+            if ss.get("bdl_sweep_msg"):
+                st.success(ss.pop("bdl_sweep_msg"))
+
     schema = ss.get("bdl_schema", "dataview")
     ss["bdl_server"], ss["bdl_db"], ss["bdl_dir"], ss["bdl_cat"], ss["bdl_bulk"], ss["bdl_recursive"] = \
         server, database, directory, catalog, bulk_dir, recursive
 
-    if st.button("Scan directory", type="primary") and directory:
+    if directory and not (os.path.isdir(directory) or os.path.isfile(directory)):
+        st.error(f"Not found: {directory}")
+    if st.button("🔍 Scan", type="primary") and directory \
+            and (os.path.isdir(directory) or os.path.isfile(directory)):
         try:
             eng = get_engine(server, database)
-            ss["bdl_scan"] = profile_directory_live(directory, eng, schema, bulk_dir, recursive,
-                                                    force=force)  # catalog from live server
+            # SINGLE FILE: profile its FOLDER, then keep only its rows.
+            # Everything downstream — the gate, the catalog, Excel sheet
+            # explosion, the topological promote order — is written against
+            # a scan of a directory, and re-implementing any of it for one
+            # file would be a second code path to keep in step. Scanning the
+            # folder and filtering is the same answer with none of that.
+            # A new scan is a new set of decisions — the previous run's
+            # confirmation must not carry over and claim to describe it.
+            ss["bdl_applied"] = False
+            _one = os.path.isfile(directory)
+            _scan_dir = os.path.dirname(os.path.abspath(directory)) if _one \
+                else directory
+            ss["bdl_scan"] = profile_directory_live(_scan_dir, eng, schema, bulk_dir,
+                                                    False if _one else recursive,
+                                                    force=force)
+            if _one:
+                # An Excel workbook explodes into one derived CSV per sheet,
+                # named from the workbook's stem — those rows ARE this file,
+                # so they are kept alongside an exact path match.
+                _ap = os.path.abspath(directory)
+                _stem = os.path.splitext(os.path.basename(_ap))[0].lower()
+                _rows = []
+                for _r in ss["bdl_scan"].get("rows", []):
+                    _rp = os.path.abspath(_r.get("path") or "")
+                    if _rp == _ap or os.path.basename(_rp).lower().startswith(
+                            _stem + "__"):
+                        _rows.append(_r)
+                ss["bdl_scan"]["rows"] = _rows
+                ss["bdl_scan"]["order"] = ss["bdl_scan"].get("_topo_order",
+                                                             lambda _x: [])(_rows) \
+                    if callable(ss["bdl_scan"].get("_topo_order")) else \
+                    ss["bdl_scan"].get("order", [])
+                ss["bdl_scan"]["single_file"] = _ap
+
+  # catalog from live server
             ss.pop("bdl_uwi_files", None)                     # re-inspect UWIs for the new scan
+            # A scan REWRITES every extract CSV — with a blank uwi, because that's what the
+            # extractor produces. The stamp guard exists to stop _stamp_csvs re-reading every
+            # CSV on each Streamlit rerun, and it survived the scan that invalidated it: the
+            # gate resolved from saved assignments, saw the flag, and skipped the stamp. The
+            # CSVs kept their blank uwi and the gate reported success. Whatever the scan
+            # rewrites, the gate must re-stamp.
+            ss.pop("bdl_uwi_stamp_sig", None)
+            ss.pop("bdl_uwi_msg", None)
         except Exception as e:
             st.error(f"Scan failed: {e}")
 
@@ -3031,6 +4594,19 @@ def run():
             st.caption(f"📇 File catalog: {bits}")
         if g.get("note"):
             st.caption(f"📇 {g['note']}")
+        # A whole FORMAT skipped is different from N rows skipped, and much easier to miss:
+        # every DLIS file gated out means no DLIS row appears anywhere on this page. Nothing
+        # says "skipped" — the format is simply absent, and absence doesn't announce itself.
+        _sf = g.get("skipped_fmt") or {}
+        if _sf:
+            st.warning(
+                "📇 **These formats were found but produced nothing** — every file was skipped "
+                "as unchanged-and-already-loaded, so no rows appear for them below:\n\n"
+                + "\n".join(f"- **{k}** — {n} file(s) found, {n} skipped" for k, n in
+                            sorted(_sf.items()))
+                + "\n\nTick **Force re-extract** above to process them anyway. (The catalog "
+                  "matches on content hash, so a file that was loaded before is skipped even "
+                  "if it now extracts differently — that's what Force is for.)")
 
     # ── where the scan's time went ───────────────────────────────────────────────
     tm = scan.get("timing")
@@ -3081,30 +4657,118 @@ def run():
                  + (f"  Most likely `{dep}` isn't installed: `pip install {dep}`." if dep != "—" else "")
                  + f"  Also confirm `{modname}.py` is deployed next to `bulk_dir_loader.py` "
                    f"in `dataview\\import_data\\`.")
-    absent = [n for n, m in (("las", _las), ("dlis", _dlis), ("lis", _lis), ("witsml", _witsml),
-                             ("pdf", _pdf), ("docx", _docx)) if m is None]
-    if absent:
-        st.caption("extractor module(s) not importable: " + ", ".join(absent) +
-                   " — those file types won't be detected.")
+    # (removed 2026-07-20) the LAS/DLIS/LIS/WITSML/PDF/DOCX "not importable" notice —
+    # the Directory Loader is CSV/Excel-only now, so those modules aren't its concern.
     if scan.get("extract_errors"):
         for fmt, err in scan["extract_errors"].items():
             st.warning(f"{fmt.upper()} extraction error: {err}")
 
-    st.subheader("Files → tables")
-    st.caption("Auto-matched by columns (data) or filename (references). Override the target with the "
-               "**→ table** dropdown, or tick **skip** to drop a table (and its FK children) from the run. "
-               "Tables whose required NOT-NULL columns have no source are **auto-skipped** — the **why** "
-               "column lists them. Untick to keep-and-fill instead.")
+    # ── FINGERPRINT RECALL, BEFORE THE GRID ─────────────────────────────────
+    # This MUST run before the Files → tables grid is built, or the grid shows
+    # every file unmatched and the recall lands a moment too late to be seen.
+    # Self-guarded by _fp_recalled, so running it here changes nothing else.
+    # (It also recalls a remembered SKIP — see remember_fp_skip.)
+    if not scan.get("_fp_recalled"):
+        _n_recall = 0
+        _n_skip_recall = 0
+        try:
+            from sqlalchemy import text as _t0
+            _eng0 = get_engine(server, database)
+            with _eng0.connect() as _c0:
+                for r in scan["rows"]:
+                    _fp = r.get("fp")
+                    if not _fp and r.get("cols"):
+                        _fp = pdl.fingerprint_cols(sorted(r["cols"]))
+                    if not _fp:
+                        continue
+                    _tt = [x[0] for x in _c0.execute(_t0(
+                        "SELECT DISTINCT target_table FROM dataview.dv_column_map "
+                        "WHERE source_file_pattern = :fp AND confirmed_ind = 'Y' "
+                        "AND active_ind = 'Y'"), {"fp": _fp}).fetchall()]
+                    if _SKIP_SENTINEL in {str(x).upper() for x in _tt}:
+                        # A REMEMBERED SKIP. The operator has already said this
+                        # shape is not loaded here; offering it again as ready
+                        # is how the same decision gets made every month.
+                        r["_target"] = r["table"] = None
+                        r["_fp_skip"] = True
+                        r["_fp_known"] = True
+                        _n_skip_recall += 1
+                    elif len(_tt) == 1:                      # ambiguity = no recall
+                        r["_target"] = r["table"] = str(_tt[0]).upper()
+                        r["_score0"] = 1.0
+                        r["_fp_known"] = True
+                        _n_recall += 1
+        except Exception:
+            pass
+        scan["_fp_recalled"] = True
+        scan["_fp_recall_n"] = _n_recall
+        scan["_fp_skip_n"] = _n_skip_recall
+
+    # The full per-table grid still follows — it is where a target is
+    # overridden and where FK-child skipping is expressed. The triage view
+    # above answers "what will happen"; this answers "change it".
+    st.divider()
+    # CLOSED BY DEFAULT (Aug 9, Perry: "why are there two screens asking me
+    # what files to skip?"). The tabs above are the everyday surface and skip a
+    # FILE; this grid skips a TABLE — every file mapped to it — and exists for
+    # the narrower job of RETARGETING a file the scan matched wrongly. Two
+    # controls both labelled "skip", both with an Apply button, and nothing on
+    # screen saying which was which. Folding it away leaves one obvious surface
+    # without removing the one that can override a target.
+    # NOT put inside an expander, though it was tempting (Perry: "why are there
+    # two screens asking me what files to skip?"). Wrapping this needs the ~200
+    # lines below re-indented, and this block contains expanders of its own —
+    # and expanders cannot nest. The confusion was never the grid's PLACE, it
+    # was that both surfaces said "skip" and meant different scopes. So the
+    # labels carry the scope instead: "skip file" in the tabs, "skip table"
+    # here.
+    if scan.get("_fp_skip_n"):
+        st.caption(f"⏭ {scan['_fp_skip_n']} file(s) pre-set to **— skip —** from a previous "
+                   f"run — the shape was skipped before. Point one at a table to load it "
+                   f"again and the skip is forgotten.")
+    st.subheader("Files → tables — full control  ·  table-wide")
+    st.caption("**Every file in the folder is listed here — this is where you skip and "
+               "retarget.** Ticking **skip table** drops that table AND its FK children (every "
+               "file mapped to it); to drop just ONE file, set its **→ table** to '— skip —'. "
+               "What survives is summarised below, in load order. "
+               "Auto-matched by columns (data) or filename (references). Nothing is ever "
+               "skipped automatically — the **why** column carries the warnings (weak match, "
+               "uncovered required columns); skipping is YOUR call.")
     all_tables = scan.get("all_tables", [])
     schema = ss.get("bdl_schema", "dataview")
     for r in scan["rows"]:                                  # remember the matched target across skip toggles
         r.setdefault("_target", r.get("table"))
+
+    # ── fingerprint → table recall (Perry's flip, July 29) ───────────────────
+    # A column shape confirmed before IS the table assignment — no scoring
+    # needed. dv_column_map already keys every confirmed map by fingerprint;
+    # this is the read side that was missing: recall the table at 100% for a
+    # known shape, so the weak-match pre-tick and the sufficiency auto-skip
+    # never fire on a file the operator has mapped before. First encounters
+    # still get the scorer's guess for the operator to override in → table;
+    # the override + Phase-2 💾 Save is what teaches the store — provide the
+    # table once, never again for that shape.
+    if scan.get("_fp_recall_n"):
+        st.caption(f"🔁 {scan['_fp_recall_n']} file(s) recognized by column shape "
+                   f"(fingerprint seen + confirmed before) — table assigned at 100%, "
+                   f"no scoring.")
+
     targets = sorted({(r["_target"] or "").upper() for r in scan["rows"] if r.get("_target")})
 
     # data-sufficiency (auto-X) + FK child graph (cascade), cached per target set
     cov, kids = {}, {}
     try:
         eng = get_engine(server, database)
+        # Vendor vocabulary must exist BEFORE the sufficiency check: it is
+        # synonym-aware (build_map_review -> _syn), so without the seeds a
+        # Teapot-headed file reads "uwi uncovered" and dv_well gets auto-
+        # skipped, cascading to every child. Seeding only in Phase 2 was one
+        # phase too late (July 29 screenshot).
+        if not ss.get("bdl_vendor_seeded"):
+            _n_seed0, _seed_skips0 = seed_vendor_synonyms(eng, schema)
+            ss["bdl_vendor_seeded"] = True
+            for _sk0 in _seed_skips0:
+                st.caption(f"(vendor synonym skipped — {_sk0})")
         if ss.get("bdl_suff_sig") != tuple(targets):
             ss["bdl_suff"] = _data_sufficiency(eng, scan["rows"], schema)
             ss["bdl_suff_sig"] = tuple(targets)
@@ -3113,51 +4777,285 @@ def run():
         st.caption(f"⚠️ data-sufficiency check unavailable ({e}); the skip column is manual only.")
 
     ss.setdefault("bdl_skips", set())
-    if not scan.get("_suff_seeded"):                        # auto-X insufficient tables once per scan
-        ss["bdl_skips"] = {t for t in targets if cov.get(t)}
-        scan["_suff_seeded"] = True
-    closure = _cascade(ss["bdl_skips"], kids)
+    # AUTO-SKIP REMOVED (Perry, July 29): after three rounds of the screen
+    # re-deriving its own opinion over the operator's (sufficiency auto-tick,
+    # weak-match pre-tick, cascade eating overrides), skip is now MANUAL ONLY.
+    # The `why` column still carries every warning — uncovered required
+    # columns, weak scores — but nothing ever ticks itself.
+    # _cascade returns DESCENDANTS only; the skipped tables themselves must
+    # be unioned in. Without it, every grid rebuild after an Apply rendered
+    # directly-skipped tables UNTICKED (the operator's skips looked "cleared"),
+    # and the next Apply read those cleared boxes as unskips and staged
+    # everything — Perry hit it twice (July 29 + 30) before this fix.
+    closure = _cascade(ss["bdl_skips"], kids) | set(ss["bdl_skips"])
+
+    # A match this weak is a guess, not a match. The auto-matcher scores on column overlap;
+    # below this the target is more likely wrong than right (Completion_Parameters_
+    # Perforations.csv → DV_WELL_GOM_BACKUP scored low and was still proposed). Pre-tick skip
+    # rather than pre-tick load: a wrong target that stages is worse than one you have to
+    # un-skip, because staging DROP+CREATEs the table.
+    WEAK_MATCH = 0.30
+
+    for _r in scan["rows"]:
+        if "_score0" not in _r:
+            _r["_score0"] = float(_r.get("score") or 0)
+
+    _matched_targets = {(x.get("_target") or "").upper() for x in scan["rows"] if x.get("_target")}
+
+    def _has_matched_kids(tu):
+        """Would skipping this table drag others down with it?"""
+        return bool(set(_cascade({tu}, kids)) - {tu} & _matched_targets)
+
+    def _weak(r):
+        return bool(r.get("_target")) and float(r.get("_score0") or 0) <= WEAK_MATCH
 
     def _reason(tu):
-        if tu in ss["bdl_skips"] and cov.get(tu):
-            return ", ".join(cov[tu])
+        if cov.get(tu):
+            return "uncovered required: " + ", ".join(cov[tu])
         if tu in closure and tu not in ss["bdl_skips"]:
             return "child of a skipped table"
         return ""
 
+    def _why(r):
+        tu = (r.get("_target") or "").upper()
+        base = _reason(tu)
+        if _weak(r):
+            pct = int(float(r.get("_score0") or 0) * 100)
+            w = (f"⚠ weak match ({pct}%) — the auto-matcher is guessing; "
+                 f"verify or change the target before loading")
+            return f"{base} · {w}" if base else w
+        return base
+
+    def _filled_cols(path, ncols):
+        """How many columns hold at least one non-blank value? None when not knowable cheaply.
+
+        `cols` (the header count) says what the file CLAIMS; this says what it delivers. A
+        12-column extract where 3 columns have data is worth seeing before you map it — that
+        is the shape of the dropped-column problem, one screen earlier.
+
+        Bounded on purpose: a full read per file, per rerun, to draw a grid is exactly the kind
+        of cost that turned a 35s scan into a mystery. Skips non-CSV sources (an .xlsx read as
+        CSV is nonsense, not data), skips files over the cap, caches on (path, mtime), and
+        stops early once every column has been seen filled.
+        """
+        try:
+            if not path or not str(path).lower().endswith(".csv") or not os.path.exists(path):
+                return None
+            if os.path.getsize(path) > _FILLED_MAX_BYTES:
+                return None                     # too big to read just to populate a column
+            key = (path, os.path.getmtime(path))
+            cache = ss.setdefault("_filled_cache", {})
+            if key in cache:
+                return cache[key]
+            seen = set()
+            with open(path, encoding="utf-8-sig", newline="") as fh:
+                rd = csv.DictReader(fh)
+                hdr = rd.fieldnames or []
+                for row in rd:
+                    for k, v in row.items():
+                        if k not in seen and v is not None and str(v).strip() != "":
+                            seen.add(k)
+                    if len(seen) >= len(hdr):
+                        break                   # every column has data — nothing left to learn
+            cache[key] = len(seen)
+            return cache[key]
+        except Exception:
+            return None                         # unknown, and says so — never a guessed number
+
+    def _filled_str(r):
+        n = len(r["cols"])
+        f = _filled_cols(r.get("path"), n)
+        return f"{n}" if f is None else f"{f}/{n}"
+
     grid = pd.DataFrame([{
-        "file": r["file"], "→ table": (r["_target"] or "— skip —"),
+        "#": _i + 1,
         "skip": ((r["_target"] or "").upper() in closure) or not r["_target"],
-        "why": _reason((r["_target"] or "").upper()),
-        "match": f"{int(r['score']*100)}%", "kind": r["kind"] or "", "cols": len(r["cols"])}
-        for r in scan["rows"]])
-    edited = st.data_editor(
-        grid, hide_index=True, use_container_width=True, key="bdl_scan_edit",
-        column_config={
-            "file": st.column_config.TextColumn(disabled=True),
-            "→ table": st.column_config.SelectboxColumn(options=["— skip —"] + all_tables, required=True),
-            "skip": st.column_config.CheckboxColumn(
-                "skip", width="small", help="Drop this table and its FK children from staging & promote"),
-            "why": st.column_config.TextColumn("why (uncovered required cols)", disabled=True),
-            "match": st.column_config.TextColumn(disabled=True, width="small"),
-            "kind": st.column_config.TextColumn(disabled=True, width="small"),
-            "cols": st.column_config.NumberColumn(disabled=True, width="small")})
+        # 📇 = fingerprint RECALL (this exact shape confirmed before) —
+        # visually distinct from a scored 100%, which is still a guess.
+        # "I kind of liked remembered" — Perry, July 30.
+        "match": ("📇 remembered" if r.get("_fp_known")
+                  else f"{int(float(r.get('_score0') or 0) * 100)}%"),
+        "rows": (f"{r['n_rows']:,}" if isinstance(r.get("n_rows"), int) else "—"),
+        "filled": _filled_str(r),
+        "→ table": (r["_target"] or "— skip —"),
+        "file": r["file"],
+        "kind": r["kind"] or "",
+        "why": _why(r)}
+        for _i, r in enumerate(scan["rows"])])
+    # WHAT THIS GRID WAS DRAWN FROM. Compared after the read-back below: if
+    # Apply changed anything, the grid on screen is already stale and has to be
+    # redrawn, or the operator sees their ticks vanish and ticks them again.
+    _built_from = (tuple((r["file"], r.get("_target")) for r in scan["rows"]),
+                   frozenset(ss.get("bdl_skips") or set()))
+    # 🔑 bdl_unskips IS DELIBERATELY NOT IN THIS SIGNATURE (Aug 10).
+    #
+    # The signature drives BOTH the frame cache and the widget KEY, and the
+    # read-back ~200 lines below MUTATES bdl_unskips on every render — it is
+    # empty when this grid is first drawn and full by the end of that same
+    # pass. So the key differed between the render that DREW the editor and
+    # the render that READ its submission: Streamlit saw a key it had never
+    # seen, returned the frame defaults, and the operator's ticks went in the
+    # bin. Every FIRST Apply was silently discarded; the second worked because
+    # by then bdl_unskips had stopped moving. Perry: "I filled skips, then both
+    # grids appeared and my skips were gone... it's like the first grid was
+    # ignored."
+    #
+    # bdl_unskips is a record of intent and changes nothing this grid DISPLAYS,
+    # so it has no business deciding widget identity. What the grid shows is a
+    # function of the targets and the skips — those two, and nothing else.
+    _grid_sig = (tuple((r["file"], r.get("_target")) for r in scan["rows"]),
+                 tuple(sorted(ss.get("bdl_skips", set()))))
+    if ss.get("bdl_scan_grid_sig") != _grid_sig:
+        ss["bdl_scan_grid"] = grid
+        ss["bdl_scan_grid_sig"] = _grid_sig
+    grid = ss["bdl_scan_grid"]
+
+    # In a form nothing is sent until Apply — so editing a target no longer reruns the whole
+    # page on every keystroke, re-deriving the promote order and redrawing the gate half way
+    # through your edits. Make all the changes, then commit them once.
+    with st.form("bdl_files_tables"):
+        edited = st.data_editor(
+            grid, hide_index=True, use_container_width=True,
+            # key versioned by the grid signature: frame and widget state move
+            # TOGETHER, so a rebuilt grid always shows the truthful defaults
+            # instead of stale edits over a changed frame
+            key=f"bdl_scan_edit_{abs(hash(_grid_sig)) % 100000}",
+            column_order=["#", "skip", "match", "rows", "filled", "→ table", "file", "kind",
+                          "why"],
+            column_config={
+                "#": st.column_config.NumberColumn(
+                    disabled=True, width="small",
+                    help="Row number — warnings elsewhere on this page refer to it"),
+                # The DISPLAY label carries the scope; the underlying key stays
+                # "skip" so the read-back below and every caller are untouched.
+                "skip": st.column_config.CheckboxColumn(
+                    "skip table", width="small",
+                    help="Drop this table AND its FK children from staging & promote — "
+                         "every file mapped to it. To drop ONE file, set its → table "
+                         "to '— skip —' on this same row. Never pre-ticked — the why "
+                         "column warns, you decide."),
+                "match": st.column_config.TextColumn(
+                    disabled=True, width="small",
+                    help="How much of the target's shape the source columns cover. Low = the "
+                         "auto-matcher is guessing."),
+                "rows": st.column_config.TextColumn(
+                    disabled=True, width="small",
+                    help="Rows in the extracted CSV. '—' = not counted (CSV/Excel sources are "
+                         "profiled, not extracted)"),
+                "filled": st.column_config.TextColumn(
+                    disabled=True, width="small",
+                    help="Columns holding at least one non-blank value / total columns. "
+                         "3/12 means nine columns are empty in every row. A bare number means "
+                         "the file wasn't read (not a CSV, or over the size cap) — total only."),
+                "→ table": st.column_config.SelectboxColumn(options=["— skip —"] + all_tables,
+                                                            required=True),
+                "file": st.column_config.TextColumn(disabled=True),
+                "kind": st.column_config.TextColumn(disabled=True, width="small"),
+                "why": st.column_config.TextColumn("why (uncovered required cols)", disabled=True)})
+        _applied_now = st.form_submit_button("Apply targets & table skips",
+                                             type="primary",
+                                             use_container_width=True)
+    if _applied_now:
+        ss["bdl_applied"] = True
 
     # read intended target + explicit skip ticks, then cascade to FK children
     new_skips = set()
+    # An explicit UNTICK is a decision with the same standing as a tick.
+    # (bdl_unskips predates the July-29 removal of all auto-skip logic; it
+    # stays as a record of operator intent and costs nothing.)
+    ss.setdefault("bdl_unskips", set())
+    _file_skips = ss.get("bdl_file_skips") or set()
     for i, r in enumerate(scan["rows"]):
         pick = edited.iloc[i]["→ table"]
         r["_target"] = None if pick in ("— skip —", "", None) else pick.upper()
+        # a PER-FILE skip (triage view) drops just this row, without touching
+        # the table or its other files — the per-table checkbox below is the
+        # blunt instrument, this is the scalpel
+        if (r.get("path") or r.get("file", "")) in _file_skips:
+            r["_target"] = None
         if bool(edited.iloc[i]["skip"]) and r["_target"]:
             new_skips.add(r["_target"])
+            ss["bdl_unskips"].discard(r["_target"])
+        elif r["_target"]:
+            ss["bdl_unskips"].add(r["_target"])
     ss["bdl_skips"] = new_skips
-    closure = _cascade(new_skips, kids)
+
+    # ── REDRAW IF APPLY CHANGED ANYTHING (Aug 10) ───────────────────────────
+    # Perry: "I have to select my skips on the first table twice before it
+    # takes."
+    #
+    # Pressing Apply reruns the script from the top. On THAT run the grid is
+    # rebuilt near line 4780 from ss["bdl_skips"] — which still holds the
+    # PREVIOUS value, because the line that updates it is the one just above
+    # this comment, ~200 lines further down. So the sequence is: grid drawn
+    # from the old state, ticks read, new state written, page finishes. The
+    # receipt below is correct; the grid above it is one interaction behind,
+    # and looks exactly as though the tick did nothing.
+    #
+    # One more rerun makes the grid agree with the state it just produced.
+    # It TERMINATES: the second pass builds from the new state, the read-back
+    # yields the same state, the comparison matches and nothing reruns again.
+    _now = (tuple((r["file"], r.get("_target")) for r in scan["rows"]),
+            frozenset(new_skips))
+    if _now != _built_from:
+        ss["bdl_scan"] = scan
+        st.rerun()
+
+    # REMEMBER THE DECISION AGAINST THE FILE'S SHAPE (Aug 10). Perry: "if I
+    # skip the mapping it should update the fingerprint so if I load it again
+    # it won't show those files as being mapped."
+    #
+    # Both directions, or the memory is a trap: pointing a row AT a table must
+    # clear a remembered skip, otherwise a file can never be un-skipped and the
+    # operator has no way to see why it keeps vanishing.
+    _fp_skip_now, _fp_load_now = set(), set()
+    for i, r in enumerate(scan["rows"]):
+        _fpr = r.get("fp")
+        if not _fpr and r.get("cols"):
+            _fpr = pdl.fingerprint_cols(sorted(r["cols"]))
+        if not _fpr:
+            continue
+        (_fp_skip_now if not r["_target"] else _fp_load_now).add(_fpr)
+    if _fp_skip_now or _fp_load_now:
+        try:
+            remember_fp_skip(get_engine(server, database),
+                             _fp_skip_now, _fp_load_now)
+        except Exception:
+            pass
+    # A skipped PARENT only drags its children down when the parent table is
+    # EMPTY in the database. dv_well already loaded (a prior run) means tops/
+    # surveys can promote against the EXISTING rows — skipping the headers
+    # FILE must not cascade-skip its children. So cascade only through skipped
+    # parents that hold no rows; directly-skipped tables still drop.
+    _populated = set()
+    try:
+        from sqlalchemy import text as _tc
+        _engc = get_engine(server, database)
+        with _engc.connect() as _cc:
+            for _tsk in new_skips:
+                try:
+                    if _cc.execute(_tc(
+                            f"SELECT TOP 1 1 FROM {schema}.{_tsk.lower()}")).fetchone():
+                        _populated.add(_tsk)
+                except Exception:
+                    pass                      # table missing -> treat as empty
+    except Exception:
+        pass
+    closure = _cascade(new_skips - _populated, kids) | new_skips
+    if _populated:
+        st.caption("⛓ skip cascade stopped at populated parent(s): "
+                   + ", ".join(sorted(_populated))
+                   + " — their children can still load against the existing rows.")
 
     # effective target: dropped if skipped directly or cascaded from a skipped parent
     for r in scan["rows"]:
         tgt = r["_target"]
         r["table"] = None if (not tgt or tgt in closure) else tgt
         r["kind"] = _kind_of(r["table"]) if r["table"] else None
+        # `score` here means "has an effective target", which is NOT what the matcher said.
+        # _score0 keeps the real verdict; anything downstream that wants confidence must read
+        # that. Overwriting both would make the weak-match rule feed on its own output.
+        r.setdefault("_score0", float(r.get("score") or 0))
         r["score"] = 1.0 if r["table"] else 0.0
     order = [t for t in (scan.get("order") or []) if t in {r["table"] for r in scan["rows"] if r["table"]}]
     for r in scan["rows"]:
@@ -3167,8 +5065,59 @@ def run():
     scan["order"] = order
     ss["bdl_scan"] = scan
 
+    # ── WHAT WILL LOAD ──────────────────────────────────────────────────────
+    # Three tabs used to sit here — Ready / Needs planning / Skipped — each
+    # re-listing every file in the folder. It read as a second scan, because
+    # that is what it looked like. Perry: "we don't need the second table as
+    # is... what we need is a simple table confirming what will be loaded."
+    #
+    # The grid above is the control: skip a row, or point it at a different
+    # table. This is the receipt. It is derived straight from the effective
+    # targets that grid just produced, so it cannot disagree with it.
+    _will = [r for r in scan["rows"] if r.get("table")]
+    _ordi = {t: i for i, t in enumerate(scan.get("order") or [])}
+    _will.sort(key=lambda r: (_ordi.get(r["table"], 999), r.get("file", "")))
+
+    if not ss.get("bdl_applied"):
+        # NOTHING TO CONFIRM YET (Aug 10). Perry: "only the first grid should
+        # appear and only after I make my selection should the second grid
+        # appear confirming my selection."
+        #
+        # Showing a receipt before any decision was made is what made this read
+        # as a second scan: two tables of the same files side by side, one of
+        # them describing choices nobody had made yet.
+        #
+        # NOT an early return — everything below (promote order, the UWI gate,
+        # staging, the phases) still has to render. This gates ONE panel.
+        st.caption("Set your skips and targets above, then press "
+                   "**Apply targets & table skips** — what will load appears here.")
+    elif not _will:
+        st.subheader("What will be loaded")
+        st.info("Nothing selected — every file is set to **— skip —** in the grid above.")
+    else:
+        st.subheader("What will be loaded")
+        st.dataframe(
+            pd.DataFrame([{"#": i + 1, "file": r.get("file", ""),
+                           "→ table": r["table"],
+                           "rows": (f"{r['rows']:,}" if isinstance(r.get("rows"), int) else "—")}
+                          for i, r in enumerate(_will)]),
+            hide_index=True, use_container_width=True)
+        _by = {}
+        for r in _will:
+            _by[r["table"]] = _by.get(r["table"], 0) + 1
+        st.info("Loads in order: " + " → ".join(
+            f"**{t}** ({n} file{'s' if n > 1 else ''})"
+            for t, n in sorted(_by.items(), key=lambda kv: _ordi.get(kv[0], 999))))
+
+
+
     if scan["order"]:
-        st.caption("Promote order (topological): " + "  →  ".join(scan["order"]))
+        if scan.get("fk_warning"):
+            st.error(f"⚠ No FK graph — promote order is ALPHABETICAL, not topological. "
+                     f"{scan['fk_warning']}. Children will promote before their parents. "
+                     f"Clear the 'FK catalog JSON' box to introspect live, then re-scan.")
+        st.caption(f"Promote order ({'topological' if scan.get('fk_edges') else '⚠ ALPHABETICAL — no FK graph'}): "
+                   + "  →  ".join(scan["order"]))
     dropped = sorted({(r["_target"] or "").upper() for r in scan["rows"] if r.get("_target") and not r["table"]})
     if dropped:
         cascaded = sorted(closure - new_skips)
@@ -3190,7 +5139,24 @@ def run():
         _pdf_review.render_pdf_review(ss, ss.get("bdl_schema", "dataview"))
 
     if not uwi_ready:
-        st.warning("Resolve the UWIs above (assign or SKIP) before staging.")
+        # "above" is doing a lot of work on a page this long. Name the documents, and say
+        # which panel they're in — the gate sits between Files → tables and PDF field review,
+        # and this warning is at the bottom of the page.
+        _pend = ss.get("bdl_uwi_pending")
+        if _pend is None:
+            st.error("Staging is blocked — see the error in the **⚠ Assign UWI** section "
+                     "above. Nothing to assign; something failed.")
+        elif _pend:
+            st.warning(
+                f"**Staging blocked: {len(_pend)} document(s) still need a UWI.** Scroll up to "
+                f"**⚠ Assign UWI before staging** (between *Files → tables* and *PDF field "
+                f"review*) and give each one a UWI that exists in `dv_well`, or set its action "
+                f"to **SKIP**:\n\n"
+                + "\n".join(f"- `{x}`" for x in _pend[:12])
+                + (f"\n- …and {len(_pend) - 12} more" if len(_pend) > 12 else ""))
+        else:
+            st.warning("Staging is blocked by the UWI gate, but nothing is listed as pending — "
+                       "↻ **Reset run** and re-scan.")
     elif st.button("Stage all to server (BCP)", type="primary"):
         eng = get_engine(server, database)
         bar = st.progress(0.0, text="staging…")
@@ -3207,20 +5173,115 @@ def run():
                                     "rows staged": r["loaded"],
                                     "status": "✅" if (not r["errors"] and r["loaded"]) else "🔴"}
                                    for r in staged]), hide_index=True, use_container_width=True)
-        # always surface bcp's own output — the truth behind the exit code
-        with st.expander("bcp output (per file)", expanded=any(r["loaded"] == 0 for r in staged)):
+        # bcp's own output is the truth behind the exit code — but as a wall of text it hid the
+        # only number that matters (expected vs copied) among the network packet size and the
+        # rows-per-second. A grid puts the comparison in one column. The raw text is NOT
+        # discarded: it is printed in full for any file that failed or came up short, because
+        # that is when you need bcp's actual words, and a parse of them can't be trusted
+        # precisely when something has gone wrong.
+        with st.expander("bcp — per file", expanded=any(r["loaded"] == 0 for r in staged)):
+            import re as _re
+
+            def _copied(out):
+                """bcp prints '6 rows copied.' — None if it didn't, never a guess."""
+                m = _re.search(r"([\d,]+)\s+rows?\s+copied", out or "", _re.I)
+                return int(m.group(1).replace(",", "")) if m else None
+
+            def _ms(out):
+                m = _re.search(r"Clock Time \(ms\.?\)[^:]*:\s*([\d,]+)", out or "", _re.I)
+                return int(m.group(1).replace(",", "")) if m else None
+
+            grid, troubled = [], []
             for r in staged:
                 for lg in r["logs"]:
-                    st.markdown(f"**{r['stg_table']}** ← `{lg['file']}` (expected {lg['expected']} rows, rc={lg['rc']})")
-                    st.code(lg["cmd"], language="text")
-                    msg = lg["out"] or lg["err"] or "(no output)"
-                    st.code(msg, language="text")
+                    cop = _copied(lg["out"])
+                    exp = lg["expected"]
+                    if lg["rc"] != 0:
+                        status = "🔴 failed"
+                    elif cop is None:
+                        status = "⚠ unreadable"      # rc=0 but bcp said nothing we understood
+                    elif cop != exp:
+                        status = f"🔴 short {exp - cop:+,}"
+                    else:
+                        status = "✅"
+                    if status != "✅":
+                        troubled.append((r["stg_table"], lg))
+                    ms = _ms(lg["out"])
+                    grid.append({
+                        "status": status,
+                        "stg table": r["stg_table"].split(".")[-1],
+                        "file": lg["file"],
+                        "expected": f"{exp:,}",
+                        "copied": f"{cop:,}" if cop is not None else "—",
+                        "rc": str(lg["rc"]),
+                        "ms": f"{ms:,}" if ms is not None else "—",
+                    })
+            # every column a single type — mixing ints with "—" makes pyarrow reject the table
+            st.dataframe(
+                pd.DataFrame(grid), hide_index=True, use_container_width=True,
+                column_order=["status", "stg table", "file", "expected", "copied", "rc", "ms"],
+                column_config={
+                    "status": st.column_config.TextColumn(width="small"),
+                    "expected": st.column_config.TextColumn(
+                        width="small", help="Rows in the CSV handed to bcp"),
+                    "copied": st.column_config.TextColumn(
+                        width="small", help="What bcp reported copying. '—' = bcp's output "
+                                            "didn't say, so this is unknown rather than 0"),
+                    "rc": st.column_config.TextColumn(
+                        width="small",
+                        help="bcp.exe's exit code. 0 = it believes it succeeded; anything "
+                             "else = it failed. NOT the real check: bcp can exit 0 and still "
+                             "copy fewer rows than it was given — that's why expected and "
+                             "copied sit next to each other."),
+                    "ms": st.column_config.TextColumn(
+                        width="small", help="bcp's own clock time for the copy"),
+                })
+            st.caption("**expected** = rows in the CSV · **copied** = what bcp reported. "
+                       "They must match; anything else is data lost between the two. "
+                       "**rc** is bcp's exit code — necessary, not sufficient.")
+
+            # Only the ones that went wrong get the full text — nested expanders aren't allowed
+            # here, and a clean run doesn't need bcp's chatter.
+            for stg, lg in troubled:
+                st.markdown(f"**{stg}** ⟵ `{lg['file']}`")
+                st.code(lg["cmd"], language="text")
+                st.code(lg["out"] or lg["err"] or "(no output)", language="text")
+            if not troubled:
+                if st.checkbox("show raw bcp output anyway", key="bdl_bcp_raw"):
+                    for r in staged:
+                        for lg in r["logs"]:
+                            st.markdown(f"**{r['stg_table']}** ⟵ `{lg['file']}`")
+                            st.code(lg["cmd"], language="text")
+                            st.code(lg["out"] or lg["err"] or "(no output)", language="text")
         ok = sum(1 for r in staged if not r["errors"] and r["loaded"])
         if ok == len(staged):
             st.success(f"{ok}/{len(staged)} tables staged with rows. Next: batch Match & Map (Phase 2).")
         else:
-            st.error(f"{ok}/{len(staged)} tables staged with rows — see bcp output above for the rest.")
+            # Name them. "see bcp output above for the rest" makes you hunt a 🔴 through a
+            # 31-row grid to learn something the message already knew.
+            bad = [r for r in staged if r["errors"] or not r["loaded"]]
+            lines = []
+            for r in bad:
+                if r["errors"]:
+                    why = "; ".join(r["errors"])[:200]
+                elif not r["loaded"]:
+                    exp = sum(lg["expected"] for lg in r["logs"])
+                    why = ("the source CSV had no data rows"
+                           if exp == 0 else
+                           f"bcp reported no error, but the table is empty — "
+                           f"{exp:,} row(s) were expected")
+                else:
+                    why = "unknown"
+                lines.append(f"- **{r['target']}** ⟵ `{r['stg_table']}` — {why}")
+            st.error(f"{ok}/{len(staged)} tables staged with rows. These did not:\n\n"
+                     + "\n".join(lines))
 
+    # ── PHASES 2-6 ──────────────────────────────────────────────────────────
+    # These are the road for files the store cannot map on its own. When it
+    # CAN, the streamlined button above has already done the work and this
+    # machinery is just noise on the page — so it collapses. Collapsed, not
+    # removed: "show me what it would have done" is a fair thing to want,
+    # and hiding the phases outright would make the fast path unauditable.
     # Phase 2 — batch Match & Map (appears once anything is staged)
     if ss.get("bdl_staged"):
         st.divider()
@@ -3245,6 +5306,11 @@ def run():
     if ss.get("bdl_maps"):
         st.divider()
         render_verify(ss, server, database, ss.get("bdl_schema", "dataview"))
+
+    # LAST, deliberately: the anchor has to exist in the DOM before anything
+    # tries to scroll to it, and components run after the markdown around them
+    # is emitted. Called unconditionally — it is a no-op unless a phase asked.
+    _scroll_to(ss, "fk-violations")
 
 
 if __name__ == "__main__":

@@ -6,10 +6,10 @@ dv_well_log_curve, so the existing bulk_dir_loader pipeline (map → FK → prom
 can load them with no new plumbing:
 
   well_log.csv        UWI, LOG_ID, LOG_TYPE, LOG_DATE, RUN_NO, TOP_DEPTH, BASE_DEPTH, SOURCE
-  well_log_curve.csv  UWI, LOG_ID, CURVE_NAME, CURVE_UNIT, MIN_VALUE, MAX_VALUE, SOURCE
+  well_log_curve.csv  UWI, LOG_ID, CURVE_NAME, CURVE_UNIT, SOURCE  (header-only; no min/max)
 
-log_id is derived from the LAS filename (stable, unique per file). min/max per curve are
-computed from the ~A data (NULL value excluded). Depth-index curve (first in ~C) is skipped.
+log_id follows LOG_<uwi>. Intake is HEADER-ONLY: the ~A data section is never read, so no
+per-curve min/max is computed. Depth-index curve (first in ~C) is skipped.
 """
 import os, csv, glob
 
@@ -54,10 +54,9 @@ def parse_las(path):
                 import re
                 desc = re.sub(r"^\s*\d+\s+", "", desc)   # LAS often prefixes the ordinal: "2  GAMMA RAY"
                 curves.append({"mnem": m, "unit": unit, "desc": desc})
-            elif section == "A":
-                parts = s.split()
-                if parts:
-                    data.append(parts)
+            # ~A data section is intentionally NOT read: LAS intake is header-only
+            # (~V/~W/~P/~C). Curve VALUE stats (min/max) are not computed at catalog
+            # time — that would require scanning every sample of every file.
     return well, curves, data
 
 
@@ -109,10 +108,6 @@ def extract_directory(directory, source="LAS", files=None, recursive=False):
         n = used_log_ids.get(base_id, 0) + 1
         used_log_ids[base_id] = n
         log_id = base_id if n == 1 else f"{base_id}_{n}"   # 2nd LAS for a well → _2, _3, …
-        null_val = _wget(well, "NULL", default="-999.25")
-        try: null_f = float(null_val)
-        except ValueError: null_f = -999.25
-
         # depth unit comes from the LAS itself (STRT .FT / .M) — never assumed
         depth_ouom = (well.get("STRT", {}).get("unit") or "FT").upper()
         log_rows.append({
@@ -122,20 +117,12 @@ def extract_directory(directory, source="LAS", files=None, recursive=False):
             "top_depth": _wget(well, "STRT"), "base_depth": _wget(well, "STOP"),
             "depth_ouom": depth_ouom, "source": source})
 
-        # per-curve min/max from the data section; column 0 is the depth index → skip as a curve
+        # curve identity from ~C only (mnemonic / unit / description). Column 0 is the
+        # depth index → skipped. No min/max: header-only intake never reads samples.
         seen_cv = {}
         for ci, c in enumerate(curves):
             if ci == 0:
                 continue                                   # depth index, not a log curve
-            vals = []
-            for row in data:
-                if ci < len(row):
-                    try:
-                        f = float(row[ci])
-                        if f != null_f:
-                            vals.append(f)
-                    except ValueError:
-                        pass
             # curve_id is NOT NULL with no source column — generate it here so no concat
             # rule is needed. log_id already carries the uwi; repeated mnemonics get _2, _3.
             n = seen_cv.get(c["mnem"], 0) + 1
@@ -145,8 +132,6 @@ def extract_directory(directory, source="LAS", files=None, recursive=False):
                 "uwi": uwi, "log_id": log_id, "curve_id": cid[:40],
                 "mnemonic": c["mnem"],
                 "curve_description": c["desc"], "curve_unit": c["unit"],
-                "min_value": (f"{min(vals):.4g}" if vals else ""),
-                "max_value": (f"{max(vals):.4g}" if vals else ""),
                 "depth_ouom": depth_ouom, "source": source})
     return log_rows, curve_rows
 
@@ -166,7 +151,7 @@ def write_staging_csvs(directory, out_dir=None, source="LAS", files=None, recurs
     log_cols = ["uwi", "log_id", "log_type", "run_num", "log_date", "top_depth", "base_depth",
                 "depth_ouom", "source"]
     curve_cols = ["uwi", "log_id", "curve_id", "mnemonic", "curve_description", "curve_unit",
-                  "min_value", "max_value", "depth_ouom", "source"]
+                  "depth_ouom", "source"]
     log_path = os.path.join(out_dir, "well_log.csv")
     curve_path = os.path.join(out_dir, "well_log_curve.csv")
     with open(log_path, "w", newline="", encoding="utf-8") as fh:

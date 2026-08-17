@@ -323,6 +323,7 @@ def render(engine, dialect: str):
         ("surveys",   "📄", "PDF / Docs",  "Extract surveys · tops · core · DST"),
         ("shapefiles","🗺️",  "Shapefiles",  "Wells · boundaries · seismic extents"),
         ("office",    "📊", "Excel / Word","Production · completion · well data"),
+        ("dirload",   "⬇️", "Load to DB",  "Extract → promote docs to dataview"),
         ("progress",  "📈", "Progress",    "Track cataloger assignments"),
     ]
     # Stage 3: Admin
@@ -430,6 +431,7 @@ def render(engine, dialect: str):
         st.session_state.setdefault("mb_grp", "Office")
         from dataview.file_catalog import page_file_catalog
         page_file_catalog.run(engine, dialect)
+    elif active == "dirload":   _tab_directory_load(engine, dialect, user)
     elif active == "progress":  _tab_progress(engine, dialect, user, role)
     elif active == "admin":     _tab_admin(engine, dialect, user, role)
 
@@ -3714,3 +3716,58 @@ def _tab_office_extract(engine, dialect, user):
                 "Full load-to-DB coming soon. "
                 "Use the ETL Pipeline for CSV/Excel well data now."
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Directory Load tab — runs the verified Directory Loader (bulk_dir_loader.run)
+# in-place. No extractor/staging/promote code is duplicated; the UWI gate,
+# NEW-well create, topo FK order, idempotent promote, verify, and Force
+# re-extract all come from the loader. Promote target stays `dataview`.
+# ─────────────────────────────────────────────────────────────────────────────
+def _tab_directory_load(engine, dialect, user):
+    import streamlit as st
+    from dataview.import_data import bulk_dir_loader
+
+    if dialect != "mssql":
+        st.warning(
+            "The Directory Loader targets SQL Server (the `dataview` schema). "
+            "Connect to the mssql DataView database to use it."
+        )
+        return
+
+    _seed_loader_connection(engine)          # convenience only — inputs still override
+    st.session_state.setdefault("bdl_schema", "dataview")   # unified promote target
+
+    bulk_dir_loader.run()
+
+
+def _seed_loader_connection(engine):
+    """Prefill bulk_dir_loader's server/database session-state from a live engine.
+    Handles host/database and odbc_connect URL forms; silent on miss; setdefault
+    so a value the cataloger already typed wins."""
+    import streamlit as st
+    ss = st.session_state
+    if ss.get("bdl_server") and ss.get("bdl_db"):
+        return
+
+    server = database = None
+    try:
+        url = engine.url
+        server, database = url.host, url.database
+        if not server or not database:
+            from urllib.parse import unquote
+            raw = (url.query or {}).get("odbc_connect", "")
+            parts = dict(
+                kv.split("=", 1)
+                for kv in unquote(raw).split(";")
+                if "=" in kv
+            )
+            server = server or parts.get("SERVER") or parts.get("Server")
+            database = database or parts.get("DATABASE") or parts.get("Database")
+    except Exception:
+        pass
+
+    if server:
+        ss.setdefault("bdl_server", server)
+    if database:
+        ss.setdefault("bdl_db", database)

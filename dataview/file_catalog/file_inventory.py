@@ -18,6 +18,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
+from dataview.core.file_identity import inventory_id as _make_id
 
 import pandas as pd
 
@@ -54,11 +55,6 @@ HASH_CHUNK_BYTES = 65536   # 64 KB
 
 def _now_str() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _make_id(seed: str) -> str:
-    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:40].upper()
-
 
 def _fast_hash(path: str) -> str:
     h = hashlib.sha1()
@@ -325,7 +321,22 @@ def _scan_file(file_path: Path, root_path: str,
         size_kb = None
         mod_dt  = None
 
-    path_str  = str(file_path)
+    # CANONICAL PATH, ALWAYS. Windows collapses repeated separators for
+    # filesystem access, so a root typed or pasted as
+    #     C:\\Users\\perry\\docs
+    # opens exactly the same folder as the single-separator form — and
+    # the scan works, and every file is found. But str(Path(...)) keeps
+    # the spelling it was given, INVENTORY_ID is SHA1 of that string, and
+    # the same file therefore lands in the catalog TWICE with different
+    # ids. It happened here: 1,050 rows for 525 PDFs, one set from a run
+    # whose root had doubled separators and one from a later run that
+    # doubled them again. Nothing errored, because nothing was wrong as
+    # far as the operating system was concerned.
+    #
+    # normpath collapses the repeats. Done HERE rather than only at the
+    # UI so every caller — scanner, worker pool, CLI — mints the same id
+    # for the same file however the root reached it.
+    path_str  = os.path.normpath(str(file_path))
     inv_id    = _make_id(path_str)
     ext       = file_path.suffix.lower()
     fast_h    = None

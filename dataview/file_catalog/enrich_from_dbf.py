@@ -15,12 +15,30 @@ from __future__ import annotations
 import argparse, hashlib, os, sys, time
 from pathlib import Path
 
+# THE CHECK IS RIGHT; EXITING AT IMPORT TIME IS NOT. sys.exit() here
+# raises SystemExit the moment anything imports this module — which is not
+# an Exception, so it escapes a normal `except Exception` and takes the
+# importing process down with it. That is exactly what it did to the
+# regression harness: the whole run died part-way through with no summary.
+#
+# The dependency is still required to RUN, and main() still refuses to
+# start without it. It is simply no longer required to READ.
+_MISSING = None
 try:
     import pandas as pd
     from dbfread import DBF
     from sqlalchemy import create_engine, text
-except ImportError:
-    sys.exit("pip install pandas dbfread sqlalchemy pyodbc")
+except ImportError as _e:
+    pd = DBF = create_engine = text = None
+    _MISSING = str(_e)
+
+
+def _require_deps():
+    """Called at the top of main(). Fails loudly, at the right moment."""
+    if _MISSING:
+        raise SystemExit(
+            f"enrich_from_dbf needs pandas, dbfread, sqlalchemy and pyodbc "
+            f"({_MISSING}).\n  pip install pandas dbfread sqlalchemy pyodbc")
 
 DEFAULT_DBF_DIR = Path(
     r"C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai"
@@ -227,6 +245,7 @@ def enrich_county(engine, dbf_lookup, county_fips, dry_run=False):
 
 
 def main():
+    _require_deps()
     ap = argparse.ArgumentParser(description="Enrich dv_well from RRC API DBF files")
     ap.add_argument("--dbf-dir", type=Path, default=DEFAULT_DBF_DIR)
     ap.add_argument("--conn", default=DEFAULT_CONN)

@@ -1,0 +1,6 @@
+py -m dataview.migration.synth_data --wells 300 --out C:\synth --seed 42 --area-seed "C:\Users\perry\OneDrive\Documents\PPDM\PPDM_REFERENCE_LISTS\seed_dbo_area_country_state_county.csv"
+py -m dataview.migration.synth_docs --wells-csv C:\synth\dv_well.csv --out C:\synth_docs --per-well 3
+
+Fifty Wells
+py -m dataview.migration.synth_data --wells 50 --states 42 --out C:\synth_tx --area-seed "C:\...\PPDM_REFERENCE_LISTS\seed_dbo_area_country_state_county.csv"
+py -m dataview.migration.synth_docs --wells-csv C:\synth_tx\dv_well.csv --out C:\synth_tx_docs --per-well 3

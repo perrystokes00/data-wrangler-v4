@@ -34,7 +34,12 @@ def _q(name):
     return "[" + str(name).replace("]", "]]") + "]"
 
 
-def _col_checks(src, tgt_type, tgt_len, notnull):
+# identifier target columns promote de-separates before insert — must match
+# bulk_dir_loader._IDENT, or the length check and the promote transform disagree.
+_IDENT = {"uwi", "api", "api_num", "api_number", "api_no", "api14", "api_14"}
+
+
+def _col_checks(src, tgt_type, tgt_len, notnull, is_ident=False):
     """Conditional aggregates for one column → list of (alias, sql_expr)."""
     v = f"NULLIF(LTRIM(RTRIM(s.{_q(src)})),'')"
     out = [(f"n_blank__{src}", f"SUM(CASE WHEN {v} IS NULL THEN 1 ELSE 0 END)")]
@@ -45,8 +50,14 @@ def _col_checks(src, tgt_type, tgt_len, notnull):
                     f"SUM(CASE WHEN {v} IS NOT NULL AND TRY_CONVERT(float, {v}) IS NULL "
                     f"THEN 1 ELSE 0 END)"))
     elif t in _DATE:
+        # Day-first-safe validity check — MUST match bulk_dir_loader._typed's promote
+        # transform: try style 105 (dd-mm-yyyy) first, then the default parse. Without
+        # this the checker used only the US default and flagged every day-first date
+        # (e.g. 18-09-1992) as "won't convert" — false alarms the load wouldn't hit.
         out.append((f"n_badtype__{src}",
-                    f"SUM(CASE WHEN {v} IS NOT NULL AND TRY_CONVERT(datetime2, {v}) IS NULL "
+                    f"SUM(CASE WHEN {v} IS NOT NULL "
+                    f"AND COALESCE(TRY_CONVERT(datetime2, {v}, 105), "
+                    f"TRY_CONVERT(datetime2, {v})) IS NULL "
                     f"THEN 1 ELSE 0 END)"))
         # a column holding BOTH d/m/y-ish and ISO values is ambiguous, not just convertible
         out.append((f"n_slash__{src}",
@@ -55,9 +66,17 @@ def _col_checks(src, tgt_type, tgt_len, notnull):
                     f"SUM(CASE WHEN {v} LIKE '[12][0-9][0-9][0-9]-[0-9][0-9]-%' "
                     f"THEN 1 ELSE 0 END)"))
     if t in _TEXT and tgt_len and tgt_len > 0:
+        # Measure the length promote will ACTUALLY insert. Promote de-separates identifier
+        # columns only (uwi/api...) — REPLACE(REPLACE(REPLACE(x,'-',''),' ',''),'.','') — so a
+        # 17-char '<uwi>-SRVY' fits a char(14) target once stripped and must not be flagged.
+        # But a text column (well_name, operator) is inserted verbatim, so stripping its length
+        # would UNDER-report a real overflow. Mirror promote exactly: strip iff identifier.
+        # `is_ident` is passed in, matching bulk_dir_loader._IDENT on the TARGET column.
+        lv = (f"LEN(REPLACE(REPLACE(REPLACE({v},'-',''),' ',''),'.',''))" if is_ident
+              else f"LEN({v})")
         out.append((f"n_long__{src}",
-                    f"SUM(CASE WHEN LEN({v}) > {int(tgt_len)} THEN 1 ELSE 0 END)"))
-        out.append((f"maxlen__{src}", f"MAX(LEN({v}))"))
+                    f"SUM(CASE WHEN {lv} > {int(tgt_len)} THEN 1 ELSE 0 END)"))
+        out.append((f"maxlen__{src}", f"MAX({lv})"))
 
     # Excel mangles long identifiers into scientific notation — 42329100010000 -> 4.23291E+13.
     out.append((f"n_sci__{src}",
@@ -93,7 +112,8 @@ def profile(engine, stg_table, cmap, coltypes, collens, notnulls=None):
     aliases, exprs = [], []
     for src, tgt in cmap.items():
         tl = str(tgt).lower()
-        for alias, expr in _col_checks(src, coltypes.get(tl), collens.get(tl), tl in notnulls):
+        for alias, expr in _col_checks(src, coltypes.get(tl), collens.get(tl),
+                                       tl in notnulls, is_ident=(tl in _IDENT)):
             aliases.append(alias)
             exprs.append(f"{expr} AS {_q(alias)}")
     sql = f"SELECT COUNT(*) AS n_rows, {', '.join(exprs)} FROM {stg_table} s"

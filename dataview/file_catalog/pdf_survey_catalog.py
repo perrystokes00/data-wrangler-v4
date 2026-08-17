@@ -80,6 +80,58 @@ def get_pdf(path: str) -> dict:
         rec["text_first"]  = rec["pages"][0] if rec["pages"] else ""
         rec["text_first3"] = " ".join(rec["pages"][:3])
         rec["text_all"]    = "\n".join(rec["pages"])
+
+        # ── Annotation harvest ────────────────────────────────────────────
+        # Some PDFs carry the UWI only in a FreeText/Widget ANNOTATION (e.g. a
+        # value typed in with a PDF editor), never in the content stream, so
+        # extract_text() above misses it. Pull annotation + AcroForm text and
+        # append it — in a LABELLED form ("UWI: <digits>") so the existing
+        # label-anchored INFO_PATTERNS["uwi"] catches it without a loose
+        # bare-digit rule that could mis-grab body numbers. Best-effort; any
+        # failure leaves text_all exactly as it was.
+        try:
+            import re as _re
+            from pypdf import PdfReader as _PdfReader
+            _atxt = []
+            _r = _PdfReader(path)
+            for _pg in _r.pages:
+                for _a in (_pg.get("/Annots") or []):
+                    try:
+                        _o = _a.get_object()
+                    except Exception:
+                        continue
+                    for _k in ("/Contents", "/V", "/RC"):
+                        _val = _o.get(_k)
+                        if not _val:
+                            continue
+                        _t = str(_val)
+                        _t = _re.sub(r"<[^>]+>", " ", _t)   # strip XHTML (/RC rich text)
+                        if _t.strip():
+                            _atxt.append(_t.strip())
+            # AcroForm field values
+            try:
+                _flds = _r.get_fields() or {}
+                for _fv in _flds.values():
+                    _v = getattr(_fv, "value", None) or (_fv.get("/V") if hasattr(_fv, "get") else None)
+                    if _v:
+                        _atxt.append(str(_v).strip())
+            except Exception:
+                pass
+            if _atxt:
+                _joined = " ".join(_atxt)
+                rec["had_annotations"] = True
+                # If a bare 14-digit UWI (or dashed API) is present in the
+                # annotation, surface it label-anchored so classify_pdf resolves it.
+                _m = _re.search(r"\b(\d{14})\b", _joined) or \
+                     _re.search(r"\b(\d{2}-\d{3}-\d{5}(?:-\d{2}){0,2})\b", _joined)
+                if _m:
+                    rec["annotation_uwi"] = _re.sub(r"[^0-9]", "", _m.group(1))
+                    _joined = f"UWI: {_m.group(1)} " + _joined
+                rec["text_all"]    = rec["text_all"]   + "\n" + _joined
+                rec["text_first"]  = rec["text_first"] + "\n" + _joined
+                rec["text_first3"] = rec["text_first3"]+ "\n" + _joined
+        except Exception:
+            pass
     except Exception as e:                       # noqa: BLE001
         rec["error"] = str(e)
 

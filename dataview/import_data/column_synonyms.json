@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "global": {
+    "GROUND_ELEV": [
+      "ground_elevation"
+    ],
+    "KB_ELEV": [
+      "kb_elevation",
+      "kelly_bushing_elevation"
+    ],
+    "DERRICK_FLOOR_ELEV": [
+      "derrick_floor_elevation"
+    ],
+    "ROTARY_TABLE_ELEV": [
+      "rotary_table_elevation"
+    ],
+    "DEPTH_DATUM_ELEV": [
+      "depth_datum_elevation"
+    ],
+    "WELL_LOG_ID": [
+      "log_id"
+    ]
+  },
+  "by_table": {
+    "well": {
+      "OPERATOR": [
+        "operator_ba_id",
+        "current_operator_ba_id"
+      ],
+      "ASSIGNED_FIELD": [
+        "field_id"
+      ],
+      "CURRENT_STATUS": [
+        "well_status"
+      ],
+      "PRIMARY_SOURCE": [
+        "source"
+      ],
+      "ENVIRONMENT_TYPE": [
+        "onshore_offshore_ind"
+      ]
+    },
+    "well_log": {
+      "WELL_LOG_ID": [
+        "log_id"
+      ]
+    },
+    "well_log_curve": {
+      "WELL_LOG_SOURCE": [
+        "source"
+      ],
+      "REPORTED_MNEMONIC": [
+        "mnemonic"
+      ],
+      "REPORTED_DESC": [
+        "curve_description"
+      ],
+      "REPORTED_UNIT_MNEMONIC": [
+        "curve_unit"
+      ],
+      "NULL_REPRESENTATION": [
+        "null_value"
+      ]
+    }
+  }
+}

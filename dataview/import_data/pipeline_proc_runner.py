@@ -59,6 +59,25 @@ def run(cfg: dict) -> dict:
         parse_mode="process",                       # the whole point
         do_enrich=bool(cfg.get("do_enrich", True)),
         do_capture=bool(cfg.get("do_capture", True)),
+        # THE RECOGNISER STAGE. _common is spelled out key by key rather than
+        # forwarded wholesale, so a new toggle in the UI reaches run_pipeline
+        # ONLY if it is named here — which is exactly how the recognise flag
+        # sat unused: complete in pipeline_run, offered by the CLI, and
+        # dropped on the floor by the detached path the UI actually uses.
+        # Default TRUE so a runner from an older UI still gets it; the page
+        # sends the key explicitly either way. run_pipeline_batched takes
+        # **kw and passes it through, so both paths are covered.
+        recognise=bool(cfg.get("recognise", True)),
+        pack=cfg.get("pack", "petroleum"),
+        # FORCE RE-EXTRACT. Same reason as the note above: named here or it
+        # never arrives. Without it the pipeline skips any file already
+        # CATALOGED with an unchanged hash — correct on a re-run over a big
+        # tree, and wrong the moment the CODE changes, which is how 1,638 LAS
+        # files sat "already done" while nothing had ever processed them.
+        force=bool(cfg.get("force", False)),
+        # The database-wide rollup is off by default; a caller that
+        # actually wants the markdown report can ask for it.
+        deep_rollup=bool(cfg.get("deep_rollup", False)),
         dialect=cfg.get("dialect", "mssql"),
         do_deep=bool(cfg.get("do_deep", False)),
         do_vault=bool(cfg.get("do_vault", False)),

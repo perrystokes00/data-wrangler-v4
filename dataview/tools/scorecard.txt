@@ -1,0 +1,4 @@
+python -m dataview.tools.scorecard --server "localhost\SQLEXPRESS" `
+>>   --database DataView_Demo --open
+65 table(s), 29,147 row(s), 384 document(s)
+-> scorecard_DataView_Demo.html

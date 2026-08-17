@@ -1,7 +1,0 @@
-digraph overview {
-  rankdir=LR; bgcolor="transparent";
-  node [shape=box, style="filled,rounded", fontname="Helvetica", fontcolor="white", color="#2a2f3a"];
-  edge [dir=none, color="#888780"];
-  DOCUMENTS [label="Documents & Catalog\n10 tables · 1,920 rows", fillcolor="#9AA0A6"];
-  OTHER [label="Other\n2 tables · 0 rows", fillcolor="#888780"];
-}

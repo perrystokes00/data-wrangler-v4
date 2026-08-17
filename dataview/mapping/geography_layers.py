@@ -1,191 +1,195 @@
-"""geography_layers.py — render DataView v3 spatial geography on the folium map.
-
-Each dv_* table that now carries a `geog GEOGRAPHY` column (fields, land tracts,
-boundaries, pipelines, seismic sets — plus well POINTs) is read as WKT and drawn
-as its own toggleable folium FeatureGroup, styled per feature type, with a popup
-of the row's key attributes.
-
-Kept as a standalone module so page_well_map.py only needs a few one-line calls.
-
-Design notes:
-  • geog.STAsText() must run with QUOTED_IDENTIFIER ON (spatial methods require
-    it). We set it per-connection via `SET QUOTED_IDENTIFIER ON` at the top of
-    each query — SQLAlchemy/pyodbc usually has it on already, but this is a belt-
-    and-braces guard so a raw connection can't fail.
-  • WKT → GeoJSON via shapely (already a geopandas dependency). No reprojection
-    needed: the geography is stored in SRID 4326 (lon/lat) already.
-  • Polygons and lines use folium.GeoJson; well points use CircleMarker so they
-    read as dots, not shapes.
-"""
+# ═══════════════════════════════════════════════════════════════════════════
+# dataview/mapping/geography_layers.py
+# Geography feature layers from dataview.dv_*.geog — a real importable module.
+# ───────────────────────────────────────────────────────────────────────────
+# HISTORY: the previous file was a PASTE-ME SNIPPET ("paste these into
+# page_well_map.py") that was deployed as a module. It had no imports of its
+# own, a different function signature, and no "seismic" layer — so
+# `from ... import add_geography_layer, add_well_points` failed on every load
+# and the page's try/except silently blanked the whole Seismic pill
+# (diagnosed July 28 via probe_seismic_pill.py).
+#
+# PUBLIC API (what page_well_map imports):
+#   add_geography_layer(m, engine, key, show=True) -> int   # features added
+#       key in {"fields", "leases", "boundaries", "pipelines", "seismic"}
+#   add_well_points(m, engine, show=True) -> int            # wells added
+#
+# Design rules honoured here:
+#   * Optional columns are checked AT RUNTIME via INFORMATION_SCHEMA, never
+#     assumed from a DDL snapshot — a missing extra column drops that column,
+#     not the layer; a missing table or geog column skips the layer cleanly.
+#   * No streamlit dependency: failures print and return 0 so the layer
+#     degrades to nothing, not to an exception that kills sibling layers.
+#   * geog.STAsText() gives WKT in (lon lat); shapely.mapping() emits GeoJSON
+#     [lon, lat] — exactly what folium.GeoJson wants, so no coordinate swap.
+# ═══════════════════════════════════════════════════════════════════════════
 from __future__ import annotations
 
-import json
-
-try:
-    import folium
-except Exception:                      # pragma: no cover
-    folium = None
-
-try:
-    from shapely import wkt as _wkt
-    from shapely.geometry import mapping as _mapping
-    _HAS_SHAPELY = True
-except Exception:                      # pragma: no cover
-    _HAS_SHAPELY = False
-
+import folium
 from sqlalchemy import text
 
-
-# ── per-layer configuration ────────────────────────────────────────────────
-# table, display name, geom kind (poly|line|point), color, the name column and
-# the attribute columns to show in the popup.
-_LAYERS = {
-    "fields": {
-        "table": "dataview.dv_field", "name": "🟩 Fields", "kind": "poly",
-        "color": "#2e8b57", "fill": "#2e8b57", "fill_op": 0.20,
-        "name_col": "field_name",
-        "attrs": ["field_name", "field_type", "province_state", "country"],
-    },
-    "leases": {
-        "table": "dataview.dv_land_tract", "name": "🟦 Leases / Tracts", "kind": "poly",
-        "color": "#1e6fd6", "fill": "#1e6fd6", "fill_op": 0.15,
-        "name_col": "tract_name",
-        "attrs": ["tract_name", "lease_number", "operator_name", "province_state"],
-    },
-    "boundaries": {
-        "table": "dataview.dv_boundary", "name": "🟪 Boundaries", "kind": "poly",
-        "color": "#7b3fbf", "fill": "#7b3fbf", "fill_op": 0.10,
-        "name_col": "boundary_name",
-        "attrs": ["boundary_name", "boundary_type", "province_state"],
-    },
-    "pipelines": {
-        "table": "dataview.dv_pipeline", "name": "➖ Pipelines", "kind": "line",
-        "color": "#d95f0e", "fill": None, "fill_op": 0.0,
-        "name_col": "pipeline_name",
-        "attrs": ["pipeline_name", "operator_name", "commodity", "province_state"],
-    },
-    "seismic": {
-        "table": "dataview.dv_seis_set", "name": "🟪 Seismic Surveys", "kind": "poly",
-        "color": "#c2185b", "fill": "#c2185b", "fill_op": 0.12,
-        "name_col": "seis_set_name",
-        "attrs": ["seis_set_name", "seis_set_type"],
-    },
+# key -> (table, name_col, extra_cols, color, label, fill)
+_LAYER_KEYS = {
+    "fields":     ("dv_field",      "field_name",
+                   ["field_type", "basin_name"],      "#e67e22",
+                   "🟩 Fields (geog)",           True),
+    "leases":     ("dv_land_tract", "tract_name",
+                   ["lease_number", "operator_name"], "#3498db",
+                   "🟦 Leases (geog)",           True),
+    "boundaries": ("dv_boundary",   "boundary_name",
+                   ["boundary_type"],                 "#7f8c8d",
+                   "🟪 Boundaries (geog)",       True),
+    "pipelines":  ("dv_pipeline",   "pipeline_name",
+                   ["commodity", "operator_name"],    "#c0392b",
+                   "➖ Pipelines (geog)",        False),   # lines: no fill
+    # Survey FOOTPRINTS only (dv_seis_set.geog is polygons-only by promote
+    # rule; the per-line LINESTRINGs live on dv_seis_line.geog and are drawn
+    # by page_well_map._seismic_line_paths, not by this layer).
+    "seismic":    ("dv_seis_set",   "seis_set_name",
+                   ["seis_set_type", "epsg_code"],    "#0E6E6E",
+                   "🟦 Seismic surveys (geog)",  True),
 }
 
 
-def _fetch_wkt_rows(engine, table, name_col, attrs):
-    """Return [(name, {attr:val,...}, wkt), …] for rows with non-null geog."""
-    cols = ", ".join(dict.fromkeys([name_col] + list(attrs)))   # dedupe, keep order
-    sql = (f"SET QUOTED_IDENTIFIER ON; "
-           f"SELECT {cols}, geog.STAsText() AS _wkt "
-           f"FROM {table} WHERE geog IS NOT NULL")
-    out = []
-    with engine.connect() as con:
-        for row in con.execute(text(sql)).mappings():
-            wkt = row.get("_wkt")
-            if not wkt:
-                continue
-            props = {a: (None if row.get(a) is None else str(row.get(a)))
-                     for a in attrs}
-            out.append((row.get(name_col), props, wkt))
-    return out
-
-
-def _geojson_feature(wkt_str, props):
-    geom = _wkt.loads(wkt_str)
-    return {"type": "Feature", "geometry": _mapping(geom), "properties": props}
-
-
-def add_geography_layer(m, engine, key, show=False, log=None):
-    """Add one configured geography layer (key ∈ _LAYERS) to the folium map `m`.
-    Returns the feature count drawn (0 if none / unavailable)."""
-    if folium is None or not _HAS_SHAPELY:
-        return 0
-    cfg = _LAYERS.get(key)
-    if not cfg:
-        return 0
-    try:
-        rows = _fetch_wkt_rows(engine, cfg["table"], cfg["name_col"], cfg["attrs"])
-    except Exception as e:
-        if log:
-            log(f"{cfg['name']}: query failed ({str(e).splitlines()[0][:80]})")
-        return 0
-    if not rows:
-        return 0
-
-    feats = []
-    for _name, props, wkt_str in rows:
-        try:
-            feats.append(_geojson_feature(wkt_str, props))
-        except Exception:
-            continue
-    if not feats:
-        return 0
-    gj = {"type": "FeatureCollection", "features": feats}
-
-    color   = cfg["color"]
-    fill    = cfg.get("fill")
-    fill_op = cfg.get("fill_op", 0.0)
-    is_line = cfg["kind"] == "line"
-
-    def _style(_f, c=color, fc=fill, fo=fill_op, ln=is_line):
-        s = {"color": c, "weight": 3 if ln else 1.5,
-             "opacity": 0.9, "fillOpacity": 0.0 if ln else fo}
-        if fc and not ln:
-            s["fillColor"] = fc
-        return s
-
-    fg = folium.FeatureGroup(name=cfg["name"], show=show)
-    valid_attrs = [a for a in cfg["attrs"]]
-    folium.GeoJson(
-        gj, style_function=_style,
-        highlight_function=lambda _f: {"weight": 5, "color": "#ffcc00"},
-        tooltip=folium.GeoJsonTooltip(fields=valid_attrs, sticky=True),
-        popup=folium.GeoJsonPopup(fields=valid_attrs, max_width=320),
-    ).add_to(fg)
-    fg.add_to(m)
-    return len(feats)
-
-
-def add_well_points(m, engine, show=False, color="#f97316", log=None):
-    """Draw dv_well.geog POINTs as small orange CircleMarkers (a light spatial
-    dot layer, distinct from the rich clustered Wells layer). Returns count."""
-    if folium is None:
-        return 0
-    sql = ("SET QUOTED_IDENTIFIER ON; "
-           "SELECT well_name, geog.Lat AS lat, geog.Long AS lon "
-           "FROM dataview.dv_well WHERE geog IS NOT NULL")
+def _table_columns(engine, table: str) -> set:
+    """Column names actually on dataview.<table> right now (sys view, not a
+    DDL snapshot). Empty set = table missing."""
     try:
         with engine.connect() as con:
-            rows = list(con.execute(text(sql)).mappings())
-    except Exception as e:
-        if log:
-            log(f"well points: query failed ({str(e).splitlines()[0][:80]})")
+            rows = con.execute(text(
+                "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = 'dataview' AND TABLE_NAME = :t"),
+                {"t": table}).fetchall()
+        return {r[0].lower() for r in rows}
+    except Exception as exc:
+        print(f"[geography_layers] column probe failed for {table}: {exc}")
+        return set()
+
+
+def _qry_geography(engine, table: str, name_col: str, extra_cols: list):
+    """[{nm, wkt, ...extras}] for one table. Missing extras are dropped;
+    missing table/geog/name column skips the layer (returns [])."""
+    have = _table_columns(engine, table)
+    if not have or "geog" not in have:
+        return [], []
+    extras = [c for c in extra_cols if c.lower() in have]
+    nm_expr = (name_col if name_col.lower() in have else "NULL")
+    cols = ", ".join([f"{nm_expr} AS nm"] + [f"{c} AS {c}" for c in extras])
+    sql = f"""
+        SELECT {cols}, geog.STAsText() AS wkt
+        FROM dataview.{table}
+        WHERE geog IS NOT NULL AND geog.STIsValid() = 1
+    """
+    try:
+        with engine.connect() as con:
+            rows = con.execute(text(sql)).mappings().fetchall()
+        return [dict(r) for r in rows], extras
+    except Exception as exc:
+        print(f"[geography_layers] {table} query failed: {exc}")
+        return [], extras
+
+
+def _geography_geojson(features: list, extra_cols=None) -> dict:
+    """WKT rows -> GeoJSON FeatureCollection (properties: name + extras)."""
+    import shapely.wkt
+    from shapely.geometry import mapping
+    extra_cols = extra_cols or []
+    feats = []
+    for r in features:
+        wkt = r.get("wkt")
+        if not wkt:
+            continue
+        try:
+            geom = shapely.wkt.loads(wkt)
+        except Exception:
+            continue
+        if geom.is_empty:
+            continue
+        props = {"name": r.get("nm") or "(unnamed)"}
+        for c in extra_cols:
+            v = r.get(c)
+            props[c] = "" if v is None else str(v)
+        feats.append({"type": "Feature", "geometry": mapping(geom),
+                      "properties": props})
+    return {"type": "FeatureCollection", "features": feats}
+
+
+def add_geography_layer(m, engine, key: str, show: bool = True) -> int:
+    """Add one dv_*.geog feature layer as a toggleable FeatureGroup on `m`.
+    Returns the number of features added (0 = nothing to draw / table absent
+    / query failed — printed, never raised)."""
+    cfg = _LAYER_KEYS.get(key)
+    if cfg is None:
+        print(f"[geography_layers] unknown layer key {key!r} "
+              f"(known: {sorted(_LAYER_KEYS)})")
+        return 0
+    table, name_col, extra_cols, color, label, fill = cfg
+    rows, extras = _qry_geography(engine, table, name_col, extra_cols)
+    if not rows:
+        return 0
+    gj = _geography_geojson(rows, extras)
+    if not gj["features"]:
+        return 0
+
+    def _style(_feat, _c=color, _fill=fill):
+        s = {"color": _c, "weight": 2, "opacity": 0.85}
+        s.update({"fillColor": _c, "fillOpacity": 0.18} if _fill
+                 else {"fillOpacity": 0.0})
+        return s
+
+    fg = folium.FeatureGroup(name=f"{label} ({len(gj['features']):,})",
+                             show=show)
+    tip_fields = ["name"] + extras
+    tip_aliases = ["Name"] + [c.replace("_", " ").title() for c in extras]
+    folium.GeoJson(
+        gj,
+        style_function=_style,
+        highlight_function=lambda _f, _c=color: {"weight": 4, "color": _c},
+        tooltip=folium.GeoJsonTooltip(fields=tip_fields, aliases=tip_aliases,
+                                      sticky=True),
+    ).add_to(fg)
+    fg.add_to(m)
+    return len(gj["features"])
+
+
+def add_well_points(m, engine, show: bool = True, limit: int = 5000) -> int:
+    """dv_well.geog as plain CircleMarkers — the native-geography view of the
+    well set, independent of the lat/lon columns the main markers use.
+    geography .Lat/.Long avoids WKT parsing entirely."""
+    have = _table_columns(engine, "dv_well")
+    if not have or "geog" not in have:
+        return 0
+    nm = "well_name" if "well_name" in have else ("uwi" if "uwi" in have
+                                                  else "NULL")
+    try:
+        with engine.connect() as con:
+            rows = con.execute(text(f"""
+                SELECT TOP {int(limit)} {nm} AS nm,
+                       geog.Lat AS lat, geog.Long AS lon
+                FROM dataview.dv_well
+                WHERE geog IS NOT NULL
+            """)).fetchall()
+    except Exception as exc:
+        print(f"[geography_layers] dv_well points query failed: {exc}")
         return 0
     if not rows:
         return 0
-    fg = folium.FeatureGroup(name="⚫ Well points (geog)", show=show)
-    n = 0
-    for r in rows:
-        lat, lon = r.get("lat"), r.get("lon")
-        if lat is None or lon is None:
+    fg = folium.FeatureGroup(name=f"⚫ Well points (geog) ({len(rows):,})",
+                             show=show)
+    for nm_v, la, lo in rows:
+        try:
+            la, lo = float(la), float(lo)
+        except (TypeError, ValueError):
             continue
         folium.CircleMarker(
-            [float(lat), float(lon)], radius=3,
-            color=color, weight=1, fill=True,
-            fill_color=color, fill_opacity=0.75,
-            tooltip=str(r.get("well_name") or "")).add_to(fg)
-        n += 1
+            location=[la, lo], radius=3, color="#222", weight=1,
+            fill=True, fill_color="#555", fill_opacity=0.9,
+            tooltip=str(nm_v or ""),
+        ).add_to(fg)
     fg.add_to(m)
-    return n
+    return len(rows)
 
 
-def add_all_geography(m, engine, keys=None, well_points=False, log=None):
-    """Convenience: add every configured geography layer (or a subset via `keys`).
-    Returns {layer_key: count}. LayerControl in the caller lets users toggle them."""
-    counts = {}
-    for k in (keys or _LAYERS.keys()):
-        counts[k] = add_geography_layer(m, engine, k, show=False, log=log)
-    if well_points:
-        counts["well_points"] = add_well_points(m, engine, show=False, log=log)
-    return counts
+def add_all_geography_layers(m, engine) -> int:
+    """Back-compat convenience: every configured layer at once."""
+    return sum(add_geography_layer(m, engine, k) for k in _LAYER_KEYS)

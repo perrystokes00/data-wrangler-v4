@@ -1,0 +1,57 @@
+(venv) PS C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean> python tools\sync_schema.py
+==========================================================================
+schema sync — localhost\SQLEXPRESS · DataView_Demo · dataview
+registry: C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean\dataview\schema_registry
+==========================================================================
+
+BEFORE
+  dataview_fk_catalog.json       2026-07-17 19:25:51   v3 loader (bulk_dir_loader)
+  dataview_schema_full.json      2026-07-17 19:25:51   the DDL contract
+  dataview_schema_domain.json    2026-07-17 20:28:15   v2 pipeline (page_pipeline, core/schema.py)
+
+BACKUP
+  dataview_fk_catalog.json -> dataview_fk_catalog.20260717_204015.bak
+  dataview_schema_full.json -> dataview_schema_full.20260717_204015.bak
+  dataview_schema_domain.json -> dataview_schema_domain.20260717_204015.bak
+  (dataview_schema_full.json is the reference for the relax_notnull_ddl.sql
+   restore list — the diff is against the PRE-relax copy, so keep these.)
+
+-- gen_schema_catalog.py  ->  fk_catalog + schema_full
+   C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean\venv\Scripts\python.exe C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean\tools\gen_schema_catalog.py --server localhost\SQLEXPRESS --db DataView_Demo --schema dataview --out C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean\dataview\schema_registry
+   | ✓ C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean\dataview\schema_registry\dataview_fk_catalog.json
+   | ✓ C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean\dataview\schema_registry\dataview_schema_full.json
+   |   tables: 66   columns: 1483   FKs: 109
+   |   kinds:  data=59, entity=2, reference=5
+   |   all FK parents resolve within the schema ✓
+
+-- build_schema_domain.py  ->  schema_domain
+   C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean\venv\Scripts\python.exe C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean\tools\build_schema_domain.py --dialect sqlserver --server localhost\SQLEXPRESS --database DataView_Demo --windows-auth --schema dataview --out C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean\dataview\schema_registry\dataview_schema_domain.json
+   | PPDM Schema Domain Builder — SQLSERVER
+   | ==================================================
+   |   Connected: Microsoft SQL Server 2022 (RTM-CU25-GDR) (KB5101347) - 16.0.
+   |   Fetching columns...
+   |   1,483 columns fetched
+   |   Fetching primary keys...
+   |   Fetching foreign keys...
+   |   Fetching check constraints...
+   |   Assembling schema domain rows...
+   |
+   |   1,483 column rows across 66 tables
+   |   Written to: C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean\dataview\schema_registry\dataview_schema_domain.json  (711 KB)
+   | Done ✓
+
+AFTER
+  dataview_fk_catalog.json       2026-07-17 20:40:35  rewritten  (+0 bytes)
+  dataview_schema_full.json      2026-07-17 20:40:35  rewritten  (+0 bytes)
+  dataview_schema_domain.json    2026-07-17 20:40:55  rewritten  (+0 bytes)
+
+VERIFY
+  PASS  dataview_fk_catalog.json       'INVENTORY_ID' x39
+  PASS  dataview_schema_full.json      'INVENTORY_ID' x40
+  PASS  dataview_schema_domain.json    'INVENTORY_ID' x39
+
+==========================================================================
+All catalogs regenerated and verified.
+Restart the app (Streamlit caches imported modules AND the parsed catalog:
+bulk_dir_loader._catalog_json keys its cache on the PATH, not the mtime — so a
+regenerated file at the same path is not re-read until the process restarts).

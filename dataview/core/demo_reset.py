@@ -8,6 +8,12 @@ tables are preserved:
   • dv_country / dv_province_state / dv_county spatial reference (seeded from
     authoritative D12A data — must never be auto-cleared)
 
+LEARNED STATE is also preserved, for a different reason:
+  • dv_column_map        every approved column mapping / fingerprint recall
+  • dv_target_attribute  schema metadata the fit pre-flight reads
+Reference tables could be re-seeded from source if lost. These could not be
+recovered at all — they are decisions somebody made, one file at a time.
+
 full=False: clears only dv_well + everything that FK-references it (closure),
 leaving reference and inventory data in place.
 
@@ -21,7 +27,9 @@ from sqlalchemy import text
 
 # Bump this whenever the reset logic changes. app_v3 displays it next to the
 # Reset button so you can SEE which version is live after a deploy + restart.
-RESET_VERSION = "2026-06-24 truncate full-wipe (keeps reference tables)"
+RESET_VERSION = ("2026-08-08 truncate full-wipe "
+                 "(keeps reference tables + dv_column_map, "
+                 "dv_column_synonym, dv_target_attribute)")
 
 # Tables to clear. dv_well* is a prefix match (covers dv_well and every
 # dv_well_<detail> table); the entity parents are matched by exact name.
@@ -36,6 +44,8 @@ _CLEAR_EXACT = {"dv_business_associate", "dv_field",
 
 def _should_clear(name: str) -> bool:
     low = name.lower()
+    if low in _PRESERVE_EXACT:
+        return False              # learned state, whichever path asks
     return low in _CLEAR_EXACT or any(low.startswith(p) for p in _CLEAR_PREFIXES)
 
 
@@ -43,10 +53,44 @@ def _should_clear(name: str) -> bool:
 # reset — they're seeded standards the pipeline FKs into, not loaded data.
 _REFERENCE_EXACT = {"dv_country", "dv_province_state", "dv_county"}
 
+# LEARNED STATE — survives a full wipe, and is NOT reference data.
+#
+# full=True empties every base table in the database except the reference
+# ones above. That is right for DATA, and wrong for the tables that hold
+# DECISIONS A PERSON MADE:
+#
+#   dv_column_map        the synonym store and fingerprint recall. Every
+#                        column mapping ever approved, keyed by source-file
+#                        pattern. It is why a remembered folder loads
+#                        without asking a single question. Months of
+#                        accumulated decisions — and a reload regenerates
+#                        the DATA but cannot regenerate these.
+#   dv_column_synonym    the column-level synonym store — the other half of
+#                        the same memory. It was protected here only by
+#                        ABSENCE from the clear list, which is the
+#                        "protected by omission is not protection" weakness
+#                        this set exists to remove. clear_catalog.PROTECTED
+#                        already names it; THE TWO RESET PATHS MUST PROTECT
+#                        THE SAME NAMES, and finding one guarded is not
+#                        evidence about the other.
+#   dv_target_attribute  schema metadata the fit pre-flight reads.
+#
+# Kept separate from _REFERENCE_EXACT deliberately: those are seeded
+# standards that could be re-seeded from source; these could not be
+# recovered at all. Two different reasons to survive, so two sets.
+_PRESERVE_EXACT = {"dv_column_map", "dv_column_synonym", "dv_target_attribute"}
+
 
 def _is_reference(name: str) -> bool:
     low = name.lower()
     return low.startswith("dv_r_") or low in _REFERENCE_EXACT
+
+
+def _is_preserved(name: str) -> bool:
+    """Learned state. Never cleared, and NOT gated on keep_reference —
+    somebody turning keep_reference off wants the seeds gone, not the
+    approved mappings."""
+    return name.lower() in _PRESERVE_EXACT
 
 
 def _all_tables(con) -> list:
@@ -246,7 +290,8 @@ def reset_demo_data(engine,
 
         if full:
             to_clear = [(s, t) for (s, t) in user
-                        if not (keep_reference and _is_reference(t))]
+                        if not (keep_reference and _is_reference(t))
+                        and not _is_preserved(t)]
             kept = len(user) - len(to_clear)
 
             if method == "truncate":

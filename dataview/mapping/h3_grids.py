@@ -38,6 +38,14 @@ RESOLUTIONS = (4, 5, 6, 7)
 H3_COLUMNS = tuple(f"h3_r{r}" for r in RESOLUTIONS)   # ('h3_r4', ... 'h3_r7')
 COORD_HASH_COLUMN = "h3_coord_hash"
 
+# BINARY(32), not CHAR(64). coord_hash() is a SHA-256, which is exactly 32
+# bytes; storing it as 64 hex characters doubles the width and invites two
+# instances of the same database to hold the same hash in different forms.
+# This build's live schema is binary, so the DDL now matches it — backfill
+# converts the hex text on the way in (see _assign_expr). Changing this back
+# would make new databases disagree with existing ones.
+COORD_HASH_DECL = "BINARY(32) NULL"
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # h3 version compat shim
@@ -117,6 +125,48 @@ def compute_h3_row(lat, lon, to_cell=None) -> dict:
 # ─────────────────────────────────────────────────────────────────────────
 # Layer A — backfill dv_well.h3_* from surface coordinates
 # ─────────────────────────────────────────────────────────────────────────
+def _target_types(engine, schema, table, cols):
+    """{column_upper: (type_name, max_length)} for the columns we write.
+
+    The staging table is created by pandas, so every column arrives as
+    varchar(max). That is fine for the cell ids, but dv_well.h3_coord_hash is
+    BINARY on this instance (ensure_h3_columns declares CHAR(64), and the two
+    disagree), and SQL Server refuses to convert varchar to binary implicitly:
+    "Implicit conversion from data type varchar(max) to binary is not allowed."
+    Reflecting the real type lets the UPDATE convert only where it must,
+    instead of assuming either shape.
+    """
+    out = {}
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT c.name, ty.name, c.max_length FROM sys.columns c "
+                "JOIN sys.types ty ON ty.user_type_id = c.user_type_id "
+                "WHERE c.object_id = OBJECT_ID(:o)"),
+                {"o": f"{schema}.{table}"}).fetchall()
+        want = {c.upper() for c in cols}
+        for name, tname, mlen in rows:
+            if name.upper() in want:
+                out[name.upper()] = (str(tname).lower(), int(mlen))
+    except Exception:
+        pass
+    return out
+
+
+def _assign_expr(col, types):
+    """Right-hand side for one column of the UPDATE ... JOIN.
+
+    Hex text -> binary needs CONVERT with style 2 (hex string, no 0x prefix),
+    which is exactly what coord_hash() produces. Everything else assigns
+    straight across.
+    """
+    tname, mlen = types.get(col.upper(), ("", 0))
+    if tname in ("binary", "varbinary"):
+        size = "max" if mlen == -1 else str(mlen)
+        return f"CONVERT(varbinary({size}), s.[{col}], 2)"
+    return f"s.[{col}]"
+
+
 def backfill_h3(engine,
                 schema: str = "dataview",
                 table: str = "dv_well",
@@ -159,7 +209,10 @@ def backfill_h3(engine,
 
     stg_table = f"{table}_h3_stage"
     cols = list(H3_COLUMNS) + [COORD_HASH_COLUMN]
-    set_clause = ", ".join(f"t.[{c}] = s.[{c}]" for c in cols)
+    # Reflect the destination types so a binary h3_coord_hash gets an explicit
+    # CONVERT rather than failing the whole statement (see _target_types).
+    _types = _target_types(engine, schema, table, cols)
+    set_clause = ", ".join(f"t.[{c}] = {_assign_expr(c, _types)}" for c in cols)
 
     # Stage, then one set-based UPDATE...JOIN.
     stage_df.to_sql(stg_table, engine, schema=stg_schema,
@@ -254,22 +307,41 @@ def has_coord_columns(engine, schema: str = "dataview", table: str = "dv_well",
 
 def ensure_h3_columns(engine, schema: str = "dataview",
                       table: str = "dv_well") -> list:
-    """Add h3_r4..h3_r7 (VARCHAR(16)) + h3_coord_hash (CHAR(64)) and indexes
-    on h3_r5/h3_r6 if they don't already exist. Returns the list of objects
-    actually created."""
+    """Add h3_r4..h3_r7 (VARCHAR(16)) + h3_coord_hash (BINARY(32)) and indexes
+    on h3_r5/h3_r6 if they don't already exist.
+
+    Returns the list of objects actually created. Existing columns are never
+    altered, but a h3_coord_hash whose type disagrees with COORD_HASH_DECL is
+    reported as a "!!" entry in that list so the divergence is visible instead
+    of silent.
+    """
     created = []
     coldefs = [(c, "VARCHAR(16) NULL") for c in H3_COLUMNS]
-    coldefs.append((COORD_HASH_COLUMN, "CHAR(64) NULL"))
+    coldefs.append((COORD_HASH_COLUMN, COORD_HASH_DECL))
     with engine.begin() as conn:
         for col, decl in coldefs:
-            exists = conn.execute(text(
-                "SELECT 1 FROM sys.columns "
-                "WHERE object_id = OBJECT_ID(:o) AND name = :c"),
+            row = conn.execute(text(
+                "SELECT ty.name, c.max_length FROM sys.columns c "
+                "JOIN sys.types ty ON ty.user_type_id = c.user_type_id "
+                "WHERE c.object_id = OBJECT_ID(:o) AND c.name = :c"),
                 {"o": f"{schema}.{table}", "c": col}).fetchone()
-            if not exists:
+            if not row:
                 conn.execute(text(
                     f"ALTER TABLE [{schema}].[{table}] ADD [{col}] {decl}"))
                 created.append(col)
+            elif col == COORD_HASH_COLUMN:
+                # The column already exists — never ALTER it out from under
+                # data. But DO report a shape that disagrees with what this
+                # function would create, because the two representations are
+                # not interchangeable: backfill writes hex text and converts on
+                # the way in, so a char(64) instance and a binary(32) instance
+                # hold the same hash in different forms and won't compare.
+                tname = str(row[0]).lower()
+                if tname not in ("binary", "varbinary"):
+                    created.append(
+                        f"!! {col} is {tname}({row[1]}) — this build expects "
+                        f"{COORD_HASH_DECL.split()[0]}; values are stored as "
+                        f"hex text here and as bytes elsewhere")
         for res in (5, 6):
             idx = f"IX_{table}_h3_r{res}"
             has_idx = conn.execute(text(

@@ -1,0 +1,138 @@
+(venv) PS C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean> python -m dataview.migration.ppdm_model --rebuild --stats
+-- localhost\SQLEXPRESS · PPDM39.dbo
+reflecting tables…
+  423 table(s) in scope
+reflecting columns…
+  13065 column(s)
+reflecting keys…
+  1364 PK column(s), 5501 FK column(s)
+built in 194.2s
+-- 423 tables · 13065 columns · 5177 FK columns · 5 categories
+   WELL             162 table(s)
+   OTHER            104 table(s)
+   SEISMIC           69 table(s)
+   STRATIGRAPHY      44 table(s)
+   PRODUCTION        44 table(s)
+(venv) PS C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_clean> python -m dataview.migration.ppdm_model --table well
+-- localhost\SQLEXPRESS · PPDM39.dbo
+-- 423 tables · 13065 columns · 5177 FK columns · 5 categories
+
+<Table well cols=118 pk=1 fk=63>
+   <Col UWI nvarchar(40) [PK, FK→well_area.UWI, NOT NULL]>
+   <Col ABANDONMENT_DATE date>
+   <Col ACTIVE_IND nvarchar(1)>
+   <Col AREA_ID nvarchar(40) [FK→well_area.AREA_ID]>
+   <Col AREA_TYPE nvarchar(40) [FK→well_area.AREA_TYPE]>
+   <Col ASSIGNED_FIELD nvarchar(40) [FK→field.FIELD_ID]>
+   <Col BASE_DEPTH numeric(15,5)>
+   <Col BASE_DEPTH_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col BASE_NODE_ID nvarchar(40) [FK→well_node.NODE_ID]>
+   <Col BASE_STRAT_NAME_SET_ID nvarchar(40) [FK→strat_unit.STRAT_NAME_SET_ID]>
+   <Col BASE_STRAT_UNIT_ID nvarchar(40) [FK→strat_unit.STRAT_UNIT_ID]>
+   <Col BOTTOM_HOLE_LATITUDE numeric(14,9)>
+   <Col BOTTOM_HOLE_LONGITUDE numeric(14,9)>
+   <Col CASING_FLANGE_ELEV numeric(10,5)>
+   <Col CASING_FLANGE_ELEV_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col COMPLETION_DATE date>
+   <Col CONFIDENTIAL_DATE datetime>
+   <Col CONFIDENTIAL_DEPTH numeric(15,5)>
+   <Col CONFIDENTIAL_DEPTH_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col CONFIDENTIAL_TYPE nvarchar(40) [FK→r_confidential_type.CONFIDENTIAL_TYPE]>
+   <Col CONFID_STRAT_NAME_SET_ID nvarchar(40) [FK→strat_unit.STRAT_NAME_SET_ID]>
+   <Col CONFID_STRAT_UNIT_ID nvarchar(40) [FK→strat_unit.STRAT_UNIT_ID]>
+   <Col CURRENT_CLASS nvarchar(40) [FK→r_well_class.WELL_CLASS]>
+   <Col CURRENT_STATUS nvarchar(40) [FK→r_well_status.STATUS]>
+   <Col CURRENT_STATUS_DATE datetime>
+   <Col DEEPEST_DEPTH numeric(15,5)>
+   <Col DEEPEST_DEPTH_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col DEPTH_DATUM nvarchar(40) [FK→r_well_datum_type.WELL_DATUM_TYPE]>
+   <Col DEPTH_DATUM_ELEV numeric(10,5)>
+   <Col DEPTH_DATUM_ELEV_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col DERRICK_FLOOR_ELEV numeric(10,5)>
+   <Col DERRICK_FLOOR_ELEV_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col DIFFERENCE_LAT_MSL numeric(10,5)>
+   <Col DISCOVERY_IND nvarchar(1)>
+   <Col DRILL_TD numeric(10,5)>
+   <Col DRILL_TD_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col EFFECTIVE_DATE datetime>
+   <Col ELEV_REF_DATUM nvarchar(40) [FK→r_water_datum.WATER_DATUM]>
+   <Col ENVIRONMENT_TYPE nvarchar(40) [FK→r_environment.ENVIRONMENT_TYPE]>
+   <Col EXPIRY_DATE datetime>
+   <Col FAULTED_IND nvarchar(1)>
+   <Col FINAL_DRILL_DATE datetime>
+   <Col FINAL_TD numeric(10,5)>
+   <Col FINAL_TD_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col GROUND_ELEV numeric(10,5)>
+   <Col GROUND_ELEV_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col GROUND_ELEV_TYPE nvarchar(40) [FK→r_well_datum_type.WELL_DATUM_TYPE]>
+   <Col INITIAL_CLASS nvarchar(40) [FK→r_well_class.WELL_CLASS]>
+   <Col KB_ELEV numeric(10,5)>
+   <Col KB_ELEV_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col LEASE_NAME nvarchar(255)>
+   <Col LEASE_NUM nvarchar(20)>
+   <Col LEGAL_SURVEY_TYPE nvarchar(40) [FK→r_legal_survey_type.LEGAL_SURVEY_TYPE]>
+   <Col LOCATION_TYPE nvarchar(40) [FK→r_location_type.LOCATION_TYPE]>
+   <Col LOG_TD numeric(10,5)>
+   <Col LOG_TD_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col MAX_TVD numeric(10,5)>
+   <Col MAX_TVD_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col NET_PAY numeric(10,5)>
+   <Col NET_PAY_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col OLDEST_STRAT_AGE nvarchar(40) [FK→strat_unit.STRAT_UNIT_ID]>
+   <Col OLDEST_STRAT_NAME_SET_AGE nvarchar(40) [FK→strat_unit.STRAT_NAME_SET_ID]>
+   <Col OLDEST_STRAT_NAME_SET_ID nvarchar(40) [FK→strat_unit.STRAT_NAME_SET_ID]>
+   <Col OLDEST_STRAT_UNIT_ID nvarchar(40) [FK→strat_unit.STRAT_UNIT_ID]>
+   <Col OPERATOR nvarchar(40) [FK→business_associate.BUSINESS_ASSOCIATE_ID]>
+   <Col PLATFORM_ID nvarchar(40) [FK→sf_platform.PLATFORM_ID]>
+   <Col PLATFORM_SF_SUBTYPE nvarchar(30) [FK→sf_platform.SF_SUBTYPE]>
+   <Col PLOT_NAME nvarchar(255)>
+   <Col PLOT_SYMBOL nvarchar(40) [FK→r_plot_symbol.PLOT_SYMBOL]>
+   <Col PLUGBACK_DEPTH numeric(15,5)>
+   <Col PLUGBACK_DEPTH_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col PPDM_GUID nvarchar(38)>
+   <Col PRIMARY_SOURCE nvarchar(40) [FK→r_source.SOURCE]>
+   <Col PROFILE_TYPE nvarchar(40) [FK→r_well_profile_type.WELL_PROFILE_TYPE]>
+   <Col REGULATORY_AGENCY nvarchar(40) [FK→business_associate.BUSINESS_ASSOCIATE_ID]>
+   <Col REMARK nvarchar(2000)>
+   <Col RIG_ON_SITE_DATE datetime>
+   <Col RIG_RELEASE_DATE datetime>
+   <Col ROTARY_TABLE_ELEV numeric(10,5)>
+   <Col ROTARY_TABLE_ELEV_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col SOURCE_DOCUMENT_ID nvarchar(40) [FK→source_document.SOURCE_DOCUMENT_ID]>
+   <Col SPUD_DATE date>
+   <Col STATUS_TYPE nvarchar(40) [FK→r_well_status.STATUS_TYPE]>
+   <Col SUBSEA_ELEV_REF_TYPE nvarchar(40) [FK→r_well_datum_type.WELL_DATUM_TYPE]>
+   <Col SURFACE_LATITUDE numeric(14,9)>
+   <Col SURFACE_LONGITUDE numeric(14,9)>
+   <Col SURFACE_NODE_ID nvarchar(40) [FK→well_node.NODE_ID]>
+   <Col TAX_CREDIT_CODE nvarchar(40) [FK→r_tax_credit_code.TAX_CREDIT_CODE]>
+   <Col TD_STRAT_AGE nvarchar(40) [FK→strat_unit.STRAT_UNIT_ID]>
+   <Col TD_STRAT_NAME_SET_AGE nvarchar(40) [FK→strat_unit.STRAT_NAME_SET_ID]>
+   <Col TD_STRAT_NAME_SET_ID nvarchar(40) [FK→strat_unit.STRAT_NAME_SET_ID]>
+   <Col TD_STRAT_UNIT_ID nvarchar(40) [FK→strat_unit.STRAT_UNIT_ID]>
+   <Col TOP_DEPTH numeric(15,5)>
+   <Col TOP_DEPTH_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col TOP_STRAT_NAME_SET_ID nvarchar(40) [FK→strat_unit.STRAT_NAME_SET_ID]>
+   <Col TOP_STRAT_UNIT_ID nvarchar(40) [FK→strat_unit.STRAT_UNIT_ID]>
+   <Col WATER_ACOUSTIC_VEL numeric(10,5)>
+   <Col WATER_ACOUSTIC_VEL_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col WATER_DEPTH numeric(15,5)>
+   <Col WATER_DEPTH_DATUM nvarchar(40) [FK→r_water_datum.WATER_DATUM]>
+   <Col WATER_DEPTH_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col WELL_EVENT_NUM nvarchar(4)>
+   <Col WELL_GOVERNMENT_ID nvarchar(40)>
+   <Col WELL_INTERSECT_MD numeric(10,5)>
+   <Col WELL_LEVEL_TYPE nvarchar(40) [FK→r_well_level_type.WELL_LEVEL_TYPE]>
+   <Col WELL_NAME nvarchar(255)>
+   <Col WELL_NUM nvarchar(20)>
+   <Col WHIPSTOCK_DEPTH numeric(15,5)>
+   <Col WHIPSTOCK_DEPTH_OUOM nvarchar(40) [FK→ppdm_unit_of_measure.UOM_ID]>
+   <Col ROW_CHANGED_BY nvarchar(30)>
+   <Col ROW_CHANGED_DATE datetime>
+   <Col ROW_CREATED_BY nvarchar(30)>
+   <Col ROW_CREATED_DATE datetime>
+   <Col ROW_EFFECTIVE_DATE datetime>
+   <Col ROW_EXPIRY_DATE datetime>
+   <Col ROW_QUALITY nvarchar(40) [FK→r_ppdm_row_quality.ROW_QUALITY_ID]>
+   <Col FORMATION_AT_TD varchar(80)>
+   <Col PRODUCING_FORMATION varchar(80)>

@@ -1,0 +1,52 @@
+{
+  "pack": "petroleum",
+  "version": 1,
+  "fields": {
+    "curve_mnem": [
+      "curve_name",
+      "mnemomic"
+    ]
+  },
+  "shapes": {
+    "drilling_parameters": {
+      "required": [
+        "parameter",
+        "units"
+      ],
+      "optional": [],
+      "min_required": 2,
+      "target": null
+    }
+  },
+  "columns": {},
+  "numeric": [],
+  "noise": [],
+  "disabled": [],
+  "log": [
+    {
+      "action": "note",
+      "at": "2026-08-04",
+      "note": "CLEANED. Every shape removed here is now IN THE BASE PACK (petroleum.py v8) in a BETTER form. Because an overlay shape REPLACES the base shape wholesale, keeping these stale copies was actively removing fields: formation_tops lost lithology/tvd/uwi (which is why UWI showed as an unmapped column), log_run_header lost date/top_md/base_md/interval/method/uwi and required only log_type at min_required 1 (greedy - it would claim any table with a log-type column), eow_summary_pairs lost md/total_depth/tvd/uwi/well_name, curve_summary lost lithology/stat_avg, daily_time_log lost method, production lost choke/days_on/gor/pressure."
+    },
+    {
+      "action": "note",
+      "at": "2026-08-04",
+      "note": "production also referenced a field 'boe' that does not exist and has no aliases - the source of the '!! production: field boe has no aliases' validation error. Removed with the rest of that shape. If BOE is wanted it needs a real field entry with wordings (boe, barrels of oil equivalent) added to the base pack, not a bare name in a shape."
+    },
+    {
+      "action": "note",
+      "at": "2026-08-04",
+      "note": "fluid_type REMOVED and it never worked: its only wording 'fluid' already resolves to fluid_vol in the base pack, both aliases are one token, they tie, and dict order keeps the incumbent. An alias cannot win a tie - only the pack can, by reordering or removing the loser's alias. The formation_tops table's Fluid column should be claimed as fluid_vol instead (Vocabulary tools > the claim form), or fluid_vol/fluid_type disambiguated in the base pack if the distinction matters."
+    },
+    {
+      "action": "note",
+      "at": "2026-08-04",
+      "note": "Field entries removed as redundant - the base pack already carries these exact wordings: time_slot (time, time hrs), rig_release (rig release), units (unit), stat_min (min value), stat_max (max value), log_type (log suite, survey type, log type), curve_mnem (curve). KEPT: curve_mnem's 'curve_name' and 'mnemomic' - genuine extra wordings, and 'mnemomic' is a real vendor misspelling worth matching."
+    },
+    {
+      "action": "note",
+      "at": "2026-08-04",
+      "note": "drilling_parameters KEPT because it is local only - it was deliberately not folded into the base pack, since parameter_stats already reads 'Parameter | Min | Max | Average | Units' at 1.00 and a shape requiring only parameter+units competes with key_value on every 'Parameter | Value | Units | Method' table. Watch it; retire it if key_value starts losing tables."
+    }
+  ]
+}

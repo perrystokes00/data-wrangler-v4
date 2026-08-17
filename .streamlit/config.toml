@@ -4,14 +4,30 @@
 # These four colors are read directly by glide-data-grid, so every table picks
 # up Midnight Gold automatically: slate cells, white text, gold selection.
 #
-# Values mirror the "Midnight Gold" entry in app_v3.py THEMES.
+# Values mirror the "Midnight Gold" entry in app_v4.py THEMES.
 # Note: this is applied at launch, so it sets the grid look to Midnight Gold
 # regardless of the runtime theme dropdown (the grids can't switch live the way
 # the CSS-themed chrome does). Since Midnight Gold is the default, that's the
 # intended look.
+#
+# THIS FILE SHIPS INSIDE THE DIST. Streamlit reads ~/.streamlit/config.toml
+# first and then ./.streamlit/config.toml, with the project file winning
+# per-key — so launcher.py must start the server with the install directory as
+# cwd, or the customer's own user-level config (or v2's) decides these values.
 
 [server]
+# headless=true is NOT cosmetic on an installed app. Without it Streamlit
+# prompts for an email on first run and blocks on stdin — under pythonw there
+# is no console to answer it, so the port never opens and launcher.py polls
+# until it gives up. It also stops Streamlit opening its own browser tab;
+# launcher.py already opens one, and without this you get two.
+headless = true
 fileWatcherType = "none"
+
+[browser]
+# No telemetry from a customer's machine.
+gatherUsageStats = false
+
 [theme]
 
 base                     = "dark"

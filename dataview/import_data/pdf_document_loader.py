@@ -16,7 +16,7 @@ Generated PKs (casing_id, stim_id, zone_id, …) are emitted as sequence values 
 parent so the set-based promote's seq_num handles them. UWI is often blank → the review gate.
 Tables with no dv_* home (NPT events, CBL bond, daily ops) are skipped (left for doc-linking).
 """
-import os, csv, glob, hashlib, re
+import os, csv, glob, hashlib, time, shutil, re
 
 
 def inventory_id(full_path):
@@ -67,10 +67,27 @@ def _detect_type(text):
 
 # header labels → dv_well columns (shared across all doc types)
 _HDR = {"operator": "OPERATOR", "well name": "WELL_NAME", "api": "UWI", "uwi": "UWI",
-        "uwi / api": "UWI", "api / uwi": "UWI", "field": "FIELD_NAME", "county": "COUNTY",
+        "uwi / api": "UWI", "api / uwi": "UWI",
+        # A printed identifier under any of these labels is the same field. Documents vary:
+        # scout tickets say "API No.", well reports say "API-14" or "Well API", some carry a
+        # full "UWI/UBI". Missing a spelling means a document that HAS a UWI gets sent to the
+        # gate as if it didn't — extra work and a chance to mis-assign. Cover the spellings.
+        "api number": "UWI", "api no": "UWI", "api no.": "UWI", "api #": "UWI",
+        "api-14": "UWI", "api 14": "UWI", "api14": "UWI", "well api": "UWI", "api well number": "UWI",
+        "uwi / ubi": "UWI", "ubi": "UWI", "unique well id": "UWI", "unique well identifier": "UWI",
+        "well id": "UWI",
+        "field": "FIELD_NAME", "county": "COUNTY",
         "state": "PROVINCE_STATE", "spud date": "SPUD_DATE", "completion date": "COMPLETION_DATE",
         "total depth": "DRILLERS_TD", "total depth md": "DRILLERS_TD",
-        "kb elevation": "KB_ELEV", "status": "STATUS"}
+        "kb elevation": "KB_ELEV", "status": "STATUS",
+        # Surface location — the fields that actually LOCATE the well. A header extractor that
+        # pulls county and field but not coordinates can't establish a locatable well, which is
+        # the minimum bar for creating one. Cover the common label spellings on scout tickets
+        # and well reports.
+        "surface latitude": "SURFACE_LATITUDE", "latitude": "SURFACE_LATITUDE",
+        "lat": "SURFACE_LATITUDE", "surface lat": "SURFACE_LATITUDE",
+        "surface longitude": "SURFACE_LONGITUDE", "longitude": "SURFACE_LONGITUDE",
+        "long": "SURFACE_LONGITUDE", "lon": "SURFACE_LONGITUDE", "surface long": "SURFACE_LONGITUDE"}
 
 
 def _header(text, tables):
@@ -117,16 +134,72 @@ def extract_file(path, source="PDF"):
     except Exception as e:
         res["error"] = str(e); return res
 
-    if not text.strip():                        # image-only PDF (no text layer) -> OCR fallback
+    # Harvest ANNOTATION text (FreeText / markup / form fields). Values hand-typed
+    # into a PDF editor live in the annotation layer, NOT the content stream, so
+    # extract_text() never sees them — a hand-entered UWI/API would be silently
+    # missed. Append annotation contents to `text` so _header()'s label scan and the
+    # UWI regexes get a shot at them. Fully guarded: never breaks extraction.
+    try:
+        from pypdf import PdfReader
+        _r = PdfReader(path)
+        _anno = []
+        for _pg in _r.pages:
+            for _a in (_pg.get("/Annots") or []):
+                try:
+                    _o = _a.get_object()
+                    for _key in ("/Contents", "/V", "/RC"):     # text / field value / rich text
+                        _val = _o.get(_key)
+                        if _val:
+                            _s = str(_val)
+                            if _key == "/RC" or "<" in _s:         # rich text is XHTML — strip tags
+                                _s = re.sub(r"<[^>]+>", " ", _s)
+                                _s = re.sub(r"<\?xml[^>]*\?>", " ", _s)
+                            _s = _s.strip()
+                            if _s:
+                                _anno.append(_s)
+                except Exception:
+                    continue
+        # form fields too (AcroForm), in case the UWI was typed into a fillable field
         try:
+            for _k, _f in (_r.get_fields() or {}).items():
+                _fv = _f.get("/V")
+                if _fv:
+                    _anno.append(f"{_k}: {_fv}")
+        except Exception:
+            pass
+        if _anno:
+            # Prepend so a hand-entered UWI is seen before any blank inline label.
+            text = "\n".join(_anno) + "\n" + text
+            res["had_annotations"] = True
+    except Exception:
+        pass
+
+    if not text.strip():                        # image-only PDF (no text layer) -> OCR fallback
+        res["ocr"] = True                       # set even on failure, so the scan can SAY so
+        try:
+            _t0 = time.perf_counter()
             text, tables = _ocr_reconstruct(path)
-            res["ocr"] = True
+            res["ocr_seconds"] = round(time.perf_counter() - _t0, 2)
+        except OcrTimeout as e:
+            # Not an error — a decision. The document is real and may be valuable; it just
+            # costs more than a scan should spend. Deferred, named, and copied out.
+            res["deferred"] = str(e)
+            return res
         except Exception as e:
             res["error"] = f"ocr failed: {e}"; return res
 
     dt = _detect_type(text); res["doc_type"] = dt
     hdr = _header(text, tables)
     uwi = _num(hdr.get("UWI", "")); wn = hdr.get("WELL_NAME", "")
+    # Fallback: a UWI hand-typed into a PDF annotation arrives as a BARE number with
+    # no 'UWI:' label, so _header's label parser can't claim it. If no labelled UWI
+    # was found and the doc had annotations, take the first standalone 14-digit run
+    # (optionally dash-formatted) from the harvested annotation text as the UWI.
+    if (not uwi) and res.get("had_annotations"):
+        _m = re.search(r"\b(\d{2}-?\d{3}-?\d{5}-?\d{4}|\d{14})\b", text)
+        if _m:
+            uwi = _num(_m.group(1))
+            res["uwi_from_annotation"] = True
     res["uwi"], res["well_name"] = uwi, wn
     county = hdr.get("COUNTY", "").split(",")[0].split("\n")[0].strip()
 
@@ -136,6 +209,8 @@ def extract_file(path, source="PDF"):
         "province_state": hdr.get("PROVINCE_STATE", ""), "well_status": hdr.get("STATUS", ""),
         "spud_date": hdr.get("SPUD_DATE", ""), "completion_date": hdr.get("COMPLETION_DATE", ""),
         "final_td": _num(hdr.get("DRILLERS_TD", "")), "kb_elevation": _num(hdr.get("KB_ELEV", "")),
+        "surface_latitude": _num(hdr.get("SURFACE_LATITUDE", "")),
+        "surface_longitude": _num(hdr.get("SURFACE_LONGITUDE", "")),
         "elevation_ouom": _depth_unit(text), "source": source})
 
     def rows_of(*sig):
@@ -296,6 +371,7 @@ def extract_file(path, source="PDF"):
 _COLS = {
     "well": ["uwi", "well_name", "operator_name", "field_name", "county", "province_state",
              "well_status", "spud_date", "completion_date", "final_td", "kb_elevation",
+             "surface_latitude", "surface_longitude",
              "elevation_ouom", "source", "inventory_id"],
     "formation": ["uwi", "strat_name_set", "strat_unit_id", "strat_unit_name", "interp_id",
                   "interpreter_ba_id", "interp_date", "top_depth", "base_depth", "depth_ouom",
@@ -327,14 +403,34 @@ TARGET = {
 }
 
 
-def write_staging_csvs(directory, out_dir=None, source="PDF", files=None):
+def write_staging_csvs(directory, out_dir=None, source="PDF", files=None, recursive=False,
+                       do_later_dir=None):
+    """Extract PDFs → one CSV per target kind. Returns {kind: (path, n_rows)}.
+
+    Files whose OCR blows the budget are DEFERRED, not extracted: copied to `do_later_dir`
+    (default `<out_dir>/_do_later`) and listed in the module-level LAST_DEFERRED so the scan
+    can name them. They are never silently dropped.
+    """
     out_dir = out_dir or directory
     os.makedirs(out_dir, exist_ok=True)
+    do_later_dir = do_later_dir or os.path.join(out_dir, "_do_later")
+    LAST_DEFERRED.clear()
     paths = files if files is not None else sorted(
         glob.glob(os.path.join(directory, "*.pdf")) + glob.glob(os.path.join(directory, "*.PDF")))
     agg = {k: [] for k in _COLS}
     for p in paths:
         r = extract_file(p, source)
+        if r.get("deferred"):
+            dest = None
+            try:
+                os.makedirs(do_later_dir, exist_ok=True)
+                dest = os.path.join(do_later_dir, os.path.basename(p))
+                if not os.path.exists(dest):          # idempotent: re-scans must not re-copy
+                    shutil.copy2(p, dest)
+            except Exception as e:
+                dest = f"[copy failed: {e}]"          # the DEFERRAL still gets reported
+            LAST_DEFERRED.append({"path": p, "reason": r["deferred"], "copied_to": dest})
+            continue                                  # no rows — nothing to stamp or stage
         # ONE id for the whole document, stamped on every row of every kind. Done here
         # rather than in extract_file's ~11 row-append sites: one place to be right, and a
         # new document kind cannot forget it.
@@ -361,20 +457,64 @@ def write_staging_csvs(directory, out_dir=None, source="PDF", files=None):
 # so rows_of()/_find_col() work). Needs pypdfium2 + pytesseract + the tesseract binary.
 # section titles are detected by distinctive multi-word phrases (robust to how tesseract
 # renders the em-dash, which varies page to page) rather than by the dash itself.
+# ── OCR budget ──────────────────────────────────────────────────────────────────
+# OCR is kept, not removed: some scout tickets only exist as scans, and re-adding a deleted
+# pipeline is worse than flipping a flag. But it is BOUNDED. Three test scans once cost 22s
+# of a 35s scan — 72% — and said nothing while doing it.
+#
+# Two limits, because they fail differently:
+#   OCR_PAGE_TIMEOUT_S  — one page that will not resolve (tesseract can effectively hang on
+#                         noise). pytesseract raises on its own timeout; no thread to kill.
+#   OCR_BUDGET_S        — a document that is merely BIG. 40 legible pages at 3s each is not a
+#                         hang, it is just not worth a directory scan's time.
+#
+# Over either → the file is DEFERRED: copied to the do-later bucket, named in the scan, and
+# NOT extracted. Never silently skipped. A scanned report that vanishes with no message is
+# the failure this whole loader exists to stop.
+OCR_PAGE_TIMEOUT_S = 20
+OCR_BUDGET_S = 60
+
+
+class OcrTimeout(Exception):
+    """OCR exceeded its page timeout or the document budget. Carries the reason verbatim so
+    the scan can say WHICH limit and by how much."""
+
+
+# Files deferred by the last write_staging_csvs() call: [{path, reason, pages_done}].
+# Module-level rather than a return value because bulk_dir_loader calls this through
+# _call_extractor, which expects the established (written) shape — changing that signature to
+# carry one more fact would break every other extractor's call site.
+LAST_DEFERRED = []
+
+
 _OCR_SECTIONS = ("well header", "formation tops", "log analysis", "directional survey",
                  "drill stem", "core runs", "core sample", "core photograph",
                  "completion summary", "frac stage")
 
 
-def _ocr_words(path, scale=3, conf=25):
+def _ocr_words(path, scale=3, conf=25, budget=None, page_timeout=None):
+    """OCR every page → word boxes. Raises OcrTimeout rather than running unbounded."""
     import pypdfium2 as pdfium, pytesseract
     from pytesseract import Output
+    budget = OCR_BUDGET_S if budget is None else budget
+    page_timeout = OCR_PAGE_TIMEOUT_S if page_timeout is None else page_timeout
+    t0 = time.perf_counter()
     pdf = pdfium.PdfDocument(path)
+    n_pages = len(pdf)
     pages = []
-    for pg in pdf:
+    for i, pg in enumerate(pdf, 1):
+        spent = time.perf_counter() - t0
+        if spent > budget:
+            raise OcrTimeout(f"budget {budget}s exhausted after {spent:.1f}s "
+                             f"({i - 1} of {n_pages} page(s) done)")
         img = pg.render(scale=scale).to_pil().convert("L")
         img = img.point(lambda p: 0 if p < 205 else 255)   # darken light-gray section titles/headers
-        d = pytesseract.image_to_data(img, output_type=Output.DICT)
+        try:
+            # pytesseract raises RuntimeError on its own timeout — it manages the subprocess,
+            # so this actually stops the work rather than abandoning a thread that keeps going.
+            d = pytesseract.image_to_data(img, output_type=Output.DICT, timeout=page_timeout)
+        except RuntimeError as e:
+            raise OcrTimeout(f"page {i} of {n_pages} exceeded {page_timeout}s ({e})")
         ws = []
         for i in range(len(d["text"])):
             t = (d["text"][i] or "").strip()

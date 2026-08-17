@@ -1,0 +1,206 @@
+{
+  "pack": "petroleum",
+  "version": 1,
+  "fields": {
+    "fluid_type": [
+      "fluid"
+    ],
+    "centralizers": [
+      ") centralizers"
+    ],
+    "float_equipment": [
+      "float equipment"
+    ],
+    "remark": [
+      "note"
+    ],
+    "interval": [
+      "interval (ft md)"
+    ],
+    "cost": [
+      "cost ($k)"
+    ],
+    "Avg VCL %": [
+      "avg vchl y(%dr)"
+    ]
+  },
+  "shapes": {
+    "casing": {
+      "required": [
+        "casing_string",
+        "set_depth"
+      ],
+      "optional": [
+        "cement_base",
+        "cement_sacks",
+        "cement_top",
+        "centralizers",
+        "float_equipment",
+        "grade",
+        "od",
+        "tvd",
+        "weight"
+      ],
+      "min_required": 2,
+      "target": "cat_well_casing"
+    },
+    "cement_bond": {
+      "required": [
+        "amplitude",
+        "bond"
+      ],
+      "optional": [
+        "base_md",
+        "interval",
+        "remark",
+        "top_md"
+      ],
+      "min_required": 2,
+      "target": null
+    },
+    "daily_time_log": {
+      "required": [
+        "time_slot",
+        "event"
+      ],
+      "optional": [
+        "base_md",
+        "duration",
+        "method",
+        "remark",
+        "top_md"
+      ],
+      "min_required": 2,
+      "target": null
+    },
+    "petrophysics": {
+      "required": [
+        "top_md",
+        "porosity"
+      ],
+      "optional": [
+        "Avg VCL %",
+        "base_md",
+        "formation",
+        "gross",
+        "net_gross",
+        "net_pay",
+        "permeability",
+        "saturation",
+        "shale_vol"
+      ],
+      "min_required": 2,
+      "target": "cat_well_petro_zone"
+    }
+  },
+  "columns": {},
+  "numeric": [],
+  "noise": [],
+  "disabled": [],
+  "log": [
+    {
+      "action": "alias",
+      "field": "fluid_type",
+      "alias": "fluid",
+      "by": "doc_flow",
+      "at": "2026-08-04T14:11:07",
+      "note": "claimed on formation_tops"
+    },
+    {
+      "action": "alias",
+      "field": "centralizers",
+      "alias": ") centralizers",
+      "by": "doc_flow",
+      "at": "2026-08-04T15:03:48",
+      "note": "claimed on casing"
+    },
+    {
+      "action": "alias",
+      "field": "float_equipment",
+      "alias": "float equipment",
+      "by": "doc_flow",
+      "at": "2026-08-04T15:03:48",
+      "note": "claimed on casing"
+    },
+    {
+      "action": "shape",
+      "shape": "casing",
+      "required": [
+        "casing_string",
+        "set_depth"
+      ],
+      "target": "cat_well_casing",
+      "by": "doc_flow",
+      "at": "2026-08-04T15:03:48",
+      "note": "widened to keep centralizers, float_equipment"
+    },
+    {
+      "action": "alias",
+      "field": "remark",
+      "alias": "note",
+      "by": "doc_flow",
+      "at": "2026-08-04T15:06:02",
+      "note": "claimed on cement_bond"
+    },
+    {
+      "action": "alias",
+      "field": "interval",
+      "alias": "interval (ft md)",
+      "by": "doc_flow",
+      "at": "2026-08-04T15:06:02",
+      "note": "claimed on cement_bond"
+    },
+    {
+      "action": "shape",
+      "shape": "cement_bond",
+      "required": [
+        "amplitude",
+        "bond"
+      ],
+      "target": null,
+      "by": "doc_flow",
+      "at": "2026-08-04T15:06:02",
+      "note": "widened to keep remark"
+    },
+    {
+      "action": "shape",
+      "shape": "daily_time_log",
+      "required": [
+        "time_slot",
+        "event"
+      ],
+      "target": null,
+      "by": "doc_flow",
+      "at": "2026-08-04T15:11:52",
+      "note": "widened to keep remark"
+    },
+    {
+      "action": "alias",
+      "field": "cost",
+      "alias": "cost ($k)",
+      "by": "doc_flow",
+      "at": "2026-08-04T15:13:30",
+      "note": "claimed on operations_npt"
+    },
+    {
+      "action": "alias",
+      "field": "Avg VCL %",
+      "alias": "avg vchl y(%dr)",
+      "by": "doc_flow",
+      "at": "2026-08-04T15:21:37",
+      "note": "claimed on petrophysics"
+    },
+    {
+      "action": "shape",
+      "shape": "petrophysics",
+      "required": [
+        "top_md",
+        "porosity"
+      ],
+      "target": "cat_well_petro_zone",
+      "by": "doc_flow",
+      "at": "2026-08-04T15:21:37",
+      "note": "widened to keep Avg VCL %"
+    }
+  ]
+}

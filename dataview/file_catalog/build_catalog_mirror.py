@@ -29,6 +29,10 @@ mirrors are skipped unless --drop is given.
     python build_catalog_mirror.py                 # print DDL only
     python build_catalog_mirror.py --apply         # create missing mirrors
     python build_catalog_mirror.py --drop --apply  # recreate from scratch
+
+NOTE the --server / --database defaults point at PERRY\\SQLEXPRESS / DataView.
+The test database is DataView_Demo on localhost\\SQLEXPRESS — pass BOTH
+arguments explicitly rather than trusting the defaults.
 """
 from __future__ import annotations
 
@@ -56,8 +60,35 @@ MIRROR_TABLES = [
     "dv_well_petro_interp", "dv_well_petro_zone",    # petrophysics
     "dv_well_completion",                            # completions
     "dv_well_stimulation",                           # frac stages
+    "dv_well_casing",                                # casing + cementing
+    "dv_well_perforation",                           # perforated intervals
     "dv_well_dst",                                    # drill-stem tests
     "dv_prod_entity", "dv_prod_volume",              # production
+]
+
+# WHAT MIRROR_TABLES MEANS, EXACTLY: it is the set promote_catalog's GENERIC
+# LOOP walks — promote calls discover_tables() and loops over whatever it
+# returns. It used to double as "which mirrors exist", and that conflation is
+# why cat_field could not be rebuilt without breaking promote: adding it here
+# would have moved its rows twice, once by the generic loop and once by
+# promote_field. The two questions are now separate — see DEDICATED_MIRRORS.
+#
+# A table in NEITHER list is invisible twice over: no mirror is built, and rows
+# written into a hand-made mirror are silently stepped past at promote time,
+# reported as neither moved nor held. Casing sat in exactly that state — 148
+# rows staged, 0 promoted, no error. check_mirror_registry.py exists to make
+# that state loud; run it after editing either list.
+
+# Mirrors that must EXIST and stay in sync with their dv_* table, but are
+# promoted by a DEDICATED promoter in promote_catalog rather than by the
+# generic loop. They must NOT be added to MIRROR_TABLES — discover_tables()
+# drives promote, so a table in both lists gets its rows moved twice.
+DEDICATED_MIRRORS = [
+    "dv_field",       # promote_field
+    "dv_land_tract",  # promote_land_tract
+    "dv_boundary",    # promote_boundary
+    "dv_pipeline",    # promote_pipeline
+    "dv_log_curve",   # promote_las_catalog
 ]
 
 # Names reserved for provenance — never copied during promote.
@@ -174,6 +205,17 @@ def discover_tables(cur) -> list:
     return _toposort(tables, edges)
 
 
+def mirrors_to_build(cur) -> list:
+    """Every mirror that should exist: the generic-loop set plus the ones with
+    dedicated promoters.
+
+    discover_tables() is deliberately NOT changed — promote_catalog imports it
+    and must keep receiving only the tables its generic loop should walk.
+    """
+    extra = [t for t in DEDICATED_MIRRORS if t not in MIRROR_TABLES]
+    return discover_tables(cur) + sorted(extra)
+
+
 def build_ddl(cur, dv_table: str, drop: bool) -> str:
     cols = fetch_columns(cur, DV_SCHEMA, dv_table)
     if not cols:
@@ -242,8 +284,10 @@ def main() -> int:
     if a.apply:
         cur.execute(schema_ddl)
 
-    tables = discover_tables(cur)
-    print(f"-- mirror set: {len(tables)} tables (configured, FK-ordered):")
+    tables = mirrors_to_build(cur)
+    print(f"-- mirror set: {len(tables)} tables "
+          f"({len(discover_tables(cur))} generic-loop, "
+          f"{len(tables) - len(discover_tables(cur))} dedicated-promoter):")
     print("--   " + ", ".join(tables) + "\n")
 
     for dv in tables:

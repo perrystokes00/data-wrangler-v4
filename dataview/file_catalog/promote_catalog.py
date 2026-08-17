@@ -59,6 +59,31 @@ _CATALOG_SOURCE = "CATALOG"
 # unmappable well never reaches the gold table. Set False to promote regardless.
 REQUIRE_WELL_COORDS = True
 
+# WHAT EACH DEDICATED PROMOTER HANDLES.
+#
+# The generic loop walks build_catalog_mirror.MIRROR_TABLES. These mirrors are
+# moved by a named promoter INSTEAD, so they are deliberately absent from that
+# allowlist — a table in both would have its rows moved twice.
+#
+# This dict exists so the relationship is DECLARED rather than inferred.
+# check_mirror_registry.py reads it to answer "is any mirror walked by
+# nothing"; without it, that check falls back to scanning this file's source
+# text and cannot tell a real handler from a mention in a comment. It is also
+# the one place a newcomer can see what promotes what without reading 1,800
+# lines.
+#
+# A mirror in NEITHER this dict nor MIRROR_TABLES is invisible twice over: no
+# mirror is built for it, and rows written into a hand-made one are silently
+# stepped past — reported as neither moved nor held. cat_well_casing sat in
+# exactly that state at 148 rows staged, 0 promoted, no error.
+DEDICATED_PROMOTERS = {
+    "cat_field":      "promote_field",
+    "cat_land_tract": "promote_land_tract",
+    "cat_boundary":   "promote_boundary",
+    "cat_pipeline":   "promote_pipeline",
+    "cat_log_curve":  "promote_las_catalog",
+}
+
 # Per-step wall-clock for the promote stage, filled by _safe_promote and printed
 # as a "slowest first" summary at the end of run_promote so the promote seconds
 # break down by table/promoter (pure-DB, environment-independent profiling).
@@ -869,19 +894,63 @@ def promote_field(cur, apply, log):
 
 def promote_seismic(cur, apply, log):
     """Promote seismic survey identity from file_catalog.FILE_SEIS_HEADER up
-    into dataview.dv_seis_set — set-based MERGE keyed on survey name. Covers
-    every seismic source the extract stage writes there (SEG-Y, P190,
-    shapefiles, OSDU survey JSON). Returns (target, eligible, merged, 0, note)
-    in the same shape as promote_table so run_promote can log one line."""
+    into dataview.dv_seis_set (one row per survey) and dv_seis_line (one row
+    per file, now WITH its geometry). Covers every seismic source the extract
+    stage writes there (SEG-Y, P190, shapefiles, OSDU survey JSON).
+
+    THE MAPPABLE GATE (Perry, July 22: "If they don't have the required info
+    to be visualized on a map they should not be promoted"): a file is
+    mappable when it carries a usable SURVEY_OUTLINE **or** a complete BBOX_*
+    set; a survey is mappable when ANY of its files is. Held files/surveys
+    are REPORTED by name, never silently dropped — their FILE_SEIS_HEADER
+    rows survive untouched, so arming a CRS and re-extracting promotes them
+    on the next run.
+
+    GEOMETRY: extract now writes WGS84 WKT into SURVEY_OUTLINE per file —
+    trace-order LINESTRINGs for 2D, stated-corner POLYGONs for 3D — and this
+    function converts them with geography::STGeomFromText(..., 4326) into
+    dv_seis_line.geog (column checked at runtime via INFORMATION_SCHEMA, not
+    assumed from a DDL snapshot). The GeoJSON exporter becomes an export, not
+    the bridge.
+
+    Returns (target, eligible, merged, held, note) like promote_table."""
     if not object_exists(cur, DV_SCHEMA, "dv_seis_set"):
         return ("dv_seis_set", None, None, None, "no dv target")
 
+    _NAMED = "NULLIF(LTRIM(RTRIM(s.SURVEY_NAME)), '') IS NOT NULL"
+    _MAPPABLE = (
+        "(NULLIF(LTRIM(RTRIM(s.SURVEY_OUTLINE)), '') IS NOT NULL "
+        "OR (s.BBOX_MIN_LAT IS NOT NULL AND s.BBOX_MAX_LAT IS NOT NULL "
+        "AND s.BBOX_MIN_LON IS NOT NULL AND s.BBOX_MAX_LON IS NOT NULL))")
+    # Normalized survey-name key — the SAME key the MERGE groups on, so the
+    # gate and the promote agree on what "a survey" is.
+    _norm = ("UPPER(LTRIM(RTRIM("
+             "REPLACE(REPLACE(REPLACE(s.SURVEY_NAME,CHAR(9),' '),CHAR(13),' '),CHAR(10),' ')"
+             ")))")
+
     cur.execute(
-        "SELECT COUNT(DISTINCT SURVEY_NAME) FROM file_catalog.FILE_SEIS_HEADER "
-        "WHERE NULLIF(LTRIM(RTRIM(SURVEY_NAME)), '') IS NOT NULL")
+        "SELECT COUNT(DISTINCT SURVEY_NAME) FROM file_catalog.FILE_SEIS_HEADER s "
+        f"WHERE {_NAMED}")
     eligible = cur.fetchone()[0]
+
+    # Surveys the gate holds — reported in DRY RUN too, so a run that would
+    # promote nothing explains itself before anyone presses apply.
+    cur.execute(f"""
+        SELECT MAX(s.SURVEY_NAME)
+        FROM file_catalog.FILE_SEIS_HEADER s
+        WHERE {_NAMED}
+        GROUP BY {_norm}
+        HAVING MAX(CASE WHEN {_MAPPABLE} THEN 1 ELSE 0 END) = 0""")
+    _held_surveys = sorted(r[0] for r in cur.fetchall())
+    held = len(_held_surveys)
+    if _held_surveys:
+        log(f"  seismic gate: {held} survey(s) HELD — no outline and no bbox, "
+            f"nothing to draw. Find/arm the CRS and re-extract, then re-run:")
+        for _hs in _held_surveys:
+            log(f"      - {_hs}")
+
     if not apply or not eligible:
-        return ("dv_seis_set", eligible, 0, 0, "seismic survey")
+        return ("dv_seis_set", eligible, 0, held, "seismic survey")
 
     # Pre-pass: some WKT (e.g. projected SEG-Y coords like 11770231, way outside
     # ±180 lon) throws at geography CONSTRUCTION — before MakeValid/STIsValid can
@@ -891,11 +960,10 @@ def promote_seismic(cur, apply, log):
     cur.execute("IF OBJECT_ID('tempdb..#badseis') IS NOT NULL DROP TABLE #badseis")
     cur.execute("CREATE TABLE #badseis (sn NVARCHAR(400) PRIMARY KEY)")
     try:
-        cur.execute("""
+        cur.execute(f"""
             SELECT DISTINCT SURVEY_NAME, SURVEY_OUTLINE
-            FROM file_catalog.FILE_SEIS_HEADER
-            WHERE SURVEY_OUTLINE IS NOT NULL
-              AND NULLIF(LTRIM(RTRIM(SURVEY_NAME)), '') IS NOT NULL""")
+            FROM file_catalog.FILE_SEIS_HEADER s
+            WHERE SURVEY_OUTLINE IS NOT NULL AND {_NAMED}""")
         _rows = cur.fetchall()
         _bad = set()
         for _sn, _wkt in _rows:
@@ -927,9 +995,13 @@ def promote_seismic(cur, apply, log):
     # trim, collapse internal whitespace to single spaces, uppercase. Distinct
     # surveys stay distinct; only near-identical names merge. The display name is
     # the MAX() actual name in each group.
-    _norm = ("UPPER(LTRIM(RTRIM("
-             "REPLACE(REPLACE(REPLACE(s.SURVEY_NAME,CHAR(9),' '),CHAR(13),' '),CHAR(10),' ')"
-             ")))")
+    #
+    # NOTE on the set-level wkt now that extract writes per-file LINESTRINGs:
+    # MAX(SURVEY_OUTLINE) picks ONE file's geometry as the survey's. For 3D
+    # (stated-corner POLYGON, identical across a survey's volumes) that is the
+    # right outline; for 2D it is one arbitrary line — acceptable, because the
+    # per-line geometry now lives on dv_seis_line.geog and that is what the
+    # map draws. The set row's authority is its bbox.
     cur.execute(f"""
         MERGE dataview.dv_seis_set AS tgt
         USING (
@@ -942,14 +1014,22 @@ def promote_seismic(cur, apply, log):
                    MIN(s.BBOX_MIN_LON)  AS bmin_lon, MAX(s.BBOX_MAX_LON) AS bmax_lon,
                    MAX(s.EPSG_CODE)     AS epsg,
                    MAX(s.CONTRACTOR)    AS remark,
+                   -- SET-level geog is 3D corner POLYGONs ONLY. 2D
+                   -- outlines are per-file LINESTRINGs now, and a LINESTRING
+                   -- in the survey-FOOTPRINT column broke the map's
+                   -- geography-layer block (July 28) — the lines belong on
+                   -- dv_seis_line.geog. 2D sets keep bbox authority, geog
+                   -- NULL.
                    MAX(CASE WHEN bs.sn IS NOT NULL THEN NULL
-                            ELSE s.SURVEY_OUTLINE END) AS wkt
+                            WHEN LEFT(LTRIM(s.SURVEY_OUTLINE), 7) = 'POLYGON'
+                            THEN s.SURVEY_OUTLINE END) AS wkt
             FROM file_catalog.FILE_SEIS_HEADER s
             LEFT JOIN file_catalog.GLOBAL_FILE_CATALOG g
                    ON g.INVENTORY_ID = s.INVENTORY_ID
             LEFT JOIN #badseis bs ON bs.sn = s.SURVEY_NAME
-            WHERE NULLIF(LTRIM(RTRIM(s.SURVEY_NAME)), '') IS NOT NULL
+            WHERE {_NAMED}
             GROUP BY {_norm}
+            HAVING MAX(CASE WHEN {_MAPPABLE} THEN 1 ELSE 0 END) = 1
         ) src ON UPPER(LTRIM(RTRIM(tgt.seis_set_name))) = src.nkey
         WHEN MATCHED THEN UPDATE SET
             seis_set_type = src.stype, file_path = src.file_path,
@@ -997,6 +1077,87 @@ def promote_seismic(cur, apply, log):
     # dv_seis_line already exists in the schema — we populate it, no new table.
     vol_merged = 0
     if object_exists(cur, DV_SCHEMA, "dv_seis_line"):
+        # Optional columns checked AT RUNTIME (sys/INFORMATION_SCHEMA), not
+        # against the June DDL snapshot — geog and inventory_id were both
+        # added after it, and reading the snapshot instead of the catalog is
+        # what produced two nights of phantom ALTER TABLEs.
+        def _line_has(col, dtype=None):
+            q = ("SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                 "WHERE TABLE_SCHEMA=? AND TABLE_NAME='dv_seis_line' "
+                 "AND COLUMN_NAME=?")
+            args = [DV_SCHEMA, col]
+            if dtype:
+                q += " AND DATA_TYPE=?"
+                args.append(dtype)
+            cur.execute(q, args)
+            return bool(cur.fetchone()[0])
+        has_geog = _line_has("geog", "geography")
+        has_inv  = _line_has("inventory_id")
+
+        # Report the FILES the gate holds (the survey-level report above can
+        # hide a single bad vintage inside an otherwise-mapped survey).
+        cur.execute(f"""
+            SELECT COALESCE(g.FILE_NAME, s.LINE_NAME, s.SURVEY_NAME)
+            FROM file_catalog.FILE_SEIS_HEADER s
+            LEFT JOIN file_catalog.GLOBAL_FILE_CATALOG g
+                   ON g.INVENTORY_ID = s.INVENTORY_ID
+            WHERE {_NAMED} AND NOT {_MAPPABLE}""")
+        _held_lines = sorted({r[0] for r in cur.fetchall() if r[0]})
+        if _held_lines:
+            log(f"  seismic gate: {len(_held_lines)} file(s) held from "
+                f"dv_seis_line (no outline, no bbox):")
+            for _hl in _held_lines:
+                log(f"      - {_hl}")
+
+        # Per-FILE construction pre-pass, mirroring #badseis but keyed on
+        # SEIS_HEADER_ID. SELECT TOP 0 ... INTO inherits the id column's real
+        # type instead of guessing it.
+        _geo_sel = _geo_join = _geo_upd = _geo_insc = _geo_insv = ""
+        _inv_upd = _inv_insc = _inv_insv = ""
+        if has_geog:
+            cur.execute("IF OBJECT_ID('tempdb..#badline') IS NOT NULL DROP TABLE #badline")
+            cur.execute("SELECT TOP 0 s.SEIS_HEADER_ID AS hid INTO #badline "
+                        "FROM file_catalog.FILE_SEIS_HEADER s")
+            try:
+                cur.execute(f"""
+                    SELECT s.SEIS_HEADER_ID, s.SURVEY_OUTLINE
+                    FROM file_catalog.FILE_SEIS_HEADER s
+                    WHERE s.SURVEY_OUTLINE IS NOT NULL AND {_NAMED}""")
+                _badl = []
+                for _hid, _wkt in cur.fetchall():
+                    try:
+                        cur.execute(
+                            "SELECT geography::STGeomFromText(?,4326).MakeValid().STIsValid()",
+                            _wkt)
+                        if cur.fetchone()[0] != 1:
+                            _badl.append((_hid,))
+                    except Exception:
+                        _badl.append((_hid,))
+                if _badl:
+                    cur.executemany("INSERT INTO #badline (hid) VALUES (?)", _badl)
+                    log(f"  seismic line geom skipped: {len(_badl)} file(s) with "
+                        f"un-constructable outline (row still promoted, NULL geog)")
+            except Exception as _pp:
+                log(f"  seismic line pre-pass warning: {str(_pp).splitlines()[0][:80]}")
+
+            _geo_sel  = (",\n                       CASE WHEN bl.hid IS NOT NULL THEN NULL"
+                         "\n                            ELSE s.SURVEY_OUTLINE END AS wkt")
+            _geo_join = ("\n                LEFT JOIN #badline bl"
+                         "\n                       ON bl.hid = s.SEIS_HEADER_ID")
+            # Lines have zero area, and per-file 3D corner polygons are tiny
+            # against the hemisphere test — MakeValid alone suffices here.
+            _geog_expr = ("CASE WHEN src.wkt IS NULL THEN {onnull} "
+                          "WHEN geography::STGeomFromText(src.wkt,4326).MakeValid().STIsValid() = 1 "
+                          "THEN geography::STGeomFromText(src.wkt,4326).MakeValid() "
+                          "ELSE {onnull} END")
+            _geo_upd  = ",\n                geog = " + _geog_expr.format(onnull="tgt.geog")
+            _geo_insc = ", geog"
+            _geo_insv = ",\n                " + _geog_expr.format(onnull="NULL")
+        if has_inv:
+            _inv_upd  = ",\n                inventory_id = src.catalog_id"
+            _inv_insc = ", inventory_id"
+            _inv_insv = ", src.catalog_id"
+
         cur.execute(f"""
             MERGE dataview.dv_seis_line AS tgt
             USING (
@@ -1008,16 +1169,20 @@ def promote_seismic(cur, apply, log):
                        TRY_CAST(s.SHOT_FIRST AS NUMERIC(18,2)) AS sp_start,
                        TRY_CAST(s.SHOT_LAST  AS NUMERIC(18,2)) AS sp_end,
                        s.IL_MIN AS cdp_start, s.IL_MAX AS cdp_end,
-                       TRY_CAST(s.SAMPLE_INTERVAL AS NUMERIC(18,4)) AS samp,
+                       -- SAMPLE_INTERVAL is MICROseconds (SEG-Y binary
+                       -- header); the column is sample_rate_ms. 4000 µs is
+                       -- 4 ms — the value was right, the scale was not, and
+                       -- anything dividing by it was off by 1000.
+                       TRY_CAST(s.SAMPLE_INTERVAL AS NUMERIC(18,4)) / 1000.0 AS samp,
                        s.TRACE_COUNT AS ntrace,
                        g.FILE_PATH   AS file_path,
-                       s.INVENTORY_ID AS catalog_id
+                       s.INVENTORY_ID AS catalog_id{_geo_sel}
                 FROM file_catalog.FILE_SEIS_HEADER s
                 LEFT JOIN file_catalog.GLOBAL_FILE_CATALOG g
                        ON g.INVENTORY_ID = s.INVENTORY_ID
                 INNER JOIN dataview.dv_seis_set ss
-                       ON UPPER(LTRIM(RTRIM(ss.seis_set_name))) = {_norm}
-                WHERE NULLIF(LTRIM(RTRIM(s.SURVEY_NAME)), '') IS NOT NULL
+                       ON UPPER(LTRIM(RTRIM(ss.seis_set_name))) = {_norm}{_geo_join}
+                WHERE {_NAMED} AND {_MAPPABLE}
             ) src ON tgt.line_id = src.src_id
             WHEN MATCHED THEN UPDATE SET
                 seis_set_id = src.set_id, line_name = src.line_name,
@@ -1025,26 +1190,35 @@ def promote_seismic(cur, apply, log):
                 shot_point_start = src.sp_start, shot_point_end = src.sp_end,
                 cdp_start = src.cdp_start, cdp_end = src.cdp_end,
                 sample_rate_ms = src.samp, trace_count = src.ntrace,
-                file_path = src.file_path, source = 'CATALOG',
+                file_path = src.file_path, source = 'CATALOG'{_inv_upd}{_geo_upd},
                 row_changed_by = 'PROMOTE', row_changed_date = GETUTCDATE()
             WHEN NOT MATCHED THEN INSERT (
                 seis_set_id, line_id, line_name, line_type,
                 shot_point_start, shot_point_end, cdp_start, cdp_end,
-                sample_rate_ms, trace_count, file_path,
+                sample_rate_ms, trace_count, file_path{_inv_insc}{_geo_insc},
                 active_ind, source, row_created_by, row_created_date,
                 row_changed_by, row_changed_date
             ) VALUES (
                 src.set_id, src.src_id, src.line_name, src.line_type,
                 src.sp_start, src.sp_end, src.cdp_start, src.cdp_end,
-                src.samp, src.ntrace, src.file_path,
+                src.samp, src.ntrace, src.file_path{_inv_insv}{_geo_insv},
                 'Y', 'CATALOG', 'PROMOTE', GETUTCDATE(), 'PROMOTE', GETUTCDATE()
             );
         """)
         vol_merged = cur.rowcount or 0
-        log(f"{'dv_seis_line':30} {vol_merged:>9} {vol_merged:>8} {0:>9}  "
-            f"seismic line/volume")
+        if has_geog:
+            cur.execute("IF OBJECT_ID('tempdb..#badline') IS NOT NULL DROP TABLE #badline")
+        _extras = []
+        if has_geog:
+            _extras.append("geog")
+        if has_inv:
+            _extras.append("inventory_id")
+        _note = ("seismic line/volume"
+                 + (f" (+{'/'.join(_extras)})" if _extras else ""))
+        log(f"{'dv_seis_line':30} {vol_merged:>9} {vol_merged:>8} "
+            f"{len(_held_lines):>9}  {_note}")
 
-    return ("dv_seis_set", eligible, merged, 0, "seismic survey")
+    return ("dv_seis_set", eligible, merged, held, "seismic survey")
 
 
 

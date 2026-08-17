@@ -1,0 +1,143 @@
+[
+  {
+    "source": "dv_business_associate",
+    "target": "business_associate",
+    "enabled": true,
+    "columns": {
+      "BUSINESS_ASSOCIATE_ID": "ba_id",
+      "BA_LONG_NAME": "ba_name",
+      "BA_SHORT_NAME": "short_name"
+    }
+  },
+  {
+    "source": "dv_field",
+    "target": "field",
+    "enabled": true,
+    "columns": {}
+  },
+  {
+    "source": "dv_seis_line",
+    "target": "seis_line",
+    "enabled": true,
+    "columns": {
+      "SEIS_LINE_ID": "line_id"
+    }
+  },
+  {
+    "source": "dv_seis_set",
+    "target": "seis_set",
+    "enabled": true,
+    "columns": {}
+  },
+  {
+    "source": "dv_well",
+    "target": "well",
+    "enabled": true,
+    "columns": {
+      "ASSIGNED_FIELD": "field_name",
+      "CURRENT_STATUS": "well_status",
+      "DEEPEST_DEPTH": "final_td",
+      "GROUND_ELEV": "ground_elevation",
+      "KB_ELEV": "kb_elevation",
+      "OPERATOR": "operator_name",
+      "PRIMARY_SOURCE": "source",
+      "STATUS_TYPE": "well_type"
+    }
+  },
+  {
+    "source": "dv_well_alias",
+    "target": "well_alias",
+    "enabled": true,
+    "columns": {
+      "WELL_ALIAS_ID": "alias_id",
+      "ALIAS_LONG_NAME": "alias_name",
+      "ALIAS_REASON_TYPE": "alias_type"
+    }
+  },
+  {
+    "source": "dv_well_completion",
+    "target": "well_completion",
+    "enabled": true,
+    "columns": {}
+  },
+  {
+    "source": "dv_well_core",
+    "target": "well_core",
+    "enabled": true,
+    "columns": {
+      "RECOVERED_AMOUNT": "recovery_length",
+      "RECOVERY_DATE": "core_date"
+    }
+  },
+  {
+    "source": "dv_well_log",
+    "target": "well_log",
+    "enabled": true,
+    "columns": {
+      "WELL_LOG_ID": "log_id",
+      "BASE_DEPTH_OUOM": "depth_ouom"
+    }
+  },
+  {
+    "source": "dv_well_log_curve",
+    "target": "well_log_curve",
+    "enabled": true,
+    "columns": {
+      "REPORTED_MNEMONIC": "mnemonic",
+      "WELL_LOG_ID": "log_id",
+      "MAX_INDEX": "base_depth",
+      "MIN_INDEX": "top_depth"
+    }
+  },
+  {
+    "source": "dv_well_perforation",
+    "target": "well_perforation",
+    "enabled": true,
+    "columns": {
+      "BASE_DEPTH_OUOM": "depth_ouom",
+      "EFFECTIVE_DATE": "perf_date",
+      "PERFORATION_OBS_NO": "completion_id",
+      "PERFORATION_COUNT": "shot_count",
+      "PERFORATION_DIAMETER": "perf_diameter_in",
+      "PERFORATION_DENSITY": "shot_density"
+    }
+  },
+  {
+    "source": "dv_well_pressure",
+    "target": "well_pressure",
+    "enabled": true,
+    "columns": {}
+  },
+  {
+    "source": "dv_well",
+    "target": "well_area",
+    "kind": "fanout",
+    "enabled": true,
+    "keys": {
+      "UWI": "uwi"
+    },
+    "constants": {
+      "SOURCE": "DATAVIEW"
+    },
+    "value_column": "AREA_ID",
+    "label_column": "AREA_TYPE",
+    "items": [
+      {
+        "column": "country",
+        "label": "COUNTRY"
+      },
+      {
+        "column": "province_state",
+        "label": "PROVINCE_STATE"
+      },
+      {
+        "column": "county",
+        "label": "COUNTY"
+      }
+    ],
+    "seed": {
+      "table": "area",
+      "name_column": "PREFERRED_NAME"
+    }
+  }
+]

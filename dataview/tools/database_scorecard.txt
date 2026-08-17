@@ -1,0 +1,2 @@
+python -m dataview.tools.scorecard --server "localhost\SQLEXPRESS" `
+  --database DataView_Demo --out scorecard_after_recogniser.html --open

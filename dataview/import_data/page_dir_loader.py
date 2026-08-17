@@ -446,9 +446,23 @@ def validate_file(csv_path):
 
 
 # ─────────────── Column mapping (stage 3) — fingerprint + suggestion ───────────────
+# Provenance / plumbing columns that the loader stamps itself and that drift
+# in and out of source files. They must NOT change the column-shape
+# fingerprint, or the same logical file keys two different fingerprints and
+# the saved mapping stops auto-applying (grid re-prompts for confirmation).
+_FP_IGNORE = {"INVENTORY_ID", "SOURCE", "SOURCE_PATH",
+              "ROW_CREATED_BY", "ROW_CREATED_DATE",
+              "ROW_CHANGED_BY", "ROW_CHANGED_DATE",
+              "ACTIVE_IND", "PPDM_GUID", "ROW_QUALITY"}
+
 def fingerprint_cols(cols):
+    """Stable hash of a file's column SHAPE. Normalized (strip/upper/_) and
+    sorted, so case/order/whitespace never matter; provenance columns in
+    _FP_IGNORE are dropped so their presence or absence does not fork the
+    fingerprint (that was making saved mappings re-prompt)."""
     import hashlib
-    sig = ",".join(sorted(_norm(c) for c in cols))
+    sig = ",".join(sorted(n for c in cols
+                          for n in (_norm(c),) if n not in _FP_IGNORE))
     return hashlib.sha1(sig.encode("utf-8")).hexdigest().upper()[:16]
 
 def _fk_of(table, db_col, FKC):

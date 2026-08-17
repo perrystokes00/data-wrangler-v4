@@ -1,1 +1,0 @@
-mssql+pyodbc://@localhost\SQLEXPRESS/DataView?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes

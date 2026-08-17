@@ -20,7 +20,7 @@ echo.
 echo Starting...
 echo.
 
-python -m streamlit run app_v3.py --server.port 8502
+python -m streamlit run app_v4.py --server.port 8502
 
 echo.
 echo Server stopped.

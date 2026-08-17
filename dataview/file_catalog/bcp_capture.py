@@ -312,6 +312,47 @@ def _reconcile_log_ids(buckets, log=print):
             f"-> _2/_3 keys assigned")
 
 
+def _stamp_readiness(cur, inv_ids, log=print):
+    """Mark the files whose rows we just loaded as CATALOGED.
+
+    THE FAST PATH NEVER DID THIS, and that is the whole bug. The
+    sequential and pool paths call _set_readiness_cataloged after their
+    capture, so a PDF shows CATALOGED; LAS and SEG-Y come through here,
+    write via BCP, and left GLOBAL_FILE_CATALOG untouched — so a file
+    that landed 337 logs and 5,938 curves still read READY, and every
+    report driven off readiness under-counted the fast lane.
+
+    Runs INSIDE the caller's transaction, immediately before commit: if
+    the load rolls back the stamp goes with it, which is the only
+    ordering that cannot claim a file was catalogued when its rows are
+    not there.
+
+    Never raises. A readiness flag is bookkeeping; failing a load that
+    actually landed its rows because a status update went wrong would be
+    the wrong trade.
+    """
+    ids = sorted({str(i) for i in inv_ids if i})
+    if not ids:
+        return 0
+    try:
+        n = 0
+        for i in range(0, len(ids), 500):          # keep the IN list sane
+            chunk = ids[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            cur.execute(
+                "UPDATE file_catalog.GLOBAL_FILE_CATALOG "
+                "   SET CATALOG_READINESS = 'CATALOGED' "
+                f" WHERE INVENTORY_ID IN ({marks}) "
+                "   AND (CATALOG_READINESS IS NULL "
+                "        OR CATALOG_READINESS <> 'CATALOGED')", *chunk)
+            n += max(cur.rowcount, 0)
+        log(f"[bcp-capture] readiness: {n:,} file(s) marked CATALOGED")
+        return n
+    except Exception as e:
+        log(f"[bcp-capture] readiness stamp skipped: {e}")
+        return 0
+
+
 def run_bcp_capture(recs, conn_str=None, workers=6, log=print, force_uwi=False):
     """Parallel-parse recs -> bulk-load cat_* via BULK INSERT. recs need FILE_PATH,
     MATCHED_UWI, INVENTORY_ID. conn_str is a pyodbc ODBC connection string (falls
@@ -391,6 +432,11 @@ def run_bcp_capture(recs, conn_str=None, workers=6, log=print, force_uwi=False):
         out["FILE_WELL_HEADER"] = _load_table(cur, "FILE_WELL_HEADER",
                                               buckets["FILE_WELL_HEADER"], log,
                                               upsert_key="WELL_HEADER_ID")
+        # Only the files that actually produced rows — parsing a file
+        # and getting nothing from it is not the same as cataloguing
+        # it, and marking those CATALOGED would hide real failures.
+        _stamp_readiness(cur, [r.get("INVENTORY_ID")
+                               for t in _all_tabs for r in buckets[t]], log)
         cn.commit()
     except Exception as e:
         cn.rollback()
@@ -508,6 +554,7 @@ def run_bcp_capture_segy(recs, conn_str=None, workers=6, log=print):
     cur = cn.cursor(); cur.execute("SET LOCK_TIMEOUT 15000")
     try:
         n = _load_table(cur, SEIS_TABLE, rows, log, upsert_key="SEIS_HEADER_ID")
+        _stamp_readiness(cur, [r.get("INVENTORY_ID") for r in rows], log)
         cn.commit()
     except Exception as e:
         cn.rollback(); log(f"[bcp-segy] load error, rolled back: {e}"); raise

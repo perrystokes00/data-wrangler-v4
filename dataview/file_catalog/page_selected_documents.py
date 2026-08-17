@@ -42,6 +42,10 @@ _TYPE_FILTERS = {
 }
 
 _INLINE_MAX_MB = 15          # above this, offer download instead of inline render
+# Only ever paid for a file the user has actually asked for (see the two-step
+# download below), so this cap is generous. It is about what the SERVER will
+# hold in memory, not what the browser will accept.
+_DOWNLOAD_MAX_MB = 500
 _IMG_EXTS  = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
 _TEXT_EXTS = {"txt", "csv", "log", "json", "md", "las", "xml", "p190",
               "witsml", "geojson", "kml"}
@@ -297,11 +301,73 @@ def run(engine, dialect=None):
                 fname = r.get("file_name") or "(unnamed)"
                 line  = str(r.get("line_name") or "")
                 dtype = str(r.get("doc_type") or "")
-                c1, c2, c3, c4 = st.columns([5, 2, 2, 1.4])
-                c1.write(f"**{fname}**")
-                c2.caption(line or "—")
-                c3.caption(dtype or "—")
-                if c4.button("View", key=f"seldoc_view_{key}_{j}",
+                # The two middle columns used to hold `line` and `doc_type`
+                # captions. Both are empty for almost every well document, so
+                # they rendered as two blank pills beside a wide View button —
+                # three controls' worth of space carrying one action. They are
+                # now the two actions themselves, and the large View is gone.
+                c1, c2, c3 = st.columns([6, 1.4, 1.4])
+                _label = f"**{fname}**"
+                if dtype:
+                    _label += f"  ·  {dtype}"
+                if line:
+                    _label += f"  ·  {line}"
+                c1.write(_label)
+
+                if c2.button("View", key=f"seldoc_view_{key}_{j}",
                              use_container_width=True):
                     st.session_state["seldoc_doc"] = inv
                     st.rerun()
+
+                # ── DOWNLOAD, IN TWO STEPS ────────────────────────────────
+                #
+                # st.download_button marshals the file's bytes into the page
+                # WHEN IT IS DRAWN, not when it is clicked. Drawing one per row
+                # would therefore read every file of every open group on every
+                # rerun — a folder of SEG-Y would be read into memory just to
+                # render buttons nobody pressed.
+                #
+                # So the first click ARMS the row (a plain button, no file
+                # touched) and the rerun draws the real download button for
+                # that row alone. One file read, for the one file asked for.
+                # The cost is a second click; the alternative is reading
+                # gigabytes to render a toolbar.
+                #
+                # Copying the file into the user's Downloads folder would be
+                # one click and no memory — but it copies on the SERVER, which
+                # is correct on a desktop and silently wrong the moment this is
+                # served to someone else's machine. Not a trade worth making in
+                # something being packaged for customers.
+                _dpath = r.get("open_path") or r.get("file_path")
+                _armed = st.session_state.get("seldoc_dl") == inv
+
+                if not _armed:
+                    if c3.button("Download", key=f"seldoc_dlarm_{key}_{j}",
+                                 use_container_width=True):
+                        st.session_state["seldoc_dl"] = inv
+                        st.rerun()
+                else:
+                    try:
+                        _dsize = os.path.getsize(_dpath) / (1024 * 1024)
+                    except (OSError, TypeError):
+                        _dsize = -1.0
+                    if _dsize < 0:
+                        c3.caption("file missing")
+                        st.session_state.pop("seldoc_dl", None)
+                    elif _dsize > _DOWNLOAD_MAX_MB:
+                        # Honest rather than optimistic: the browser could take
+                        # it, but the server would hold the whole thing first.
+                        c3.caption(f"{_dsize:,.0f} MB — too large")
+                        st.session_state.pop("seldoc_dl", None)
+                    else:
+                        try:
+                            with open(_dpath, "rb") as _fh:
+                                _clicked = c3.download_button(
+                                    "⬇ Save", _fh.read(), file_name=fname,
+                                    key=f"seldoc_dlgo_{key}_{j}",
+                                    use_container_width=True)
+                            if _clicked:
+                                st.session_state.pop("seldoc_dl", None)
+                        except Exception as _dle:
+                            c3.caption(f"unreadable: {str(_dle)[:24]}")
+                            st.session_state.pop("seldoc_dl", None)

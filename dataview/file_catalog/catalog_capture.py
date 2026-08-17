@@ -31,6 +31,43 @@ _fem_engines: set = set()
 # reset_replace_state() so a re-promote replaces instead of duplicating.
 _replace_cleared: set = set()
 
+# ── INTERNAL TIMING ─────────────────────────────────────────────────────
+#
+# capture() measured 152.2s across 1,410 calls — 108ms each — and three
+# rounds of reasoning failed to explain it. The schema lookup was cached
+# and became 1% of the stage. The connection was reused and NOTHING moved,
+# which ruled out acquisition. The delete has no index, but the tables hold
+# only a few hundred rows, so a scan of them costs microseconds.
+#
+# What is left inside a call is: one DELETE, one executemany per column
+# shape, and one COMMIT. Reusing the connection did not reduce the number
+# of COMMITS — a nested transaction per table still flushes the log per
+# table — so that is the standing suspect. But it is a suspect, and the
+# last three were wrong, so it gets measured rather than assumed.
+_TIMES: dict = {}
+_COUNTS: dict = {}
+
+
+def _tick(step, t0):
+    import time as _t
+    _TIMES[step] = _TIMES.get(step, 0.0) + (_t.perf_counter() - t0)
+    _COUNTS[step] = _COUNTS.get(step, 0) + 1
+
+
+def reset_capture_timings() -> None:
+    _TIMES.clear()
+    _COUNTS.clear()
+
+
+def capture_timings() -> str:
+    """One line, slowest first. Empty when nothing was timed."""
+    if not _TIMES:
+        return ""
+    tot = sum(_TIMES.values())
+    parts = [f"{k} {v:.1f}s ({100.0 * v / tot:.0f}%, {_COUNTS.get(k, 0):,}x)"
+             for k, v in sorted(_TIMES.items(), key=lambda kv: -kv[1])]
+    return f"{tot:.1f}s inside capture · " + " · ".join(parts)
+
 
 def reset_replace_state() -> None:
     """Forget which (table, inventory_id) pairs have been cleared this run.
@@ -121,7 +158,10 @@ def capture(engine, cat_table: str, rows, *, uwi=None, inventory_id=None,
     _ensure_fast_executemany(engine)
 
     n = 0
+    import time as _t
+    _c0 = _t.perf_counter()
     _cm = contextlib.nullcontext(conn) if conn is not None else engine.begin()
+    _own_txn = conn is None
     with _cm as con:
         cols = _columns(con, cat_table)
         if not cols:
@@ -160,9 +200,12 @@ def capture(engine, cat_table: str, rows, *, uwi=None, inventory_id=None,
         # INVENTORY_ID; skipped when no inventory_id is available.
         if (replace and inventory_id is not None and "INVENTORY_ID" in cols
                 and (cat_table, inventory_id) not in _replace_cleared):
+            import time as _t
+            _d0 = _t.perf_counter()
             con.execute(text(
                 f"DELETE FROM {CAT_SCHEMA}.{cat_table} "
                 f"WHERE [{cols['INVENTORY_ID']}] = :inv"), {"inv": inventory_id})
+            _tick("delete", _d0)
             _replace_cleared.add((cat_table, inventory_id))
 
         # Build payloads (provenance stamp + only real columns), then group by
@@ -172,6 +215,8 @@ def capture(engine, cat_table: str, rows, *, uwi=None, inventory_id=None,
         # into a handful of calls — the heavy-capture supercharge. Rows that map
         # to identical columns (the common case) form a single group.
         from collections import OrderedDict
+        import time as _t
+        _b0 = _t.perf_counter()
         groups: "OrderedDict[tuple, list]" = OrderedDict()
         for r in rows:
             payload = dict(stamp)
@@ -189,6 +234,7 @@ def capture(engine, cat_table: str, rows, *, uwi=None, inventory_id=None,
             payload = _clamp(payload)
             sig = tuple(payload.keys())
             groups.setdefault(sig, []).append(payload)
+        _tick("build_payloads", _b0)
 
         for sig, payloads in groups.items():
             collist = ", ".join(f"[{c}]" for c in sig)
@@ -198,7 +244,10 @@ def capture(engine, cat_table: str, rows, *, uwi=None, inventory_id=None,
             binds = [{f"p{i}": p[c] for i, c in enumerate(sig)}
                      for p in payloads]
             try:
+                import time as _t
+                _i0 = _t.perf_counter()
                 con.execute(stmt, binds)        # executemany — one batch / shape
+                _tick("insert", _i0)
                 n += len(payloads)
             except Exception as _e:             # noqa: BLE001
                 if "truncation" not in str(_e).lower():
@@ -209,6 +258,11 @@ def capture(engine, cat_table: str, rows, *, uwi=None, inventory_id=None,
                 # report the exact column / value / true width. Good rows still
                 # land; only the genuinely-overlong cell is skipped (loudly).
                 n += _insert_isolating(con, cat_table, sig, payloads, say)
+    # Everything the call cost MINUS the parts named above. When capture
+    # owns the transaction this includes the COMMIT and its log flush;
+    # when the caller passes conn= it does not, which is itself the
+    # comparison worth having.
+    _tick("own_txn_overhead" if _own_txn else "caller_txn_overhead", _c0)
     return n
 
 

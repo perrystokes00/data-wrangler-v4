@@ -220,6 +220,17 @@ def _seed(ss, rows):
         try:
             df = pd.read_csv(r["path"], dtype=str, keep_default_na=False)
         except Exception as e:
+            # An empty file is recoverable, and used to be terminal: the df[[]] bug above
+            # wrote one, then this turned it into a permanent error because a frame that
+            # can't be read is a frame Save won't rewrite. _COLS knows what belongs in each
+            # kind, so rebuild the header and carry on with zero rows — which is the truth.
+            _empty = isinstance(e, getattr(pd.errors, "EmptyDataError", ()))
+            _cols = list((getattr(_pdf, "_COLS", {}) or {}).get(kind, [])) if _pdf else []
+            if _empty and _cols:
+                if "inventory_id" not in [c.lower() for c in _cols]:
+                    _cols = _cols + ["inventory_id"]
+                frames[r["path"]] = (kind, pd.DataFrame(columns=_cols), None)
+                continue
             frames[r["path"]] = (kind, None, str(e))
             continue
         df, summary = autofix_frame(kind, df)
@@ -343,7 +354,17 @@ def render_pdf_review(ss, schema=None):
         for path, (kind, df, err) in frames.items():
             if df is None:
                 continue
-            clean = df[[not row_is_empty(r.to_dict()) for _, r in df.iterrows()]]
+            # `df[[bool, bool, ...]]` filters rows — but ONLY while the list is non-empty.
+            # Delete the last row and the comprehension yields [], and pandas reads df[[]] as
+            # "select these zero COLUMNS", not "keep these zero rows". The result has no
+            # columns, to_csv writes a bare newline, and the next _seed() can't parse it:
+            #   couldn't read pdf_petro_interp.csv: No columns to parse from file
+            # After which nothing could repair it — Save skips a frame that failed to read,
+            # and the extractor skips a kind with no rows. Deleting the last row of a grid
+            # permanently bricked its CSV. .iloc with explicit positions keeps the columns.
+            keep = [i for i, (_, r) in enumerate(df.iterrows())
+                    if not row_is_empty(r.to_dict())]
+            clean = df.iloc[keep] if len(df.columns) else df
             clean.to_csv(path, index=False, encoding="utf-8")
             written.append(f"{os.path.basename(path)} ({len(clean)} rows)")
         ss["bdl_pdf_reviewed"] = True
