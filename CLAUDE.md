@@ -290,8 +290,16 @@ it's actually the correct default. **Open: make batched the default.**
 - **If EVERYTHING is slow, check `HKCU\SOFTWARE\ODBC\ODBC.INI\ODBC\Trace`
   first.** One click in odbcad32 → Tracing turns it on and it persists across
   reboots, slowing every ODBC call ~165× app-wide. `SELECT 1` is the test.
+- **DEV NOW RUNS THE REPO ONLY (17 Aug).** `app_v4.py` inserts its own root at
+  `sys.path[0]` before importing anything, so whichever interpreter launches it,
+  the modules beside it win. `start.bat` no longer defaults `PY` to the
+  installed embedded interpreter — it prefers `.venv`/`venv`, then PATH.
+  MEASURED the day this changed: the embedded python without the guard imported
+  `dataview` from the deployment, whose `LINEAGE` had **12** pairs against the
+  repo's **22** — still ten behind, five months of drift, and completely silent.
+  Anything launched by the old `start.bat` was running that.
 - **THERE ARE TWO COPIES OF THE CODE.** The repo, and a deployed copy at
-  `C:\Program Files\Data Wrangler v4\app\`. The app runs the DEPLOYED one
+  `C:\Program Files\Data Wrangler v4\app\`. The installed app runs the DEPLOYED one
   (`…\python\python.exe -m streamlit run …\app\app_v4.py`), so a repo edit
   changes nothing until it is deployed. Worse, `…\python\python.exe` is an
   EMBEDDED build: it does not put the script's directory or the cwd on

@@ -11,7 +11,29 @@ Dialect support: SQL Server · Oracle · Snowflake
 """
 
 from __future__ import annotations
+
+# ── THIS REPO WINS, whatever launched us ────────────────────────────────────
+# There are two copies of this code: this repo, and the deployed one under
+# C:\Program Files\Data Wrangler v4\app. The installed interpreter is an
+# EMBEDDED build whose sys.path carries that deployed app directory but NOT
+# the script's own folder — so launching THIS file with THAT python imported
+# `dataview` from the DEPLOYMENT. It is silent: the app runs, and every edit
+# made here appears to have no effect. The same trap gave
+# check_mirror_registry five phantom LINEAGE failures against a deployed copy
+# ten entries behind.
+#
+# start.bat still defaults PY to that embedded interpreter, so this is not
+# hypothetical. Inserting our own root at position 0 makes the question moot:
+# whichever python runs this file, the modules beside it are the ones that
+# load. Cheap, and it removes a whole class of "why didn't my change take".
 import os
+import sys as _sys
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _sys.path[:1] != [_ROOT]:
+    while _ROOT in _sys.path:
+        _sys.path.remove(_ROOT)
+    _sys.path.insert(0, _ROOT)
+
 import streamlit as st
 
 # ── module trace probe (temporary) ──

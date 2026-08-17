@@ -38,6 +38,16 @@ REM   put a bare C:\Python314 ahead of the runtime that actually has streamlit,
 REM   and every launch died with "No module named streamlit". Naming the
 REM   interpreter here makes this script immune to the next installer that
 REM   does the same thing; the PATH fallback keeps it working elsewhere.
+REM
+REM WHY IT IS NO LONGER THE INSTALLED ONE
+REM   This pointed at "C:\Program Files\Data Wrangler v4\python\python.exe" —
+REM   the INSTALLED, EMBEDDED interpreter. Its sys.path carries the DEPLOYED
+REM   app folder but not the script's own directory, so this dev launcher ran
+REM   the repo's app_v4.py while importing `dataview` from the deployment.
+REM   Silent: the app starts, and edits made in the repo appear to do nothing.
+REM   This is a DEV script for THIS repo, so it uses a normal interpreter and
+REM   never the installed one. app_v4.py also inserts its own root at sys.path
+REM   position 0, so a stray launcher cannot re-create the problem.
 REM ===========================================================================
 
 set "APP=app_v4.py"
@@ -45,7 +55,10 @@ set "PORT=8501"
 set "PIDFILE=%~dp0.dev_pid"
 set "SELF=%~nx0"
 
-set "PY=C:\Program Files\Data Wrangler v4\python\python.exe"
+REM A repo venv if setup.ps1 has been run, else the PATH python. Never the
+REM installed embedded build — see above.
+set "PY=%~dp0.venv\Scripts\python.exe"
+if not exist "%PY%" set "PY=%~dp0venv\Scripts\python.exe"
 if not exist "%PY%" set "PY=python"
 
 set "ACTION=%~1"
