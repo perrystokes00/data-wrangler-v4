@@ -1956,7 +1956,22 @@ def _tab_browse(engine, dialect):
     # Edit MATCHED_UWI or SURVEY_NAME inline for NEEDS_UWI/REVIEW files, then Save.
     # UWI is normalized to the canonical 14 (path_identity.norm_uwi14) — the same
     # recipe the pipeline uses — and readiness flips to READY so capture picks it up.
-    _assignable = df[df["CATALOG_READINESS"].isin(["NEEDS_UWI", "REVIEW", "ATTENTION"])]
+    # CATALOGED + blank MATCHED_UWI belongs here too. Such a file DID produce
+    # rows — which is exactly why readiness reads CATALOGED rather than
+    # NEEDS_UWI — but what holds those rows is the missing well, and assigning
+    # a UWI is the fix. Leaving it out meant the files with real staged data
+    # behind them were the only ones the panel would not offer to resolve, so
+    # "no UWI" looked like a reason to REJECT rather than to assign (17 Aug:
+    # SCOUT_REPORT1797 with 25 staged rows and WELL_TEST_REPORT6155 with 19
+    # were both invisible here).
+    #
+    # The blank-UWI qualifier is what keeps this honest: a CATALOGED file that
+    # already HAS a MATCHED_UWI is merely pending promote, not unresolved, and
+    # including those would crowd the grid with rows that need nothing.
+    _unresolved = ["NEEDS_UWI", "REVIEW", "ATTENTION"]
+    _blank_uwi = df["MATCHED_UWI"].fillna("").astype(str).str.strip().eq("")
+    _assignable = df[df["CATALOG_READINESS"].isin(_unresolved)
+                     | (df["CATALOG_READINESS"].eq("CATALOGED") & _blank_uwi)]
     if not _assignable.empty:
         with st.expander(f"✏️ Assign UWI / Survey — {len(_assignable)} unresolved file(s)",
                          expanded=False):
@@ -1978,7 +1993,9 @@ def _tab_browse(engine, dialect):
 
             st.caption("Well data → set **assign UWI** (14 digits, dashes ok — normalized on "
                        "save). Seismic → set **assign SURVEY_NAME**. Blank rows are left "
-                       "untouched. Saving flips readiness to READY.")
+                       "untouched. Saving flips readiness to READY. A row already reading "
+                       "**CATALOGED** has rows staged: saving re-arms capture, which refreshes "
+                       "them, and its detail promotes once that well exists in dv_well.")
             # Keep the editable column named MATCHED_UWI so it matches the field the
             # user knows; only SURVEY_NAME gets a friendlier label. No decoy read-only
             # UWI column: it's dropped from the summary table above (see st.dataframe).
