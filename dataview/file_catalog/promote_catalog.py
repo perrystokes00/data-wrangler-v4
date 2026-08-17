@@ -350,25 +350,69 @@ def _reference_fk_predicates(cur, dv_table, shared, alias="m"):
 
 
 def _fill_cat_coords_from_gold(cur, cat, lat_col, lon_col, uwi_filter, params):
-    """Pre-gate coord enrichment: fill cat_well surface coords from
-    well_master_gold (matched on normalized UWI = gold.uwi14) so a well gold
-    has a location for promotes rather than being held by REQUIRE_WELL_COORDS.
-    Fills only NULL/(0,0). Returns rows filled (0 on any error)."""
+    """Pre-gate coord enrichment: fill cat_well surface coords so a well whose
+    location is already KNOWN promotes instead of being held by
+    REQUIRE_WELL_COORDS. Fills only NULL/(0,0). Returns rows filled.
+
+    TWO SOURCES, TRIED IN ORDER — gold first, then dv_well.
+
+    Gold is the authority for real wells. But it only covers wells an agency
+    published, and this database also holds wells loaded straight from CSV into
+    dv_well — every synthetic well, and any direct load. Those match nothing in
+    gold, so a document naming one produced a cat_well row with no coordinates,
+    the gate held it, and the well it was held for was sitting in dv_well with a
+    perfectly good latitude. MEASURED 17 Aug: 29 distinct UWIs held for "no
+    coords", 26 of them already in dv_well WITH coordinates; 0 of 46 cat_well
+    rows matched gold's 4,031,052.
+
+    The gate was not protecting anything in those 26 cases. _promote_header
+    inserts under NOT EXISTS and otherwise COALESCE-fills, so promoting a row
+    whose well already exists cannot create an unmappable well — it can only
+    fill nulls on a mapped one. Filling from dv_well is the smaller change than
+    weakening the gate, and it leaves genuinely coordless NEW wells held, which
+    is the behaviour that matters.
+
+    Both joins normalise the mirror side with _norm and compare against a key
+    already stored canonical (gold.uwi14, dv_well.uwi char(14)) — the same
+    transform on both sides, per the padding rule that once cost six weeks of
+    false FK violations.
+
+    Returns (filled, note). Errors go into the NOTE, not into silence: this used
+    to `except: return 0`, so a broken enrich looked exactly like a well gold had
+    never heard of, and the well was held with a reason that was not the reason.
+    The note is rendered in promote's own output line for the mirror.
+    """
+    filled = 0
+    notes = []
     gold = "WELL_REF.well_ref.well_master_gold"
-    try:
-        cur.execute(
-            f"UPDATE m SET m.[{lat_col}] = g.surface_latitude, "
-            f"m.[{lon_col}] = g.surface_longitude "
-            f"FROM {CAT_SCHEMA}.{cat} m "
-            f"JOIN {gold} g ON g.uwi14 = {_norm('m.UWI')} "
-            f"WHERE m.PROMOTED = 0{uwi_filter} "
-            f"AND (m.[{lat_col}] IS NULL OR m.[{lon_col}] IS NULL "
-            f"OR (m.[{lat_col}] = 0 AND m.[{lon_col}] = 0)) "
-            f"AND g.surface_latitude IS NOT NULL AND g.surface_longitude IS NOT NULL "
-            f"AND NOT (g.surface_latitude = 0 AND g.surface_longitude = 0)", *params)
-        return cur.rowcount or 0
-    except Exception:
-        return 0
+    unset = (f"(m.[{lat_col}] IS NULL OR m.[{lon_col}] IS NULL "
+             f"OR (m.[{lat_col}] = 0 AND m.[{lon_col}] = 0))")
+
+    for label, src, join in (
+        ("gold", gold, f"JOIN {gold} g ON g.uwi14 = {_norm('m.UWI')}"),
+        ("dv_well", f"{DV_SCHEMA}.dv_well",
+         f"JOIN {DV_SCHEMA}.dv_well g ON g.uwi = {_norm('m.UWI')}"),
+    ):
+        try:
+            cur.execute(
+                f"UPDATE m SET m.[{lat_col}] = g.surface_latitude, "
+                f"m.[{lon_col}] = g.surface_longitude "
+                f"FROM {CAT_SCHEMA}.{cat} m "
+                f"{join} "
+                f"WHERE m.PROMOTED = 0{uwi_filter} "
+                f"AND {unset} "
+                f"AND g.surface_latitude IS NOT NULL "
+                f"AND g.surface_longitude IS NOT NULL "
+                f"AND NOT (g.surface_latitude = 0 AND g.surface_longitude = 0)",
+                *params)
+            n = cur.rowcount or 0
+            filled += n
+            if n:
+                notes.append(f"+{n} coords from {label}")
+        except Exception as e:
+            notes.append(f"{label} coord-enrich FAILED "
+                         f"({type(e).__name__}: {str(e)[:80]})")
+    return filled, (" · " + " · ".join(notes) if notes else "")
 
 
 def _promote_header(cur, dv, cat, shared, uwi_filter, params, apply):
@@ -384,17 +428,21 @@ def _promote_header(cur, dv, cat, shared, uwi_filter, params, apply):
     if REQUIRE_WELL_COORDS and _lat and _lon:
         coord_pred = f" AND m.[{_lat}] IS NOT NULL AND m.[{_lon}] IS NOT NULL"
     base = base + coord_pred
-    # PRE-GATE: give coordless wells a location from gold so they promote
-    # instead of being held (gold enrich used to run only post-promote).
+    # PRE-GATE: give coordless wells a location — from gold, then from dv_well —
+    # so a well whose position is already known promotes instead of being held.
+    # It runs BEFORE the eligibility count below, which is the whole point: the
+    # count must see the coordinates this just filled.
+    coord_note = ""
     if apply and REQUIRE_WELL_COORDS and _lat and _lon:
-        _fill_cat_coords_from_gold(cur, cat, _lat, _lon, uwi_filter, params)
+        _, coord_note = _fill_cat_coords_from_gold(cur, cat, _lat, _lon,
+                                                   uwi_filter, params)
     # Hold wells whose reference-FK value (status / province / uom …) isn't in
     # the dv_r_* reference, so an unseeded code parks the well rather than
     # aborting the header insert with a 547. Held wells stay in the mirror to be
     # resolved; their detail rows are held too (the dv_well EXISTS gate).
     ref_pred, held_cols = _reference_fk_predicates(cur, dv, shared, "m")
     base_g = base + ref_pred
-    held_note = ""
+    held_note = coord_note
 
     cur.execute(f"SELECT COUNT(DISTINCT {_norm('m.UWI')}) "
                 f"FROM {CAT_SCHEMA}.{cat} m WHERE {base_g}", *params)
@@ -404,7 +452,9 @@ def _promote_header(cur, dv, cat, shared, uwi_filter, params, apply):
                     f"FROM {CAT_SCHEMA}.{cat} m WHERE {base}", *params)
         held = (cur.fetchone()[0] or 0) - (eligible or 0)
         if held > 0:
-            held_note = f" · held {held} (unresolved {','.join(held_cols)})"
+            # += , not = : this assignment used to clobber anything already in
+            # held_note, which now carries the coord-enrich result.
+            held_note += f" · held {held} (unresolved {','.join(held_cols)})"
     if coord_pred:
         cur.execute(
             f"SELECT COUNT(DISTINCT {_norm('m.UWI')}) FROM {CAT_SCHEMA}.{cat} m "
