@@ -9,8 +9,9 @@ Steps:
   1. ensure triage columns exist on GLOBAL_FILE_CATALOG
   2. normalize UWI14 (digits-only API14) on FILE_WELL_HEADER
   3. cross-fill identity from the inventory's own sibling files
-  4. reference-fill from WELL_MASTER (name<-UWI; UWI<-name exact-unique or
-     TD/spud-corroborated)
+  4. reference-fill from WELL_MASTER (name<-UWI only). The reverse direction,
+     UWI<-name, was removed 18 Aug 2026: 14.3s of a 24s run to fill 0, seven
+     runs running, and unreliable by nature — see the note in reference_fill().
   5. score / tier each file (HIGH / REVIEW / LOW / REJECT)
 
 Nothing is overwritten — only blank values are filled, and every fill records
@@ -237,65 +238,37 @@ def reference_fill(conn, ref, dry):
         say(f"  filled {n} well name(s) from reference")
     total += n
 
-    # 4b. UWI14 <- name, exact + unique in the reference (via NAME_NORM)
-    uniq = f"""
-        WITH uniq AS (
-            SELECT NAME_NORM, MIN(UWI14) AS UWI14
-            FROM {ref}
-            WHERE NULLIF(UWI14,'') IS NOT NULL
-              AND NULLIF(LTRIM(RTRIM(NAME_NORM)),'') IS NOT NULL
-            GROUP BY NAME_NORM HAVING COUNT(*) = 1
-        )
-    """
-    if dry:
-        cur.execute(uniq + f"""
-            SELECT COUNT(*) FROM {FWH} h JOIN uniq q ON h.NAME_NORM = q.NAME_NORM
-            WHERE NULLIF(h.UWI14,'') IS NULL""")
-        n = cur.fetchone()[0]
-        say(f"  [dry] would fill {n} UWI(s) from reference (exact+unique)")
-    else:
-        cur.execute(uniq + f"""
-            UPDATE h SET UWI14 = q.UWI14, IDENTITY_SOURCE = 'ref-name-unique'
-            FROM {FWH} h JOIN uniq q ON h.NAME_NORM = q.NAME_NORM
-            WHERE NULLIF(h.UWI14,'') IS NULL""")
-        n = cur.rowcount
-        say(f"  filled {n} UWI(s) from reference (exact+unique)")
-    total += n
-
-    # 4c. UWI14 <- name (NAME_NORM), corroborated by TD or spud, unambiguous after
-    corro = f"""
-        FROM {FWH} h
-        JOIN {ref} r ON h.NAME_NORM = r.NAME_NORM
-        WHERE NULLIF(h.UWI14,'') IS NULL
-          AND ( ( TRY_CONVERT(float,h.TOTAL_DEPTH) IS NOT NULL
-                  AND TRY_CONVERT(float,r.TOTAL_DEPTH) IS NOT NULL
-                  AND ABS(TRY_CONVERT(float,h.TOTAL_DEPTH)
-                          - TRY_CONVERT(float,r.TOTAL_DEPTH)) <= 50 )
-                OR ( TRY_CONVERT(date,h.SPUD_DATE) IS NOT NULL
-                     AND TRY_CONVERT(date,h.SPUD_DATE)
-                         = TRY_CONVERT(date,r.SPUD_DATE) ) )
-          AND NOT EXISTS (
-                SELECT 1 FROM {ref} r2
-                WHERE r2.NAME_NORM = h.NAME_NORM AND r2.UWI14 <> r.UWI14
-                  AND ( ( TRY_CONVERT(float,h.TOTAL_DEPTH) IS NOT NULL
-                          AND TRY_CONVERT(float,r2.TOTAL_DEPTH) IS NOT NULL
-                          AND ABS(TRY_CONVERT(float,h.TOTAL_DEPTH)
-                                  - TRY_CONVERT(float,r2.TOTAL_DEPTH)) <= 50 )
-                        OR ( TRY_CONVERT(date,h.SPUD_DATE) IS NOT NULL
-                             AND TRY_CONVERT(date,h.SPUD_DATE)
-                                 = TRY_CONVERT(date,r2.SPUD_DATE) ) ) )
-    """
-    if dry:
-        cur.execute("SELECT COUNT(*) " + corro)
-        n = cur.fetchone()[0]
-        say(f"  [dry] would fill {n} UWI(s) from reference (TD/spud corroborated)")
-    else:
-        cur.execute(
-            "UPDATE h SET UWI14 = r.UWI14, IDENTITY_SOURCE = 'ref-name-corroborated' "
-            + corro)
-        n = cur.rowcount
-        say(f"  filled {n} UWI(s) from reference (TD/spud corroborated)")
-    total += n
+    # 4b / 4c. UWI14 <- WELL_NAME: REMOVED 18 Aug 2026.
+    #
+    # These were the second copy of the name->UWI lookup deleted from
+    # enrich_file_headers pass 1 the same day, and the more expensive of the
+    # two. MEASURED on a 20-file load: this step cost 14.3s of a 24s run — the
+    # single largest cost in the pipeline — and across seven runs it filled
+    # ZERO on every one:
+    #
+    #     filled 0 UWI(s) from reference (exact+unique)          x7
+    #     filled 0 UWI(s) from reference (TD/spud corroborated)  x7
+    #
+    # 4b aggregated the ENTIRE 4.03M-row gold master on every run
+    # (GROUP BY NAME_NORM HAVING COUNT(*) = 1) to find globally unique names;
+    # 4c ran a correlated NOT EXISTS back over the same 4M rows per candidate.
+    # Neither is incremental — the cost is paid in full whether one file was
+    # loaded or a thousand, and it grows with the reference, not the batch.
+    #
+    # Correctness, not just cost: matching a well by NAME is unreliable against
+    # a national master. Enrich pass 1's two lifetime writes were both wrong —
+    # a Kansas log (STATE 'KS', COUNTY '15031') assigned a Utah UWI because
+    # 'JONES 27-9' also names a well in San Juan County, UT. 4b's uniqueness
+    # test and 4c's TD/spud corroboration are stronger tests than pass 1 used,
+    # but they answer the same unreliable question, and a wrong UWI is worse
+    # than a blank one: blank holds the row in cat_* where it is visible.
+    #
+    # 4a above is KEPT and is the safe direction — it fills a blank NAME from
+    # the reference keyed on UWI14, an identifier, not a name.
+    #
+    # Identity still resolves from the file's own header (bcp_capture), from
+    # the inventory cross-fill (step 3, which matched 17 UWIs on the same run
+    # this step matched 0), and from the filename (step 4b-path below).
     return total
 
 

@@ -15,14 +15,16 @@ Passes
   0. CURATE UWI14 — add a persisted CHAR(14) UWI14 column on FILE_WELL_HEADER and
      fill it from the raw UWI (strip -_./ and spaces, require numeric & >=10, then
      pad/truncate to 14). NULL means the UWI field isn't a real API — flagged for
-     review, raw UWI left untouched as provenance. Passes 1-2 then key off this
+     review, raw UWI left untouched as provenance. Pass 2 then keys off this
      stored column instead of recomputing the normalisation on every run. The
      column/index/populate happen only on a live run; --dry-run just previews counts.
-  1. RESOLVE MISSING UWI — headers with a blank UWI but a name are joined to the
-     master on NAME_NORM. One well -> taken; several -> tie-broken by agreement
-     on county/state/operator/field (1 pt) and total depth ±tol / spud date
-     (2 pts). Written only when the winner is unambiguous.
-  2. FILL BLANK ATTRIBUTES — headers with a UWI (original or resolved) get blank
+  1. RESOLVE MISSING UWI BY NAME — REMOVED 18 Aug 2026. It cost ~88% of this
+     stage to produce two writes, both of them wrong (a Kansas log assigned a
+     Utah UWI on a name match alone). Its scoring could not tell a contradicted
+     attribute from a missing one. See the block comment at pass 1's old site.
+     A blank UWI is now left blank, and holds the row in cat_* — which is the
+     intended behaviour, not a gap.
+  2. FILL BLANK ATTRIBUTES — headers with a UWI (from the file's own header) get blank
      columns filled from the master (unambiguous values only; never overwrites).
   3. SEIS SURVEY FROM FILE NAME — blank SURVEY_NAME derived from the file name.
 
@@ -44,7 +46,7 @@ Usage
 -----
     py enrich_file_headers.py --dry-run
     py enrich_file_headers.py
-    py enrich_file_headers.py --depth-tol 100 --no-seis
+    py enrich_file_headers.py --no-seis
 
 Requires:  pip install pyodbc
 """
@@ -71,10 +73,6 @@ FILL_MAP = {                                   # reference col -> header col
     "WELL_NAME": "WELL_NAME", "OPERATOR_NAME": "OPERATOR",
     "FIELD_NAME": "WELL_FIELD", "PROVINCE_STATE": "STATE", "COUNTY": "COUNTY",
     "SURFACE_LATITUDE": "LATITUDE", "SURFACE_LONGITUDE": "LONGITUDE",
-}
-MATCH_MAP = {                                  # header col -> reference col
-    "COUNTY": "COUNTY", "STATE": "PROVINCE_STATE", "OPERATOR": "OPERATOR_NAME",
-    "WELL_FIELD": "FIELD_NAME", "TOTAL_DEPTH": "TOTAL_DEPTH", "SPUD_DATE": "SPUD_DATE",
 }
 REVERSE_MAP = {                                # header col -> reference col (doc -> master)
     "WELL_NAME": "WELL_NAME", "OPERATOR": "OPERATOR_NAME", "WELL_FIELD": "FIELD_NAME",
@@ -123,28 +121,6 @@ def u14_sql(col):
             f"THEN LEFT({c} + REPLICATE('0',14), 14) ELSE NULL END)")
 
 
-def score_expr(match_pairs, tol):
-    terms = []
-    for hc, rc in match_pairs:
-        if hc == "TOTAL_DEPTH":
-            terms.append(
-                "CASE WHEN TRY_CONVERT(float,h.[TOTAL_DEPTH]) IS NOT NULL "
-                f"AND TRY_CONVERT(float,m.[{rc}]) IS NOT NULL "
-                f"AND ABS(TRY_CONVERT(float,h.[TOTAL_DEPTH])-TRY_CONVERT(float,m.[{rc}])) <= {tol} "
-                "THEN 2 ELSE 0 END")
-        elif hc == "SPUD_DATE":
-            terms.append(
-                "CASE WHEN TRY_CONVERT(date,h.[SPUD_DATE]) IS NOT NULL "
-                f"AND TRY_CONVERT(date,h.[SPUD_DATE]) = TRY_CONVERT(date,m.[{rc}]) "
-                "THEN 2 ELSE 0 END")
-        else:
-            terms.append(
-                f"CASE WHEN NULLIF(LTRIM(RTRIM(h.[{hc}])),'') IS NOT NULL "
-                f"AND UPPER(LTRIM(RTRIM(h.[{hc}]))) = UPPER(LTRIM(RTRIM(m.[{rc}]))) "
-                "THEN 1 ELSE 0 END")
-    return " + ".join(terms) if terms else "0"
-
-
 def blank(col):
     return f"({col} IS NULL OR LTRIM(RTRIM({col})) = '')"
 
@@ -156,7 +132,6 @@ def main():
     p.add_argument("--database", default=DEFAULT_DB)
     p.add_argument("--odbc-driver", default=DEFAULT_DRIVER)
     p.add_argument("--ref", default=DEFAULT_REF, help="3-part well master name")
-    p.add_argument("--depth-tol", type=float, default=50.0)
     p.add_argument("--no-well", action="store_true")
     p.add_argument("--no-seis", action="store_true")
     p.add_argument("--no-reverse", action="store_true",
@@ -174,7 +149,7 @@ def enrich(conn, a, log=print, progress=None):
 
     `conn`  any DBAPI connection (pyodbc, or sqlalchemy engine.raw_connection()).
     `a`     namespace with the same attributes the CLI args define
-            (ref, depth_tol, no_well, no_seis, no_reverse, dry_run, report,
+            (ref, no_well, no_seis, no_reverse, dry_run, report,
              reverse_report, server, database).
     `log`   receives progress lines (print for CLI, a Streamlit sink for the UI).
     `progress`  optional callable(step, total, label) for a UI progress bar.
@@ -191,7 +166,7 @@ def enrich(conn, a, log=print, progress=None):
     _total = (1                              # reflect schema
               + (1 if _want_well else 0)     # pass 0 curate
               + (1 if _want_rev  else 0)     # reverse capture
-              + (2 if _want_well else 0)     # pass 1 + pass 2
+              + (1 if _want_well else 0)     # pass 2
               + (1 if _want_seis else 0))    # SEIS
     _t0 = time.perf_counter()
     _clk = {"last": _t0, "prev": None, "i": 0}
@@ -233,13 +208,10 @@ def enrich(conn, a, log=print, progress=None):
     shc = table_cols(cur, "file_catalog.FILE_SEIS_HEADER")
 
     fill_pairs  = [(rc, hc) for rc, hc in FILL_MAP.items() if rc in ref_cols and hc in whc]
-    match_pairs = [(hc, rc) for hc, rc in MATCH_MAP.items() if hc in whc and rc in ref_cols]
     say(f"[REF   ] fill from: {', '.join(rc for rc, _ in fill_pairs) or '—'}")
-    say(f"[REF   ] disambiguate on: {', '.join(h for h, _ in match_pairs) or 'name only'}")
 
     audit = []
     rev = []
-    nnH = nn_sql("h.WELL_NAME")
 
     # ── WELL pass 0: curate persisted UWI14 on the header (then 1-2 use it) ──
     has_uwi14 = "UWI14" in whc
@@ -376,94 +348,41 @@ def enrich(conn, a, log=print, progress=None):
                     say(f"[WELL  ] {DOC_CONTRIB}: +{nnew:,} new (deduped against existing)")
 
 
-    # ── WELL pass 1: resolve a missing UWI by name (+ attribute tie-break) ───
+    # ── WELL pass 1: REMOVED 18 Aug 2026 — name→UWI matching was unreliable ──
+    #
+    # This resolved a blank UWI by joining FILE_WELL_HEADER.WELL_NAME to the
+    # 4.03M-row gold master on NAME_NORM, then tie-breaking on attribute
+    # agreement. MEASURED over six pipeline runs before removal:
+    #
+    #   cost     4.4–6.9s per run — ~88% of the whole enrich stage, and ~30% of
+    #            the entire pipeline wall clock for a 20-file load.
+    #   output   2 of enrich's 100 writes. The other 98 are pass 2's
+    #            basis=uwi fills, which together cost 0.12–0.35s.
+    #   quality  BOTH writes wrong. 15031209650000_1/_2.las — STATE 'KS',
+    #            COUNTY '15031', and the correct UWI sitting in the filename —
+    #            were assigned 43037309440000, which the gold master calls
+    #            'Jones 27-9' in SAN JUAN county, UTAH. One was taken at score 0.
+    #
+    # The defect was structural, not tuning. score_expr scored +1/+2 for an
+    # agreeing attribute and 0 otherwise, so a CONTRADICTION was
+    # indistinguishable from a missing value: 'KS' vs 'UT' scored exactly what
+    # an unknown state scored. The acceptance rule then took any globally
+    # unique name (uwis = 1) with no corroboration at all. A name-only match
+    # against a 4M-row national master collides by construction — and the same
+    # join had one junk name ('3', from a .docx header) matching 35,743 gold
+    # rows, which was on its own the entire cost of the stage.
+    #
+    # Wrong is worse than missing. A blank UWI is visible and holds the row in
+    # cat_*; a confidently wrong one plots, exports and gets quoted. Identity is
+    # still resolved three other ways, all keyed on an identifier rather than a
+    # name: the file's own header (bcp_capture), the inventory cross-fill
+    # (triage step 3), and pass 0's UWI14 curation below.
+    #
+    # If this is ever rebuilt it needs, at minimum: a negative score for a
+    # contradicted attribute, a mandatory corroborating attribute (drop the
+    # bare uwis = 1 branch), and a guard against names that cannot discriminate
+    # (LEN < 4, all-digits). MATCH_MAP, match_pairs and score_expr went with it.
     if not a.no_well:
-        _tick("pass 1 — resolve missing UWI")
-        say("[WELL  ] pass 1 — resolving missing UWIs (server-side join)…")
-
-        # Materialize the name→reference matches ONCE. The previous version put
-        # the WELL_MASTER join in a CTE (`scored`) that `agg`, `pk` and the final
-        # SELECT each referenced — and a multiply-referenced CTE over a 2.5M-row
-        # CROSS-DATABASE table is re-evaluated per reference, re-scanning
-        # WELL_MASTER several times (and again for the UPDATE). Pulling it into
-        # #scored forces a single pass; every aggregation below is then local.
-        # Use the NAME_NORM index hint ONLY if that index exists on the ref
-        # table — otherwise SQL Server errors (308) instead of ignoring it.
-        # Missing index = slower join, never a failed stage.
-        _ixhint = ""
-        try:
-            cur.execute("SELECT 1 FROM sys.indexes WHERE name='IX_WM_NAME_NORM' AND object_id=OBJECT_ID(?)", ref)
-            if cur.fetchone():
-                _ixhint = " WITH (INDEX(IX_WM_NAME_NORM))"
-        except Exception:
-            _ixhint = ""
-        cur.execute("IF OBJECT_ID('tempdb..#scored') IS NOT NULL DROP TABLE #scored")
-        # Cheap LOCAL pre-check: how many headers still have a blank UWI to
-        # resolve? Pass 0 curates UWI14 for most, so this is usually 0 — and
-        # when it is, skip the 3.9M-row cross-DB gold join entirely (was ~6s of
-        # pure waste). Build an empty #scored so the rest of pass 1 no-ops.
-        _need1 = cur.execute(
-            f"SELECT COUNT(*) FROM file_catalog.FILE_WELL_HEADER h "
-            f"WHERE {blank('h.UWI')} AND {nnH} <> ''").fetchone()[0]
-        if _need1:
-            cur.execute(f"""
-                SELECT h.WELL_HEADER_ID, m.UWI14,
-                       ({score_expr(match_pairs, a.depth_tol)}) AS score
-                INTO #scored
-                FROM file_catalog.FILE_WELL_HEADER h
-                INNER LOOP JOIN {ref} m{_ixhint}
-                  ON m.NAME_NORM = {nnH} AND m.UWI_SUSPECT = 0
-                 AND m.UWI14 IS NOT NULL AND m.UWI14 <> '{ZERO_UWI}'
-                WHERE {blank('h.UWI')} AND {nnH} <> ''""")
-        else:
-            say("[WELL  ] pass 1 — 0 blank UWIs; skipped the 3.9M-row gold join")
-            cur.execute("SELECT TOP 0 h.WELL_HEADER_ID, "
-                        "CAST(NULL AS CHAR(14)) AS UWI14, CAST(0 AS INT) AS score "
-                        "INTO #scored FROM file_catalog.FILE_WELL_HEADER h WHERE 1=0")
-        cur.execute("CREATE INDEX IX_scored ON #scored(WELL_HEADER_ID)")
-
-        # one row per header: distinct-UWI count, best score, and how many
-        # distinct UWIs tie at that best score — all against the local temp
-        cur.execute("IF OBJECT_ID('tempdb..#pick') IS NOT NULL DROP TABLE #pick")
-        cur.execute("""
-            WITH agg AS (
-                SELECT WELL_HEADER_ID, COUNT(DISTINCT UWI14) AS uwis,
-                       MAX(score) AS topscore
-                FROM #scored GROUP BY WELL_HEADER_ID),
-            pk AS (
-                SELECT s.WELL_HEADER_ID, COUNT(DISTINCT s.UWI14) AS top_uwis,
-                       MIN(s.UWI14) AS uwi14
-                FROM #scored s
-                JOIN agg a ON a.WELL_HEADER_ID = s.WELL_HEADER_ID
-                          AND s.score = a.topscore
-                GROUP BY s.WELL_HEADER_ID)
-            SELECT a.WELL_HEADER_ID, a.uwis, a.topscore, pk.top_uwis, pk.uwi14
-            INTO #pick
-            FROM agg a JOIN pk ON pk.WELL_HEADER_ID = a.WELL_HEADER_ID""")
-        where_ok = "p.uwis = 1 OR (p.top_uwis = 1 AND p.topscore >= 1)"
-
-        n = 0
-        for hid, inv, u14, wn, old, top in cur.execute(f"""
-            SELECT p.WELL_HEADER_ID, h.INVENTORY_ID, p.uwi14, h.WELL_NAME,
-                   h.UWI, p.topscore
-            FROM #pick p
-            JOIN file_catalog.FILE_WELL_HEADER h
-              ON h.WELL_HEADER_ID = p.WELL_HEADER_ID
-            WHERE {where_ok}""").fetchall():
-            n += 1
-            audit.append({"table": "WELL", "inventory_id": inv, "action": "set-uwi",
-                          "column": "UWI", "old": old or "", "new": u14,
-                          "basis": f"name+score{int(top or 0)}"})
-        say(f"[WELL  ] resolvable UWIs: {n:,}")
-        if n and not a.dry_run:
-            cur.execute(f"""
-                UPDATE h SET h.UWI = p.uwi14, h.UWI14 = p.uwi14
-                FROM file_catalog.FILE_WELL_HEADER h
-                JOIN #pick p ON p.WELL_HEADER_ID = h.WELL_HEADER_ID
-                WHERE ({where_ok}) AND {blank('h.UWI')}""")
-            say(f"[WELL  ] wrote {n:,} UWI(s)")
-        cur.execute("IF OBJECT_ID('tempdb..#scored') IS NOT NULL DROP TABLE #scored")
-        cur.execute("IF OBJECT_ID('tempdb..#pick') IS NOT NULL DROP TABLE #pick")
 
         # ── WELL pass 2: fill blank attributes by UWI ────────────────────────
         _tick("pass 2 — fill blank attributes")
