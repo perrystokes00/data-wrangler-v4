@@ -319,10 +319,30 @@ it's actually the correct default. **Open: make batched the default.**
   beside it win" true, and they cost nothing. A surprising import result is
   still worth `print(module.__file__)` before it is worth a theory.
 
-  **The interpreter is now whatever PATH gives you** — currently the Microsoft
-  Store Python 3.12.10, which carries all 154 pinned requirements. There is no
-  `.venv` yet; `start.bat` will use one the moment it exists, so creating one
-  from `requirements.txt` is the way to stop depending on a global install.
+  **The repo now carries its own environment (18 Aug).** `setup.ps1` built
+  `.venv` from `requirements.txt` — 154 packages, `include-system-site-packages
+  = false`, verified isolated (streamlit / pyodbc / lasio / sqlalchemy /
+  geopandas / anthropic / h3 all resolve from `.venv\Lib\site-packages`, none
+  from the Store's). `start.bat` and `run.ps1` both prefer it, the pipeline
+  runs on it, and `app_v4.py` serves HTTP 200 from it. Rebuild with
+  `.\setup.ps1 -Recreate`; never commit it (absolute paths are baked into its
+  launchers — that is why a venv copied from `data_wrangler_clean` produced
+  "Unable to create process using …").
+
+  Two caveats worth knowing:
+  - **The base is the Microsoft Store Python 3.12.10** (`py -3` finds nothing
+    else; the `AppData\Local\Programs\Python\Python312` tree has no
+    `python.exe` and the chocolatey `python3.14` shim points at a path that
+    does not exist). `sys.base_prefix` is inside `C:\Program Files\WindowsApps`,
+    so the venv still needs that Store package present. Installing a
+    python.org 3.12 and re-running `.\setup.ps1 -Recreate` would cut the last
+    tether.
+  - **`.venv` is 65,455 files / 1.26 GB inside the OneDrive sync root.**
+    `.gitignore` covers it; OneDrive does not read `.gitignore`. If sync starts
+    churning, make `.venv` a directory junction to somewhere outside OneDrive
+    (`mklink /J`) — `start.bat` and `run.ps1` both test for
+    `.venv\Scripts\python.exe`, which a junction satisfies, and OneDrive does
+    not follow reparse points.
 - `page_well_map.py` is ~520KB and 100% CRLF. Check
   `d.count(b'\r\n')` against total after every edit.
 
