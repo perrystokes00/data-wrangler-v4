@@ -193,10 +193,12 @@ reports could not see.
 **The check was written and immediately caught the wrong thing**, which is the
 lesson worth keeping: it reported five tables missing from `LINEAGE` that the
 repo's `LINEAGE` plainly named. `check_mirror_registry.py` did not put its own
-directory on `sys.path`, and the app's shipped interpreter is an EMBEDDED build
-(`sys.path` = `python312.zip`, the runtime, site-packages, and
-`C:\Program Files\Data Wrangler v4\app` — no `''`, no script dir), so it
-imported `dataview` from the DEPLOYED copy. See Environment below.
+directory on `sys.path`, and the app's shipped interpreter was an EMBEDDED build
+carrying `C:\Program Files\Data Wrangler v4\app` but neither `''` nor the script
+dir — so it imported `dataview` from the DEPLOYED copy. That specific trap is
+gone (the install was removed 18 Aug — see Environment), but the lesson is not:
+**a tool that reports a surprising failure may be reading different code than
+you are.** `print(module.__file__)` costs one line and settles it.
 
 ---
 
@@ -290,26 +292,37 @@ it's actually the correct default. **Open: make batched the default.**
 - **If EVERYTHING is slow, check `HKCU\SOFTWARE\ODBC\ODBC.INI\ODBC\Trace`
   first.** One click in odbcad32 → Tracing turns it on and it persists across
   reboots, slowing every ODBC call ~165× app-wide. `SELECT 1` is the test.
-- **DEV NOW RUNS THE REPO ONLY (17 Aug).** `app_v4.py` inserts its own root at
-  `sys.path[0]` before importing anything, so whichever interpreter launches it,
-  the modules beside it win. `start.bat` no longer defaults `PY` to the
-  installed embedded interpreter — it prefers `.venv`/`venv`, then PATH.
-  MEASURED the day this changed: the embedded python without the guard imported
-  `dataview` from the deployment, whose `LINEAGE` had **12** pairs against the
-  repo's **22** — still ten behind, five months of drift, and completely silent.
-  Anything launched by the old `start.bat` was running that.
-- **THERE ARE TWO COPIES OF THE CODE.** The repo, and a deployed copy at
-  `C:\Program Files\Data Wrangler v4\app\`. The installed app runs the DEPLOYED one
-  (`…\python\python.exe -m streamlit run …\app\app_v4.py`), so a repo edit
-  changes nothing until it is deployed. Worse, `…\python\python.exe` is an
-  EMBEDDED build: it does not put the script's directory or the cwd on
-  `sys.path`, but it DOES carry `…\app` — so running a repo script with it
-  imports `dataview` from the deployment unless the script inserts its own
-  root first. `selftest.py` does; `check_mirror_registry.py` did not, and
-  reported five phantom `LINEAGE` failures against a stale deployed copy that
-  was ten entries behind. Any new root-level tool must do the same insert, and
-  a surprising result from one is worth `print(module.__file__)` before it is
-  worth a theory.
+- **THERE IS NOW ONE COPY OF THE CODE (18 Aug).** The installed build at
+  `C:\Program Files\Data Wrangler v4\` was uninstalled and its directory
+  removed — application, Start Menu shortcuts and the bundled embedded
+  interpreter all gone. The repo is the only copy. Verified before removing:
+  all ten files that existed only in the deployment also exist in the repo
+  (at tidier paths — `tools/`, `dataview/migration/`, `_attic/`); the install
+  held no vault, reports, database, `.env` or licence state; and `bcp` comes
+  from the SQL Server Client SDK, not the bundle, so the capture fast path is
+  unaffected. The only unique file was the build manifest, saved as
+  `build/DIST_MANIFEST_20260710_installed.txt` alongside a file listing.
+  A 20-file LAS load was re-run afterwards: same 15 CATALOGED, 180 rows.
+
+  **What this retires.** The old warning here was that a repo edit changed
+  nothing until deployed, and that `…\python\python.exe` was an EMBEDDED build
+  which put `…\app` on `sys.path` but not the script's directory — so a repo
+  script silently imported `dataview` from the deployment. That is how
+  `check_mirror_registry.py` reported five phantom `LINEAGE` failures against a
+  copy ten entries behind. Neither hazard can occur now: there is no second
+  copy and no interpreter carrying one. `promotion_lineage.LINEAGE` reads 22
+  pairs, from the repo, full stop.
+
+  **What still holds.** `app_v4.py` inserts its own root at `sys.path[0]`
+  before importing anything, and `start.bat` prefers `.venv`/`venv` then PATH.
+  Keep both: they are what make "whichever interpreter launches it, the modules
+  beside it win" true, and they cost nothing. A surprising import result is
+  still worth `print(module.__file__)` before it is worth a theory.
+
+  **The interpreter is now whatever PATH gives you** — currently the Microsoft
+  Store Python 3.12.10, which carries all 154 pinned requirements. There is no
+  `.venv` yet; `start.bat` will use one the moment it exists, so creating one
+  from `requirements.txt` is the way to stop depending on a global install.
 - `page_well_map.py` is ~520KB and 100% CRLF. Check
   `d.count(b'\r\n')` against total after every edit.
 
@@ -327,9 +340,19 @@ it's actually the correct default. **Open: make batched the default.**
   `CAPINO` (the proper fix — `reload_wy_master.py` does this)
 
 **Known gaps:**
-- Deploying the repo to `C:\Program Files\Data Wrangler v4\app` is a manual
-  step with nothing checking the two are in sync — the deployed copy was found
-  ten `LINEAGE` entries behind on 16 Aug
+- ~~Deploying the repo to `C:\Program Files\Data Wrangler v4\app` is a manual
+  step with nothing checking the two are in sync~~ **CLOSED 18 Aug — the
+  install was removed; there is nothing to keep in sync.** If a packaged build
+  is ever wanted again, `build_installer.ps1` / `make_dist.py` still produce
+  one — but re-introducing an installed copy re-introduces the drift, so pin a
+  version check to the build if it comes back.
+- **Three reset paths, three different protection lists.** `demo_reset`
+  (v4) preserves `dv_column_map` / `dv_column_synonym` / `dv_target_attribute`;
+  `clear_catalog.PROTECTED` preserves those *plus* `dv_global_file_catalog`;
+  and `data_wrangler_v3/modules/demo_reset.py` preserves **none** of them while
+  pointing at the same `DataView_Demo`. The v3 reset would silently destroy
+  2,604 rows of learned mappings that cannot be regenerated. `demo_reset.py`'s
+  own comment already says the paths must protect the same names — they do not.
 - Compound-key FKs are silently unchecked (`if len(ccols) != 1: continue`)
 - Entity-parent resolution (name → surrogate id) has no UI
 - A retarget doesn't update the fingerprint memory; a skip does
