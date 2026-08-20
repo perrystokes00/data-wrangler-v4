@@ -10188,6 +10188,14 @@ def run(engine=None):
                     _selected = [str(r["UWI"]) for _, r in _tray_edit.iterrows()
                                  if bool(r["Select"])]
                     st.session_state[_sel_key] = _selected
+                    # Repaint once so the count and the buttons below agree with
+                    # what was just applied. The "N of M selected" caption is
+                    # drawn INSIDE the form, i.e. before this handler runs, so
+                    # without this it reports the previous selection and reads
+                    # like the Apply did nothing. One rerun per Apply is the
+                    # deliberate cost; the point of the form is that ticking
+                    # itself no longer causes one.
+                    st.rerun()
 
                 selected_in_results = list(_selected)
                 st.markdown(
