@@ -23,7 +23,7 @@ OUT = os.path.join(ROOT, "docs", "components")
 # source .docx -> (output slug, nav label, one-line standfirst)
 PAGES = [
     ("1. DataView_Database.docx", "dataview", "DataView",
-     "The database. A PPDM 3.9 derivative, reshaped for messy real-world data."),
+     "The database. Derived in part from PPDM 3.9, then evolved - an integrated file catalogue and geometry the map reads directly."),
     ("4. File_Catalog.docx", "file-catalog", "File Catalog",
      "The unstructured half. Crawl a share, catalogue what is there, extract what is useful."),
     ("2.Data_Assistant.docx", "data-assistant", "Data Assistant",

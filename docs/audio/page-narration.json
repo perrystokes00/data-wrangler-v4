@@ -8,7 +8,7 @@
     "at": 0.0,
     "window": 0.0,
     "label": "What this is",
-    "text": "Data Wrangler. Documents in, and a database you can defend. Every tool can read your documents now — the difference is what happens to what they say. Data Wrangler puts it into a governed PPDM derivative, and refuses to put in what it cannot prove. This is a short tour of the page. Everything described here is shown running in the films further down."
+    "text": "Data Wrangler. Round up your data and documents, and load them into the DataView database. Every tool can read your documents now — the difference is what happens to what they say. Data Wrangler puts it somewhere you can defend, and refuses to put in what it cannot prove. This is a short tour of the page. Everything described here is shown running in the films further down."
   },
   {
     "id": "P02",
@@ -29,7 +29,7 @@
     "at": 0.0,
     "window": 0.0,
     "label": "The components",
-    "text": "Seven components, each doing a narrow job. DataView is the database, shipped with three point nine million agency well headers already in it. The File Catalog takes a folder of anything and works through it. The Data Assistant handles data that already has columns. The Document Assistant reads reports and finds the tables inside them. Mapping is for the questions you cannot phrase as a query. DB Explorer queries the database directly, and the reference tables hold the vocabularies that loading checks against."
+    "text": "Seven components, each doing a narrow job. DataView is the database. It began as a PPDM three point nine derivative and has evolved since: the file catalogue is held as tables in the database itself, and the map reads the same geometry — so you can ask a spatial question without running a GIS beside it. It ships with three point nine million agency well headers already loaded. The File Catalog takes a folder of anything and works through it. The Data Assistant handles data that already has columns. The Document Assistant reads reports and finds the tables inside them. Mapping is for the questions you cannot phrase as a query. DB Explorer queries the database directly, and the reference tables hold the vocabularies that loading checks against."
   },
   {
     "id": "P05",

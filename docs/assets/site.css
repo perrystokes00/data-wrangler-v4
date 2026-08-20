@@ -63,7 +63,10 @@ code{font-family:var(--mono);color:var(--gold-bright);font-size:.92em}
   font-family:var(--mono);font-size:13px;letter-spacing:.22em;
   text-transform:uppercase;color:var(--gold);margin-bottom:26px;
 }
-.hero h1{font-size:clamp(38px,6vw,74px);max-width:17ch}
+/* Sized for the two-clause title, which is ~37 characters on its longest line.
+   The previous 17ch/74px was set for a much shorter headline and broke this one
+   across five lines, where it swamped everything below it. */
+.hero h1{font-size:clamp(27px,3.9vw,47px);max-width:40ch;line-height:1.18}
 .hero .lede{font-size:clamp(19px,2.2vw,25px);color:var(--ink-mid);max-width:62ch;margin:28px 0 0}
 .hero .sub{color:var(--ink-mute);max-width:62ch;margin:18px 0 0}
 .cta{display:flex;gap:14px;margin-top:38px;flex-wrap:wrap}
