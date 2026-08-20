@@ -1,21 +1,21 @@
 [
   {
     "source": "(no video - this narrates the web page itself)",
-    "note": "Rendered to docs/audio/page-narration.m4a and played by the 'Listen to this page' control in the hero. Same voice as the films: SAPI Microsoft Zira Desktop, rate 0. Acronyms are spelled out for the synthesiser (L A S, S Q L, P P D M, geo jason, geo graphics, Ezri) - written normally they are guessed at, and 'here is'/'here has' elide into something that sounds like a word of its own. Keep both habits when editing."
+    "note": "Rendered to docs/audio/page-narration.m4a and played by the 'Listen to this page' control in the hero. Same voice as the films: SAPI Microsoft Zira Desktop, rate 0. NO EM-DASHES in narration text: SAPI ignores them completely, giving no pause at all, so the clauses either side collide ('now - the difference' is spoken exactly as 'now the difference'). A comma or a full stop does pause. Acronyms are also spelled for the synthesiser (L A S, S Q L, P P D M, geo jason, geo graphics, Ezri), and 'here is'/'here has' elide - avoid both."
   },
   {
     "id": "P01",
     "at": 0.0,
     "window": 0.0,
     "label": "What this is",
-    "text": "Data Wrangler. Round up your data and documents, and load them into the DataView database. Every tool can read your documents now — the difference is what happens to what they say. Data Wrangler puts it somewhere you can defend, and refuses to put in what it cannot prove. This is a short tour of the page. Everything described below is shown running in the films further down."
+    "text": "Data Wrangler. Round up your data and documents, and load them into the DataView database. Every tool can read your documents now. The difference is what happens to what they say. Data Wrangler puts it somewhere you can defend, and refuses to put in what it cannot prove. This is a short tour of the page. Everything described below is shown running in the films further down."
   },
   {
     "id": "P02",
     "at": 0.0,
     "window": 0.0,
     "label": "Wrong is worse than missing",
-    "text": "Start with the position everything else follows from. Wrong is worse than missing. A confident wrong value plots on a map, exports to a spreadsheet, and gets quoted in a meeting. A missing one is visible. So every file has exactly four states, and they are never collapsed into a percentage. Loaded — its rows are in the database. Staged — extracted, and waiting. Held — blocked, with a named reason you can act on. Or nothing at all, which is the only real failure."
+    "text": "Start with the position everything else follows from. Wrong is worse than missing. A confident wrong value plots on a map, exports to a spreadsheet, and gets quoted in a meeting. A missing one is visible. So every file has exactly four states, and they are never collapsed into a percentage. Loaded. Its rows are in the database. Staged. Extracted, and waiting. Held. Blocked, with a named reason you can act on. Or nothing at all, which is the only real failure."
   },
   {
     "id": "P03",
@@ -29,13 +29,13 @@
     "at": 0.0,
     "window": 0.0,
     "label": "The components",
-    "text": "Seven modules, each doing one job and handing its result to the next. DataView is the database — derived from P P D M three point nine, but easier to load into and to customise, and it carries the provenance of every row, so the file a value came from can be opened. The File Catalog is an extension of that same schema: tables for the files on a shared drive and for what was extracted from them. The Data Assistant bulk loads flat files and remembers the mapping, so the second file of a format takes a few clicks. The Document Assistant learns to recognise tables by their shape — and that part is not petroleum specific; it works on any document with tables in it. Mapping is the front end. Map Box and Q G I S were both tried and were too slow, so the map was built to fit: three point nine million federated wells, each linked to its documents, and no S Q L required."
+    "text": "Seven modules, each doing one job and handing its result to the next. DataView is the database, derived from P P D M three point nine, but easier to load into and to customise, and it carries the provenance of every row, so the file a value came from can be opened. The File Catalog is an extension of that same schema: tables for the files on a shared drive and for what was extracted from them. The Data Assistant bulk loads flat files and remembers the mapping, so the second file of a format takes a few clicks. The Document Assistant learns to recognise tables by their shape, and that part is not petroleum specific; it works on any document with tables in it. Mapping is the front end. Map Box and Q G I S were both tried and were too slow, so the map was built to fit: three point nine million federated wells, each linked to its documents, and no S Q L required."
   },
   {
     "id": "P05",
     "at": 0.0,
     "window": 0.0,
     "label": "The films",
-    "text": "Below this you will find five walkthroughs — nineteen minutes, recorded against a live database, nothing mocked and nothing sped up. Every number spoken in them is a number on the screen at the time. The File Catalog film is the one to start with: a full run over a hundred and eighty two files, ending with an empty backlog."
+    "text": "Below this you will find five walkthroughs. Nineteen minutes, recorded against a live database, nothing mocked and nothing sped up. Every number spoken in them is a number on the screen at the time. The File Catalog film is the one to start with: a full run over a hundred and eighty two files, ending with an empty backlog."
   }
 ]
