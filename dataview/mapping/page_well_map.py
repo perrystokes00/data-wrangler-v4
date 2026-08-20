@@ -10123,22 +10123,79 @@ def run(engine=None):
                     op = (well.get("operator_name") or well.get("company_name") or "")
                     _grid_rows.append({"Select": False, "UWI": str(cu),
                                        "Well": wn, "Operator": op})
+                # THE GRID LIVES IN A FORM, AND THAT IS THE WHOLE POINT.
+                # A data_editor outside a form reruns the entire page on every
+                # cell change — so on a long result set, ticking ten wells
+                # re-rendered the map ten times and each tick fought the
+                # redraw. Inside a form, edits accumulate in the browser and
+                # nothing reruns until a submit button is pressed.
+                #
+                # Selection therefore has to live somewhere that survives the
+                # rerun: st.session_state["tray_selected_uwis"], keyed by UWI
+                # rather than by row, so it stays correct when the result set
+                # changes underneath it.
+                _sel_key = "tray_selected_uwis"
+                _all_uwis = [str(r["UWI"]) for r in _grid_rows]
+                # Intersect with what is actually on screen: a stale tick from
+                # a previous draw must not silently scope Documents to a well
+                # that is no longer in the results.
+                _selected = [u for u in (st.session_state.get(_sel_key) or [])
+                             if u in set(_all_uwis)]
+
+                # The editor key carries a nonce so Select all / Clear can
+                # re-default it. Streamlit refuses a write to a widget's own
+                # key once that widget exists, so those buttons CANNOT just
+                # assign the ticks — they record the new selection, bump the
+                # nonce, and rerun; this rebuild then seeds the frame from it.
+                # The key still ENDS IN ':sel' because _is_action_key() keys
+                # off that suffix — 'tray_grid:v2:sel', never 'tray_grid:sel:v2'.
+                _nonce = st.session_state.get("tray_grid_nonce", 0)
+
                 _grid_df = pd.DataFrame(_grid_rows)
-                _tray_edit = st.data_editor(
-                    _grid_df,
-                    column_config={"Select": st.column_config.CheckboxColumn(
-                        "Select", width="small")},
-                    disabled=["UWI", "Well", "Operator"],
-                    hide_index=True, use_container_width=True,
-                    height=min(360, 40 + 35 * max(1, len(_grid_df))),
-                    key="tray_grid:sel",
-                )
-                selected_in_results = [str(r["UWI"]) for _, r in _tray_edit.iterrows()
-                                       if bool(r["Select"])]
+                _grid_df["Select"] = _grid_df["UWI"].isin(set(_selected))
+
+                with st.form(key=f"tray_form_{_nonce}", border=False):
+                    _tray_edit = st.data_editor(
+                        _grid_df,
+                        column_config={"Select": st.column_config.CheckboxColumn(
+                            "Select", width="small")},
+                        disabled=["UWI", "Well", "Operator"],
+                        hide_index=True, use_container_width=True,
+                        height=min(360, 40 + 35 * max(1, len(_grid_df))),
+                        key=f"tray_grid:{_nonce}:sel",
+                    )
+                    _f1, _f2, _f3, _f4 = st.columns([2, 1, 1, 3])
+                    _apply = _f1.form_submit_button(
+                        "✓ Apply selection", type="primary",
+                        use_container_width=True)
+                    # Select all / Clear are SUBMIT buttons, not plain ones, so
+                    # pressing either still harvests the form first — a plain
+                    # button would discard whatever was ticked but not applied.
+                    _pick_all = _f2.form_submit_button(
+                        f"All {len(_all_uwis)}", use_container_width=True)
+                    _pick_none = _f3.form_submit_button(
+                        "None", use_container_width=True)
+                    _f4.markdown(
+                        f"<div style='font-size:11px;color:#888;padding:9px 0 0 6px'>"
+                        f"{len(_selected)} of {len(_all_uwis)} selected</div>",
+                        unsafe_allow_html=True)
+
+                if _pick_all or _pick_none:
+                    st.session_state[_sel_key] = _all_uwis if _pick_all else []
+                    st.session_state["tray_grid_nonce"] = _nonce + 1
+                    st.rerun()
+                if _apply:
+                    _selected = [str(r["UWI"]) for _, r in _tray_edit.iterrows()
+                                 if bool(r["Select"])]
+                    st.session_state[_sel_key] = _selected
+
+                selected_in_results = list(_selected)
                 st.markdown(
                     "<div style='font-size:11px;color:#555;padding:4px 0 6px 0'>"
-                    "<b>Export</b> sends <b>all</b> results. Tick wells in the grid "
-                    "to scope <b>Documents</b> / <b>Scout Tickets</b> to just those."
+                    "<b>Export</b> sends <b>all</b> results. Tick wells and press "
+                    "<b>Apply selection</b> to scope <b>Documents</b> / "
+                    "<b>Scout Tickets</b> to just those — ticking no longer "
+                    "reloads the map on every box."
                     "</div>",
                     unsafe_allow_html=True)
             # (no else: picking "Documents" navigated away above, so this
