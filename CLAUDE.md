@@ -143,6 +143,26 @@ So `ASYNC_NETWORK_IO` says the client is slow to consume; it does NOT say the
 client's *code* is wrong. One `SELECT 1` round trip is the cheapest possible
 test: 0.5ms healthy, 80ms+ traced. Do that before rewriting anything as bcp.
 
+**A shrink undoes a rebuild, so the order is rebuild-then-shrink NEVER
+shrink-then-rebuild — and after a shrink the tool is REORGANIZE.** Measured
+20 Aug on `WELL_REF`: `PK_well_master_gold` was 89.8% fragmented; a REBUILD took
+it to ~0% and grew the file 6,178 -> 8,081 MB (the old allocation units release
+on a deferred drop a few seconds later, so the alarming number is transient).
+`DBCC SHRINKFILE` then relocated pages back-to-front and put the clustered index
+at **94.2%** — worse than before it was rebuilt — and dragged `IX_wmg_h3_r5/r6`
+from 3% to ~63%, which are exactly the indexes the map's density layers read.
+Rebuilding again would only regrow the file, so the second pass has to be
+`REORGANIZE`: it defragments in place using pages the index already owns, so the
+shrink holds.
+
+And REORGANIZE turned out to do what the REBUILD did not: it took the clustered
+index 94.2% -> 0.4% AND dropped it from 310,604 to 234,516 pages, freeing 594 MB
+(used 6,174 -> 5,570) where the rebuild had left the page count identical. So on
+this table the wasted space was page DENSITY, and only the in-place compaction
+recovered it. Budget for the log: the reorganize is fully logged and took the
+log from 520 MB to 1,160 MB, which a CHECKPOINT plus SHRINKFILE returns.
+Timings, 4M rows on Express: rebuild 43s, reorganize 250s.
+
 Also: **type mismatches between staging and target are a performance bug.**
 nvarchar staging against `char(14)` targets converted the indexed column on
 every comparison — 154s → 0.89s once cast to the target width (173×).

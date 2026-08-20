@@ -579,7 +579,7 @@ with st.sidebar:
         "margin:6px 0 2px 0\">DATA WRANGLER SOLUTIONS LLC</div>"
         "<div style=\"font-size:10px;color:#b2e8ee;"
         "font-family:\'IBM Plex Mono\',monospace;letter-spacing:1px\">"
-        "v3.0 · DataView</div>",
+        "v4.0 · DataView</div>",
         unsafe_allow_html=True)
 
     # ── WHICH COPY OF THE CODE IS THIS? ─────────────────────────────────────
@@ -756,11 +756,15 @@ with st.sidebar:
                         st.warning(f"Couldn't list databases: {_le}")
             with _dc:
                 if _db_list:
-                    _idx = _db_list.index("DataView") if "DataView" in _db_list else 0
+                    # DataView_Demo, not DataView: the latter is the older,
+                    # essentially empty database (0 rows in dv_well). Falling
+                    # back to it made a working install look broken.
+                    _idx = (_db_list.index("DataView_Demo")
+                            if "DataView_Demo" in _db_list else 0)
                     database = st.selectbox("Database", _db_list, index=_idx,
                                             key="sb_database_sel")
                 else:
-                    database = st.text_input("Database", value="DataView",
+                    database = st.text_input("Database", value="DataView_Demo",
                                              key="sb_database")
 
         elif dialect == "Oracle":
@@ -1070,7 +1074,7 @@ if S.app_mode == "splash":
                             letter-spacing:1px;margin-top:4px">
                     PETROLEUM DATA PLATFORM &nbsp;·&nbsp;
                     SQL SERVER &nbsp;·&nbsp; ORACLE &nbsp;·&nbsp; SNOWFLAKE
-                    &nbsp;·&nbsp; v3.0
+                    &nbsp;·&nbsp; v4.0
                 </div>
             </div>
         </div>

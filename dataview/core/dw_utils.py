@@ -13,7 +13,7 @@ from pathlib import Path
 
 # ── Connection factory ────────────────────────────────────────────────
 
-def make_engine(database: str = "DataView"):
+def make_engine(database: str = "DataView_Demo"):
     """Create SQLAlchemy engine for local SQL Server Express."""
     from sqlalchemy import create_engine
     cs = (

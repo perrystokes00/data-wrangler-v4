@@ -2199,7 +2199,13 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
                  max_files=None, inventory_only=False, stall_timeout=180,
                  per_type_cap=None, parse_mode="thread", single_pass=False,
                  should_abort=None, scope="path",
-                 ref="WELL_REF.well_ref.WELL_MASTER", report_root=None,
+                 # gold, not WELL_MASTER: every real caller (the workbench's
+                 # _wb_ref(), pipeline_proc_runner, enrich_file_headers's own
+                 # DEFAULT_REF) resolves against the gold master, and this
+                 # signature was the one place still naming the 8.8M-row
+                 # predecessor — so a direct run_pipeline() call enriched
+                 # against a different table than the button did.
+                 ref="WELL_REF.well_ref.well_master_gold", report_root=None,
                  do_report=True, log=print):
     t0 = time.monotonic()
     s = {
