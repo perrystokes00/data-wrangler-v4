@@ -232,9 +232,15 @@ def tier_imports(res, verbose=False):
 # ───────────────────────────── 2 · lints ────────────────────────────────
 # Each pattern shipped and broke something. The note says which.
 LINTS = [
-    (r"\bSUM\s*\(\s*CASE\s+WHEN\s+EXISTS", ".sql .py",
+    # NOT EXISTS is the same error and was NOT matched until 19 Aug: the gate
+    # flags in catalog_status are all `NOT EXISTS` (row is held when its
+    # reference/parent is ABSENT), so every one of them slipped past this lint
+    # and failed at runtime on msg 130 instead. Same illegal shape, one word
+    # different. Fix either form by flagging per row in a derived table and
+    # summing the flags outside it.
+    (r"\bSUM\s*\(\s*CASE\s+WHEN\s+(NOT\s+)?EXISTS", ".sql .py",
      "SQL Server error 130: EXISTS inside an aggregate is illegal. "
-     "Use a CTE + LEFT JOIN."),
+     "Use a CTE + LEFT JOIN, or flag per row in a derived table and SUM that."),
     (r",\s*(bulk|table|rows|value|key|file|user|percent|plan|work)\s*=",
      ".sql",
      "unbracketed alias using a T-SQL reserved word — 'bulk' cost a run. "

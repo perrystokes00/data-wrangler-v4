@@ -143,11 +143,31 @@ def uwi14_from_path(path):
     folders = _dirname(path)
 
     def _cands(text):
+        """Digit candidates in `text`, 10-14 digits, not all one digit.
+
+        TWO READINGS OF EVERY TOKEN, because one alone is wrong half the time:
+
+          * the WHOLE token with separators stripped -- this is what makes a
+            dashed UWI work: '42-317-12345-00-00' -> '42317123450000' (14).
+            Reading only the runs would see 2,3,5,2,2 and find nothing.
+          * each maximal DIGIT RUN inside the token -- this is what makes a
+            run-suffixed log work: '15007205750000_2' strips to FIFTEEN digits,
+            which is outside the 10-14 window, so the whole-token reading threw
+            away a perfectly good 14-digit UWI. MEASURED 19 Aug: every one of
+            the 17 '<uwi>_<n>.las' files in the catalog resolved to None.
+
+        A run can never be longer than its own token, and the caller takes the
+        LONGEST candidate, so adding runs can only rescue a token the whole-
+        token reading rejected -- it can never override a valid whole-token
+        answer. That is why this widens coverage without moving any existing
+        result.
+        """
         out = []
         for m in _TOKEN.finditer(text or ""):
-            d = re.sub(r"\D", "", m.group(0))
-            if 10 <= len(d) <= 14 and len(set(d)) > 1:
-                out.append(d)
+            tok = m.group(0)
+            for d in (re.sub(r"\D", "", tok), *re.findall(r"\d+", tok)):
+                if 10 <= len(d) <= 14 and len(set(d)) > 1:
+                    out.append(d)
         return out
 
     # (digits, priority): priority 1 = filename, 0 = folder

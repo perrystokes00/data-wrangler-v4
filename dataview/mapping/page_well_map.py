@@ -7902,6 +7902,11 @@ def run(engine=None):
             if st.session_state.pop("_pending_wells_handoff", False):
                 st.session_state["wells_layer_on"] = True
                 st.session_state["h3_layer_on"] = False
+            # Same discipline for a FAILED H3 render: the render block sits
+            # below these widgets and cannot switch the layer off itself, so it
+            # parks a flag and this consumes it before the toggle instantiates.
+            if st.session_state.pop("_pending_h3_off", False):
+                st.session_state["h3_layer_on"] = False
             # Two independent layer toggles replace the old exclusive radio.
             # H3 density is the "find your area" overview; Wells flips on
             # automatically once you draw a box/circle (and H3 flips off —
@@ -8507,7 +8512,20 @@ def run(engine=None):
                     st.warning(f"H3 render skipped: {_e}")
                     # If H3 fails, drop the layer (safe — no heavy load); the
                     # user can re-enable it or turn on Wells for the full list.
-                    st.session_state["h3_layer_on"] = False
+                    #
+                    # REQUEST FLAG, NOT AN ASSIGNMENT. `h3_layer_on` is a
+                    # widget key and that widget was instantiated ~600 lines
+                    # ABOVE this block, so writing it here raises — and it
+                    # raises inside the handler that exists to recover from a
+                    # failure, turning one honest warning into a second, louder
+                    # error that points at session state instead of at the
+                    # render. MEASURED 19 Aug: H3 hit placeholder hex values,
+                    # this line fired, and the page reported "h3_layer_on
+                    # cannot be modified after the widget is instantiated" —
+                    # which describes nothing that was actually wrong.
+                    # The flag is consumed before the toggles draw, next run,
+                    # exactly as _pending_wells_handoff already is.
+                    st.session_state["_pending_h3_off"] = True
             else:
                 if not _h3_has_sources:
                     _msg.info("🔶 Pick a schema in the dropdown above to see H3 density.")

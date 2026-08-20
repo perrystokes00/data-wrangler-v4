@@ -115,6 +115,7 @@ def run(engine=None, dialect: str = "mssql"):
         "🗂 File Catalog Pipeline",
         "▶ Run Pipeline",
         "📂 Browse and View",
+        "🚦 Status & Backlog",
         "📦 Vault",
     ]
     # drop any stale section value persisted from a previous layout
@@ -142,7 +143,11 @@ def run(engine=None, dialect: str = "mssql"):
             import traceback
             with st.expander("details"):
                 st.code(traceback.format_exc())
+    elif active == _TAB_LABELS[2]:
+        _tab_browse(engine, dialect)
     elif active == _TAB_LABELS[3]:
+        _tab_status(engine, dialect)
+    elif active == _TAB_LABELS[4]:
         try:
             from dataview.file_catalog import page_vault
             page_vault.render(engine)
@@ -152,6 +157,11 @@ def run(engine=None, dialect: str = "mssql"):
             with st.expander("details"):
                 st.code(traceback.format_exc())
     else:
+        # EVERY SECTION IS MATCHED BY INDEX, none by falling through. Vault used
+        # to be _TAB_LABELS[3] with Browse & View as the `else`; inserting a
+        # label ahead of Vault silently repointed [3] at the new section and the
+        # Vault button would have opened it instead. An explicit branch per
+        # label turns that into a visible edit rather than a silent one.
         _tab_browse(engine, dialect)
 
 
@@ -3221,6 +3231,714 @@ def _mark_bad(engine, inv_id, fpath, fname=None, size_kb=None, reason=None):
         """), {"id": inv_id})
     return dropped
 
+
+
+# =============================================================================
+# Status & Backlog -- every file, its state, and WHY it is stuck
+# =============================================================================
+# Browse & View owns the identity axis: files that never reached capture, fixed
+# by assigning a UWI or a survey name. This section owns everything after that
+# -- what is staged, what promoted, and what promote is REFUSING, with the
+# reason named per file and the action that clears it next to it.
+#
+# The reason is derived, not stored. catalog_status explains why at length; the
+# short version is that every one of these reasons is curable by an action that
+# touches a different file's rows (seed one dv_r_uom code and thirty files stop
+# being held), so a stamp would be stale the moment it was written.
+
+
+def _status_run(engine, log=None):
+    """Run catalog_status into session_state. Shared by the Run button, the
+    post-action refresh and the first open, so nothing can act on a grid that
+    no longer matches the database."""
+    from dataview.file_catalog import catalog_status as _cs
+    _notes = []
+    try:
+        res = _cs.file_status(
+            engine,
+            root=(None if st.session_state.get("sb_root") in (None, _SB_ALL)
+                  else st.session_state.get("sb_root")),
+            this_crawl=bool(st.session_state.get("sb_this_crawl")),
+            log=_notes.append)
+    except Exception as e:
+        st.error(f"Status failed: {type(e).__name__}: {e}")
+        return None
+    st.session_state["sb_res"] = res
+    st.session_state["sb_notes"] = _notes
+    return res
+
+
+def _run_coord_enrich(engine):
+    """Fill cat_well surface coords from gold, then dv_well -- promote's own
+    pre-gate, run on demand.
+
+    This is the ONE hold reason with a genuine one-click cure, and the function
+    that cures it already exists: promote_catalog._fill_cat_coords_from_gold is
+    what promote itself calls before counting eligibility. Calling it here is
+    not a shortcut past the gate -- the gate still has to pass afterwards. It
+    just stops a well being held for a location the database already knows,
+    which measured 26 of 29 held wells on 17 Aug.
+
+    Returns (filled, note). Never raises: the note carries the failure, because
+    a silent coord-enrich failure looks exactly like a well gold never heard of.
+    """
+    from dataview.file_catalog import promote_catalog as _pc
+    raw = engine.raw_connection()
+    try:
+        cur = raw.cursor()
+        filled, note = _pc._fill_cat_coords_from_gold(
+            cur, "cat_well", "surface_latitude", "surface_longitude", "", [])
+        raw.commit()
+        return filled, note
+    except Exception as e:
+        try:
+            raw.rollback()
+        except Exception:
+            pass
+        return 0, f" · coord enrich FAILED ({type(e).__name__}: {e})"
+    finally:
+        try:
+            raw.close()
+        except Exception:
+            pass
+
+
+def _run_capture(engine, dialect, root=None, log=None):
+    """Run the capture stage — stage pending files' rows into file_catalog.cat_*.
+
+    Delegates to pipeline_run._stage_capture, the SAME function run_pipeline
+    drives, rather than re-deriving what "pending" means. Six spellings of
+    'pending' once gave six different answers on one catalog (31/43/190/1,319/
+    2,190/3,876); this page is not becoming the seventh.
+
+    NO EXTENSION FILTER, deliberately. _stage_capture's docstring says binaries
+    are "left to the deep stage", but run_pipeline calls this very function with
+    exts={.las,.segy,.sgy,.seg,.p190} for its binary lane — the restriction is
+    in the CALLER, not the stage. Passing exts=None is the plain path
+    run_pipeline itself takes when no recogniser pack is configured, and it is
+    the only one that covers LAS and documents in a single press. Filtering here
+    would silently capture the PDFs and skip every LAS.
+
+    Idempotent: capture() replaces a file's rows scoped to INVENTORY_ID, so a
+    re-run refreshes rather than duplicates.
+
+    Returns the stage's counts dict, or raises — the caller reports.
+    """
+    from dataview.import_data import pipeline_run as _pr
+    _lines = []
+    _log = log or _lines.append
+    res = _pr._stage_capture(engine, dialect, _log, exts=None, workers=8,
+                             parallel=False, force=False, root=root)
+    return (res or {}), _lines
+
+
+_SB_ALL = "(whole catalog)"      # scope: the scan-root selector
+_SB_ANY = "All"                  # filters: state / reason / type
+
+# Column order for the grid. `path` is carried for the export's hyperlink and
+# deliberately not shown -- a full Windows path per row pushes every useful
+# column off the right edge, the same reason the stage scorecard drops it.
+_SB_GRID_COLS = ["file", "state", "reason", "ext", "uwi",
+                 "rows_cat", "rows_dv", "readiness"]
+
+
+def _tab_status(engine, dialect):
+    import pandas as pd
+    from dataview.file_catalog import catalog_status as _cs
+
+    st.markdown("#### 🚦 Status & Backlog")
+    st.caption(
+        "Every inventoried file, what state it reached, and — when promote is "
+        "refusing it — the reason, per file. Reasons are re-derived from the "
+        "mirrors each run, so they cannot go stale."
+    )
+
+    # ── Scope ────────────────────────────────────────────────────────────────
+    try:
+        from sqlalchemy import text as _t
+        with engine.connect() as _c:
+            _roots = [r[0] for r in _c.execute(_t(
+                "SELECT DISTINCT ROOT_PATH FROM file_catalog.GLOBAL_FILE_CATALOG "
+                "WHERE NULLIF(LTRIM(RTRIM(ROOT_PATH)),'') IS NOT NULL "
+                "ORDER BY ROOT_PATH")).fetchall()]
+    except Exception:
+        _roots = []
+
+    s1, s2, s3 = st.columns([3, 1, 1])
+    s1.selectbox("Scan root", [_SB_ALL] + _roots, key="sb_root",
+                 help="Limit to one scan root, or the whole catalog.")
+    s2.checkbox("This crawl only", value=False, key="sb_this_crawl",
+                help="Limit to files scanned today.")
+    if s3.button("🔄 Run / refresh", type="primary", key="sb_run",
+                 use_container_width=True):
+        _status_run(engine)
+        st.session_state["sb_nonce"] = st.session_state.get("sb_nonce", 0) + 1
+
+    res = st.session_state.get("sb_res")
+    if res is None or getattr(res, "df", None) is None:
+        st.info("Choose a scope and click **Run / refresh**.")
+        return
+    df = res.df
+    if df.empty:
+        st.info("No files in scope. Run a crawl, or widen the scope.")
+        return
+
+    # ── Anything that narrowed the answer, said out loud ─────────────────────
+    # A report that quietly covers less than it claims is the failure this whole
+    # section exists to fix, so its own gaps are not allowed to be silent.
+    _notes = st.session_state.get("sb_notes") or []
+    if _notes:
+        with st.expander(f"⚠ {len(_notes)} note(s) — this report could not see "
+                         f"everything", expanded=False):
+            for _n in _notes:
+                st.caption(f"• {_n}")
+
+    # ── Where everything stands ──────────────────────────────────────────────
+    _n = df["state"].value_counts().to_dict()
+    _held = int(_n.get(_cs.ST_HELD, 0))
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("Files", f"{len(df):,}")
+    m2.metric("Promoted", f"{int(_n.get(_cs.ST_PROMOTED, 0)):,}",
+              help="Rows reached dataview.dv_*.")
+    m3.metric("Staged", f"{int(_n.get(_cs.ST_STAGED, 0)):,}",
+              help="Rows in cat_*, every gate passes — promote has not run yet.")
+    m4.metric("Held", f"{_held:,}",
+              help="Rows in cat_*, and promote refuses at least one of them. "
+                   "The backlog.")
+    m5.metric("Not captured",
+              f"{int(_n.get(_cs.ST_INVENTORIED, 0)) + int(_n.get(_cs.ST_EXTRACTED, 0)):,}",
+              help="Inventoried or extracted, nothing staged. Fix identity in "
+                   "Browse & View.")
+    m6.metric("Rejected", f"{int(_n.get(_cs.ST_SKIPPED, 0)):,}")
+
+    # ── Which single fix clears the most ─────────────────────────────────────
+    _rs = _cs.reason_summary(res)
+    if not _rs.empty:
+        st.markdown("**🔴 Held by reason** — worst first; the top row is the "
+                    "fix that clears the most backlog.")
+        st.dataframe(_rs, hide_index=True, use_container_width=True,
+                     column_config={
+                         "reason": st.column_config.TextColumn("Reason", width="medium"),
+                         "files": st.column_config.NumberColumn("Files", width="small"),
+                         "rows": st.column_config.NumberColumn("Rows", width="small"),
+                         "clears_by": st.column_config.TextColumn(
+                             "What clears it", width="large"),
+                     })
+    elif _held == 0:
+        st.success("✅ Nothing held — every staged row passes promote's gates.")
+
+    # ── Filters ──────────────────────────────────────────────────────────────
+    st.divider()
+    _states = [_SB_ANY] + sorted(df["state"].unique().tolist())
+    _reasons = [_SB_ANY] + sorted(
+        {r for d in res.holds.values() for r in d})
+    _types = [_SB_ANY] + sorted(
+        {t for t in df["type"].fillna("").tolist() if t})
+
+    f1, f2, f3, f4 = st.columns(4)
+    f_state = f1.selectbox("State", _states, key="sb_f_state")
+    f_reason = f2.selectbox("Reason", _reasons, key="sb_f_reason")
+    f_type = f3.selectbox("File type", _types, key="sb_f_type")
+    f_name = f4.text_input("Filename contains", key="sb_f_name",
+                           placeholder="partial name…")
+
+    view = df
+    if f_state != _SB_ANY:
+        view = view[view["state"] == f_state]
+    if f_reason != _SB_ANY:
+        # Match the REASON DICT, not the rendered string. The rendered cell is
+        # "<label> (<rows>); <label> (<rows>)", and one label is a substring of
+        # another -- "no UWI" is contained in "no UWI on detail row" -- so a
+        # substring test silently returns the union of two different holds with
+        # two different repairs. Keying on the dict is exact.
+        _ids = {inv for inv, d in res.holds.items() if f_reason in d}
+        view = view[view["inventory_id"].isin(_ids)]
+    if f_type != _SB_ANY:
+        view = view[view["type"] == f_type]
+    if f_name:
+        view = view[view["file"].str.contains(f_name, case=False, na=False)]
+
+    st.caption(f"{len(view):,} of {len(df):,} file(s)")
+    if view.empty:
+        st.info("No files match these filters.")
+        return
+
+    # ── The grid ─────────────────────────────────────────────────────────────
+    # Nonce-keyed for the same reason _tab_browse is: Streamlit refuses a write
+    # to a widget's key once instantiated, so "untick everything after acting"
+    # cannot be an assignment. Bumping the nonce retires the editor and mints a
+    # fresh one, which also discards row-index ticks that would otherwise point
+    # at different files once the result set changes.
+    _nonce = st.session_state.get("sb_nonce", 0)
+    _grid = view[_SB_GRID_COLS].copy()
+    _grid.insert(0, "Select", False)
+    _ed = st.data_editor(
+        _grid, hide_index=True, use_container_width=True,
+        key=f"sb_grid_{_nonce}_editor",
+        disabled=[c for c in _grid.columns if c != "Select"],
+        column_config={
+            "Select": st.column_config.CheckboxColumn(
+                "✓", help="Tick files to act on", width="small"),
+            "file": st.column_config.TextColumn("File", width="medium"),
+            "state": st.column_config.TextColumn("State", width="small"),
+            "reason": st.column_config.TextColumn(
+                "Why it is held", width="large"),
+            "rows_cat": st.column_config.NumberColumn(
+                "cat rows", width="small",
+                help="Unpromoted rows staged in file_catalog.cat_*"),
+            "rows_dv": st.column_config.NumberColumn(
+                "dv rows", width="small",
+                help="Rows this file has in dataview.dv_*"),
+        })
+
+    try:
+        _picked = view.loc[[i for i, v in zip(view.index, _ed["Select"]) if v]]
+    except Exception:
+        _picked = view.iloc[0:0]
+    st.caption(f"**{len(_picked)}** file(s) selected")
+
+    # ── Inspect ──────────────────────────────────────────────────────────────
+    # The UWI and the location you are about to type are IN the document. Making
+    # you leave for Browse & View to read them, then come back to type them, is
+    # how a supply-the-missing-value workflow turns into two-page ping-pong.
+    #
+    # file_viewer.view is nest-safe by construction (it uses _vsection, a
+    # bordered container, precisely so it can be embedded), so this can live
+    # inside the expander below without breaking the no-nested-expander rule.
+    st.divider()
+    with st.expander("🔍 Open a file — read the UWI or location off the document",
+                     expanded=False):
+        _ids = list(view["inventory_id"])
+        _lbl = {r["inventory_id"]: f"{r['file']}  ·  {r['state']}"
+                                   + (f"  ·  {r['reason']}" if r["reason"] else "")
+                for _, r in view.iterrows()}
+
+        # A prev/next click cannot assign the selectbox's key AFTER the widget
+        # exists, so it parks the request here and this consumes it BEFORE the
+        # widget is drawn. Same discipline as the map page's request flags.
+        _req = st.session_state.pop("sb_view_req", None)
+        if _req in _ids:
+            st.session_state["sb_view_pick"] = _req
+        # A fixed-key selectbox keeps a value the new filter may have removed —
+        # drop it before instantiation rather than letting it raise.
+        if st.session_state.get("sb_view_pick") not in _ids:
+            st.session_state.pop("sb_view_pick", None)
+
+        if not _ids:
+            st.caption("No files in the current view.")
+        else:
+            v1, v2, v3 = st.columns([6, 1, 1])
+            _pick = v1.selectbox(
+                "File", _ids, key="sb_view_pick",
+                format_func=lambda i: _lbl.get(i, str(i)),
+                label_visibility="collapsed")
+            _pos = _ids.index(_pick) if _pick in _ids else 0
+            if v2.button("◀ Prev", key="sb_view_prev", use_container_width=True,
+                         disabled=_pos == 0):
+                st.session_state["sb_view_req"] = _ids[_pos - 1]
+                st.rerun()
+            if v3.button("Next ▶", key="sb_view_next", use_container_width=True,
+                         disabled=_pos >= len(_ids) - 1):
+                st.session_state["sb_view_req"] = _ids[_pos + 1]
+                st.rerun()
+
+            _row = view[view["inventory_id"] == _pick].iloc[0]
+            _fpath = _row["path"]
+            st.caption(f"`{_fpath}`")
+            if _row["reason"]:
+                st.warning(f"Held for: {_row['reason']}")
+
+            # What extraction already read off this file. The well name and
+            # operator are usually what identifies a document whose UWI did not
+            # parse, so they belong next to the viewer, not a page away.
+            try:
+                from sqlalchemy import text as _t2
+                with engine.connect() as _c2:
+                    _h = _c2.execute(_t2("""
+                        SELECT TOP 1 UWI, WELL_NAME, OPERATOR, API_NUM
+                          FROM file_catalog.FILE_WELL_HEADER
+                         WHERE INVENTORY_ID = :i"""), {"i": _pick}).fetchone()
+                if _h and any(_h):
+                    st.caption(
+                        f"extracted header — UWI `{_h[0] or '—'}` · "
+                        f"well `{_h[1] or '—'}` · operator `{_h[2] or '—'}`"
+                        + (f" · API `{_h[3]}`" if _h[3] else ""))
+            except Exception as _he:
+                st.caption(f"(header lookup unavailable: {str(_he)[:80]})")
+
+            if not _fpath:
+                st.warning("No path recorded for this file.")
+            elif not Path(_fpath).exists():
+                # HEADER_EXTRACTED='M' is its own state for exactly this: the
+                # catalog is stale, the file is not corrupt. Say which.
+                st.warning(
+                    f"Not on disk at that path. If this file was moved, "
+                    f"re-scan its new location — the catalog row keeps its id "
+                    f"and its history."
+                    + ("  (Catalog already marks it MOVED.)"
+                       if _row["state"] == _cs.ST_MOVED else ""))
+            else:
+                o1, o2 = st.columns([1, 4])
+                if o1.button("↗ Open natively", key="sb_view_native",
+                             use_container_width=True,
+                             help="Open in the OS default application. Costs "
+                                  "nothing here — the app does not parse it."):
+                    try:
+                        from dataview.file_catalog.catalog_docs import _open_native
+                        _err = _open_native(_fpath)
+                        if _err:
+                            st.error(f"Could not open: {_err}")
+                    except Exception as _oe:
+                        st.error(f"Could not open: {type(_oe).__name__}: {_oe}")
+                # RENDERING IS OPT-IN, and the toggle is not decoration.
+                # Streamlit executes an expander's body whether or not it is
+                # open, so an ungated viewer here re-parses a document on EVERY
+                # rerun of this page — every filter change, every tick of a
+                # checkbox, every Preview. For a PDF that means rasterising
+                # pages through PyMuPDF each time. Off by default; the native
+                # open above needs no parse at all.
+                _show = o2.toggle(
+                    "Render preview in-app", key="sb_view_render", value=False,
+                    help="Parses the file to display it here. Leave off for "
+                         "large PDFs or SEG-Y and use Open natively instead.")
+                if _show:
+                    try:
+                        from dataview.file_catalog.file_viewer import view as _fview
+                        _fview(_fpath,
+                               _row["ext"] if _row["ext"] != "(none)" else None)
+                    except Exception as _ve:
+                        st.error(f"Viewer error: {type(_ve).__name__}: {_ve}")
+
+    # ── Drain: supply what the gate is asking for ────────────────────────────
+    # The backlog empties three ways and only three: supply a UWI, supply a
+    # location, or reject the file. Everything below is one of those, followed
+    # by promote. Nothing waives a gate.
+    _heldv = view[view["state"] == _cs.ST_HELD]
+    if not _heldv.empty:
+        st.divider()
+        st.markdown("##### ① Supply what is missing")
+        st.caption(
+            "Type a UWI and/or a surface location for the held files. A UWI is "
+            "written to the catalog **and to the rows already staged** — the "
+            "step plain assignment skips. A location fills a coordless header, "
+            "or creates one when detail rows name a well that has none."
+        )
+
+        # SUGGEST, DON'T ASSERT. The filename usually carries the UWI in this
+        # corpus, and path_identity.uwi14_from_path reads it — measured against
+        # this catalog it agreed with the known UWI on 145 files and disagreed
+        # on none. But triage deliberately keeps a path-derived identity OUT of
+        # READY (`IDENTITY_SOURCE NOT LIKE 'path%'`), because a name is a claim
+        # about a file, not a fact from inside it. So it lands in an EDITABLE
+        # cell with its provenance shown beside it, and still has to survive
+        # Preview and Apply. Proposed by code, confirmed by you.
+        try:
+            from dataview.core.path_identity import uwi14_from_path as _u4p
+        except Exception:
+            _u4p = lambda _p: (None, None)
+
+        _sug, _src = [], []
+        for _, _hr in _heldv.iterrows():
+            if str(_hr.get("uwi") or "").strip():
+                _sug.append("")          # already identified — never overwrite
+                _src.append("")
+                continue
+            try:
+                _u, _s = _u4p(_hr["path"])
+            except Exception:
+                _u, _s = None, None
+            _sug.append(_u or "")
+            _src.append(_s or "")
+
+        _fix = _heldv[["file", "reason", "uwi"]].copy()
+        _fix.insert(0, "inventory_id", _heldv["inventory_id"])
+        _fix["set_uwi"] = _sug
+        _fix["from"] = _src
+        _fix["set_lat"] = None
+        _fix["set_lon"] = None
+        _n_sug = sum(1 for s in _sug if s)
+        if _n_sug:
+            st.info(
+                f"📋 Pre-filled **{_n_sug}** UWI(s) read from the file name. "
+                f"Check them against the document before applying — the `from` "
+                f"column says where each came from, and the viewer above opens "
+                f"the file. Clear any cell you don't want written.")
+        _fed = st.data_editor(
+            _fix, hide_index=True, use_container_width=True,
+            key=f"sb_fix_{_nonce}_editor",
+            disabled=["inventory_id", "file", "reason", "uwi", "from"],
+            column_config={
+                "inventory_id": None,       # carried for the write, not shown
+                "file": st.column_config.TextColumn("File", width="medium"),
+                "reason": st.column_config.TextColumn("Held for", width="large"),
+                "uwi": st.column_config.TextColumn("Current UWI", width="small"),
+                "set_uwi": st.column_config.TextColumn(
+                    "Set UWI", width="small",
+                    help="14-character UWI. Anything that does not normalize to "
+                         "exactly 14 is refused, not padded. Pre-filled from the "
+                         "file name where one could be read — check it."),
+                "from": st.column_config.TextColumn(
+                    "read from", width="small",
+                    help="Where a pre-filled UWI came from: 'filename' or "
+                         "'folder'. Blank means you typed it, or nothing was "
+                         "suggested. A folder-derived UWI is the weaker of the "
+                         "two — the file may not belong to that folder's well."),
+                "set_lat": st.column_config.NumberColumn(
+                    "Latitude", width="small", format="%.6f"),
+                "set_lon": st.column_config.NumberColumn(
+                    "Longitude", width="small", format="%.6f"),
+            })
+
+        # Identify rows BY POSITION against _heldv, not by reading the hidden
+        # inventory_id back out of the editor's return value. A column hidden
+        # through column_config may not survive the round trip, and that would
+        # be a KeyError that fires only once somebody actually types an edit —
+        # invisible in any render that changes nothing.
+        _inv_by_pos = list(_heldv["inventory_id"])
+        _edits = []
+        for _pos, (_, _r) in enumerate(_fed.iterrows()):
+            if _pos >= len(_inv_by_pos):
+                break
+            if (str(_r.get("set_uwi") or "").strip()
+                    or _r.get("set_lat") is not None
+                    or _r.get("set_lon") is not None):
+                _edits.append({
+                    "inventory_id": _inv_by_pos[_pos],
+                    "file": _r.get("file", ""),
+                    "uwi": str(_r.get("set_uwi") or "").strip(),
+                    "lat": _r.get("set_lat"),
+                    "lon": _r.get("set_lon"),
+                })
+
+        p1, p2 = st.columns(2)
+        # SAMPLE BEFORE APPLY. A coordinate backfill once came within a
+        # twenty-row sample of writing 1,436 confidently wrong positions, every
+        # one at quality_score 100. Nothing here writes until the exact list of
+        # writes has been shown and the button under it pressed.
+        if p1.button(f"🔎 Preview {len(_edits)} edit(s)", key="sb_preview",
+                     use_container_width=True, disabled=not _edits):
+            from dataview.file_catalog import catalog_status as _cs2
+            _plan, _bad = [], False
+            with engine.connect() as _con:
+                for _e in _edits:
+                    _p = _cs2.plan_fix(_con, _e["inventory_id"], _e["uwi"],
+                                       _e["lat"], _e["lon"])
+                    for _err in _p["errors"]:
+                        _plan.append({"file": _e["file"], "will write": "",
+                                      "⚠": _err})
+                        _bad = True
+                    for _act in _p["actions"]:
+                        _plan.append({"file": _e["file"], "will write": _act,
+                                      "⚠": ""})
+                    for _nte in _p["notes"]:
+                        _plan.append({"file": _e["file"], "will write": "",
+                                      "⚠": _nte})
+            st.session_state["sb_plan"] = _plan
+            st.session_state["sb_plan_ok"] = (not _bad) and bool(_plan)
+            st.session_state["sb_plan_edits"] = _edits
+
+        _plan = st.session_state.get("sb_plan")
+        if _plan:
+            st.markdown("**Exactly what will be written**")
+            st.dataframe(pd.DataFrame(_plan), hide_index=True,
+                         use_container_width=True)
+            if not st.session_state.get("sb_plan_ok"):
+                st.warning("Fix the flagged rows, then preview again. "
+                           "Nothing has been written.")
+
+        if p2.button("✅ Apply these fixes", key="sb_apply", type="primary",
+                     use_container_width=True,
+                     disabled=not st.session_state.get("sb_plan_ok")):
+            from dataview.file_catalog import catalog_status as _cs2
+            _tot = {"uwi_rows": 0, "coord_rows": 0, "headers": 0}
+            _fail = []
+            _paths = dict(zip(_heldv["inventory_id"], _heldv["path"]))
+            try:
+                # ONE transaction for the whole batch: a half-applied repair
+                # leaves rows carrying a UWI whose header was never minted,
+                # which is a worse state than not having started.
+                with engine.begin() as _con:
+                    for _e in st.session_state.get("sb_plan_edits") or []:
+                        try:
+                            _d = _cs2.apply_fix(
+                                _con, _e["inventory_id"], _e["uwi"],
+                                _e["lat"], _e["lon"],
+                                source_path=_paths.get(_e["inventory_id"]))
+                            _tot["uwi_rows"] += _d["uwi_rows"]
+                            _tot["coord_rows"] += _d["coord_rows"]
+                            _tot["headers"] += int(_d["header_created"])
+                        except Exception as _ex:
+                            _fail.append(f"{_e['file']}: {_ex}")
+                            raise
+            except Exception as _ex:
+                st.error(f"Nothing was written — the batch rolled back. {_ex}")
+            else:
+                st.success(
+                    f"Applied: {_tot['uwi_rows']:,} row(s) given a UWI · "
+                    f"{_tot['coord_rows']:,} header(s) given coordinates · "
+                    f"{_tot['headers']} header(s) created. "
+                    f"**Now run ② Run promote** — the rows are eligible but "
+                    f"still staged until it lifts them, so the Held count "
+                    f"below will not drop until you do.")
+            for _k in ("sb_plan", "sb_plan_ok", "sb_plan_edits"):
+                st.session_state.pop(_k, None)
+            _status_run(engine)
+            st.session_state["sb_nonce"] = _nonce + 1
+            st.rerun()
+
+    # ── Actions ──────────────────────────────────────────────────────────────
+    st.markdown("##### ② Process, or reject what should not be here")
+    _n_uncap = (int(_n.get(_cs.ST_INVENTORIED, 0))
+                + int(_n.get(_cs.ST_EXTRACTED, 0)))
+    st.caption(
+        f"Capture stages a file's rows into `cat_*`; promote lifts them into "
+        f"`dv_*`. **{_n_uncap:,}** file(s) here have never been captured, so "
+        f"promote has nothing of theirs to lift — run capture first, then "
+        f"promote. Capture is idempotent (rows are replaced per file)."
+    )
+    a0, a1, a2, a3 = st.columns(4)
+
+    # 0. Capture. Sits BEFORE promote because that is the order the pipeline
+    #    runs them in, and a file that was never captured cannot be promoted or
+    #    held — it is not in the backlog yet, it is upstream of it.
+    if a0.button("📥 Run capture", key="sb_capture", use_container_width=True,
+                 help="Stage pending files' rows into the cat_* mirrors. "
+                      "Scoped to the Scan root chosen above. Files with no "
+                      "identity may land in the backlog afterwards — that is "
+                      "the pipeline working, and ① drains them."):
+        _root = (None if st.session_state.get("sb_root") in (None, _SB_ALL)
+                 else st.session_state.get("sb_root"))
+        try:
+            with st.spinner("Capturing…"):
+                _cres, _clines = _run_capture(engine, dialect, root=_root)
+        except Exception as _ce:
+            st.error(f"Capture failed: {type(_ce).__name__}: {_ce}")
+        else:
+            st.success(
+                f"Capture: {_cres.get('capture_files', 0):,} file(s) · "
+                f"{_cres.get('capture_rows', 0):,} row(s) staged."
+                + (f" {_cres['capture_missing']:,} file(s) missing on disk."
+                   if _cres.get("capture_missing") else ""))
+            if _clines:
+                with st.expander("capture log", expanded=False):
+                    st.code("\n".join(str(_l) for _l in _clines[-200:]))
+        _status_run(engine)
+        st.session_state["sb_nonce"] = _nonce + 1
+
+    # 1. Cure the coord holds. The only reason with a real one-click fix.
+    if a1.button("📍 Fill missing coords", key="sb_coords",
+                 use_container_width=True,
+                 help="Fill cat_well surface coordinates from the gold master, "
+                      "then from dv_well — promote's own pre-gate. Wells whose "
+                      "location is already known stop being held. The gate is "
+                      "not waived."):
+        _filled, _note = _run_coord_enrich(engine)
+        if _filled:
+            st.success(f"Filled {_filled:,} coordinate row(s).{_note}")
+        else:
+            _why = _note or " No held well matched gold or dv_well."
+            st.warning(f"No coordinates filled.{_why}")
+        _status_run(engine)
+        st.session_state["sb_nonce"] = _nonce + 1
+        st.rerun()
+
+    # 2. Re-run promote so cleared rows actually lift.
+    if a2.button("⬆ Run promote", key="sb_promote", use_container_width=True,
+                 help="Lift every now-eligible row into dataview.dv_*. Run this "
+                      "after clearing a reason."):
+        from dataview.file_catalog import promote_catalog as _pc
+        raw = engine.raw_connection()
+        _lines, _err = [], None
+        try:
+            cur = raw.cursor()
+            with st.spinner("Promoting…"):
+                _pc.run_promote(cur, None, True, log=_lines.append)
+            raw.commit()
+        except Exception as e:
+            try:
+                raw.rollback()
+            except Exception:
+                pass
+            _err = f"{type(e).__name__}: {e}"
+        finally:
+            try:
+                raw.close()
+            except Exception:
+                pass
+        if _err:
+            st.error(_err)
+        else:
+            st.success("Promote complete.")
+        st.code("\n".join(_lines) or "(no output)")
+        _status_run(engine)
+        st.session_state["sb_nonce"] = _nonce + 1
+
+    # 3. Reject. Shares _mark_bad with Browse & View, so a file rejected here
+    #    behaves identically: blocklisted for the next crawl, its staged rows
+    #    dropped, its catalog row RETIRED as SKIPPED rather than deleted so the
+    #    history stays attributable. dv_* is never touched — un-promoting rows
+    #    that already landed is a separate decision, not a side effect.
+    _confirm = a3.text_input(
+        "Type REJECT to enable", key=f"sb_reject_confirm_{_nonce}",
+        placeholder="REJECT",
+        help="Blocklists the selected files, drops the rows they staged, and "
+             "retires their catalog rows as SKIPPED. Rows already promoted "
+             "into dv_* are left alone.")
+    if a3.button(f"🚫 Reject {len(_picked)} file(s)", key="sb_reject",
+                 use_container_width=True,
+                 disabled=(_picked.empty or _confirm.strip().upper() != "REJECT")):
+        # RE-ASSERT THE GATE INSIDE THE HANDLER. `disabled=` is a UI affordance,
+        # not a guarantee: it stops a human clicking, and it stops nothing else.
+        # A harness, a replayed widget state, or any future refactor that moves
+        # the button can reach this block with the gate visibly closed. This
+        # cost 8 files and 160 staged rows on 19 Aug during testing — the button
+        # rendered "Reject 0 file(s)" and disabled, and the rows went anyway.
+        # A destructive action re-checks its own precondition.
+        if _picked.empty or _confirm.strip().upper() != "REJECT":
+            st.error("Reject blocked — tick the files and type REJECT. "
+                     "Nothing was changed.")
+            st.stop()
+        _reason = f"rejected from Status & Backlog"
+        _tot, _rows = 0, 0
+        _fail = []
+        for _, _r in _picked.iterrows():
+            try:
+                _dropped = _mark_bad(engine, _r["inventory_id"], _r["path"],
+                                     _r["file"], _r.get("size_kb"), _reason)
+                _tot += 1
+                _rows += sum(_dropped.values())
+            except Exception as e:
+                _fail.append(f"{_r['file']}: {type(e).__name__}: {e}")
+        st.success(f"Rejected {_tot} file(s); dropped {_rows:,} staged row(s).")
+        if _fail:
+            st.error("Some rejects failed:\n" + "\n".join(_fail))
+        _status_run(engine)
+        st.session_state["sb_nonce"] = _nonce + 1
+        st.rerun()
+
+    # ── Export ───────────────────────────────────────────────────────────────
+    import time as _tm
+    _ts = _tm.strftime("%Y%m%d_%H%M%S")
+    st.download_button(
+        "⬇ Download this view (CSV)",
+        data=view.to_csv(index=False).encode("utf-8"),
+        file_name=f"catalog_status_{_ts}.csv", mime="text/csv",
+        key="sb_csv", use_container_width=True)
+
+    # ── Reference FK review ──────────────────────────────────────────────────
+    # NOT inside an expander: promote_fk_review.render opens one per held group,
+    # and Streamlit expanders cannot nest — nesting silently breaks the panel.
+    if any(r.startswith("unresolved ") for d in res.holds.values() for r in d):
+        st.divider()
+        st.markdown("##### Resolve held reference codes")
+        st.caption("These are the `unresolved …` reasons above. Add a code as "
+                   "new vocabulary or map it to an existing one, then Run "
+                   "promote.")
+        try:
+            from dataview.file_catalog.promote_fk_review import render as _rfk
+            _rfk(engine, st)
+        except Exception as _e:
+            st.caption(f"(FK review unavailable: {str(_e)[:150]})")
 
 
 # =============================================================================

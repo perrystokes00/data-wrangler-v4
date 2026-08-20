@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Data Wrangler — petroleum data management</title>
+<meta name="description" content="Documents in, a governed PPDM-derivative database out. Data Wrangler catalogues logs, scout tickets and reports, promotes what it can prove, holds what it cannot, and never invents a value.">
+<meta property="og:title" content="Data Wrangler — petroleum data management">
+<meta property="og:description" content="Documents in, a governed PPDM-derivative database out. Twenty-three minutes of narrated walkthroughs, recorded against a live database.">
+<meta property="og:image" content="videos/poster-file-catalog.jpg">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="#top">DATA<span>·</span>WRANGLER</a>
+    <nav class="topnav">
+      <a href="#problem">The problem</a>
+      <a href="#films">Walkthroughs</a>
+      <a href="#modules">Modules</a>
+      <a href="#laws">How it behaves</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ── hero ──────────────────────────────────────────────────────── -->
+<div class="hero">
+  <div class="wrap">
+    <div class="eyebrow">Data Wrangler Solutions LLC &nbsp;·&nbsp; v4</div>
+    <h1>Documents in.<br>A database you can defend.</h1>
+    <p class="lede">
+      Every tool can read your documents now. Data Wrangler is the one that puts what
+      they say into a governed PPDM derivative — and refuses to put in what it cannot
+      prove.
+    </p>
+    <p class="sub">
+      A file catalogue that extracts from logs, scout tickets and reports. A loader that
+      resolves foreign keys before it writes. A map that draws only geometry the database
+      already agreed to. And, at every gate, a held row with a reason rather than a
+      confident guess.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="#films">Watch it run &nbsp;→</a>
+      <a class="btn" href="#modules">The modules</a>
+    </div>
+  </div>
+</div>
+
+<!-- ── the problem ───────────────────────────────────────────────── -->
+<section id="problem">
+  <div class="wrap">
+    <h2>Wrong is worse than missing</h2>
+    <p class="intro">
+      A confident wrong value plots, exports, and gets quoted in a meeting. A missing one
+      is visible. Every design decision here follows from that, and it is why the
+      software says <em>held</em> far more often than competitors say <em>done</em>.
+    </p>
+
+    <div class="grid g4">
+      <div class="card c-green">
+        <span class="tag">Loaded</span>
+        <h3>Rows in the database</h3>
+        <p>Production tables carry this file's id. The file did its job, and you can trace every row back to the page it came from.</p>
+      </div>
+      <div class="card c-blue">
+        <span class="tag">Staged</span>
+        <h3>Extracted, not yet promoted</h3>
+        <p>Sitting in the staging mirror, waiting for the next promote. Nothing is lost and nothing has been asserted.</p>
+      </div>
+      <div class="card c-amber">
+        <span class="tag">Held</span>
+        <h3>Blocked, with a named reason</h3>
+        <p>No well identifier, no surface location, a reference code nobody has registered. The row waits and tells you which. Held is recoverable; discarded is not.</p>
+      </div>
+      <div class="card c-red">
+        <span class="tag">Nothing</span>
+        <h3>The only real failure</h3>
+        <p>Neither staged nor loaded. Four states, never collapsed into a percentage — because each one has a different repair.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── films ─────────────────────────────────────────────────────── -->
+<section id="films">
+  <div class="wrap">
+    <h2>Watch it run</h2>
+    <p class="intro">
+      Recorded against a live database, narrated afterwards. Nothing is mocked, nothing is
+      sped up, and every number spoken is a number on the screen.
+    </p>
+
+    <div class="stats" style="margin-bottom:44px">
+      <div class="stat"><div class="n">23:11</div><div class="l">of walkthrough</div></div>
+      <div class="stat"><div class="n">6</div><div class="l">narrated films</div></div>
+      <div class="stat"><div class="n">1080p</div><div class="l">no edits to the data</div></div>
+    </div>
+
+    <div class="grid g2">
+
+      <div class="film wide">
+        <video controls preload="none" poster="videos/poster-file-catalog.jpg">
+          <source src="videos/file-catalog.mp4" type="video/mp4">
+        </video>
+        <div class="meta">
+          <span class="runtime">4:59 &nbsp;·&nbsp; File Catalog</span>
+          <h3>From a folder of documents to a queryable well database</h3>
+          <p>
+            A full pipeline run over 182 files: scan, extract, capture, promote. Then the
+            backlog — what promote refused, why, and how it drains. Ends on
+            <code>Held 0</code>.
+          </p>
+        </div>
+      </div>
+
+      <div class="film">
+        <video controls preload="none" poster="videos/poster-mapping.jpg">
+          <source src="videos/mapping.mp4" type="video/mp4">
+        </video>
+        <div class="meta">
+          <span class="runtime">2:26 &nbsp;·&nbsp; Mapping</span>
+          <h3>Find, inspect, document, export</h3>
+          <p>
+            A rectangle on a map becomes fifty wells, one opens as a scout ticket with its
+            documents attached, and the selection leaves as a spreadsheet, a shapefile, a
+            Petrel project, an OSDU manifest, or a table in another database.
+          </p>
+        </div>
+      </div>
+
+      <div class="film">
+        <video controls preload="none" poster="videos/poster-data-assistant.jpg">
+          <source src="videos/data-assistant.mp4" type="video/mp4">
+        </video>
+        <div class="meta">
+          <span class="runtime">4:16 &nbsp;·&nbsp; Data Assistant</span>
+          <h3>Eleven spreadsheets, one wired database</h3>
+          <p>
+            Files recognised by column shape, loading order read from the live foreign
+            keys so no child is written before its parent, and every column mapped to a
+            target you can review before anything lands.
+          </p>
+        </div>
+      </div>
+
+      <div class="film">
+        <video controls preload="none" poster="videos/poster-four-states.jpg">
+          <source src="videos/four-states.mp4" type="video/mp4">
+        </video>
+        <div class="meta">
+          <span class="runtime">6:36 &nbsp;·&nbsp; Concept</span>
+          <h3>The four states of a file</h3>
+          <p>
+            Why "did this document reach the database?" has exactly four honest answers,
+            what a staging mirror is for, and what it means to drain a backlog rather than
+            report a percentage.
+          </p>
+        </div>
+      </div>
+
+      <div class="film">
+        <video controls preload="none" poster="videos/poster-mapping-explainer.jpg">
+          <source src="videos/mapping-explainer.mp4" type="video/mp4">
+        </video>
+        <div class="meta">
+          <span class="runtime">4:00 &nbsp;·&nbsp; Concept</span>
+          <h3>What the map refuses to draw</h3>
+          <p>
+            Geometry is read from the database, never computed at draw time. A well with
+            no survey gets no path — because absent geometry is not straight geometry, and
+            an invented curve on a map gets believed.
+          </p>
+        </div>
+      </div>
+
+      <div class="film">
+        <video controls preload="none" poster="videos/poster-document-assistant.jpg">
+          <source src="videos/document-assistant.mp4" type="video/mp4">
+        </video>
+        <div class="meta">
+          <span class="runtime">0:52 &nbsp;·&nbsp; Document Assistant</span>
+          <h3>Reads a report, writes no data</h3>
+          <p>
+            Tells you what it found and what it could not name. The only thing it changes
+            is the vocabulary it is learning — capture and promotion stay separate acts.
+          </p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ── modules ───────────────────────────────────────────────────── -->
+<section id="modules">
+  <div class="wrap">
+    <h2>What is in the box</h2>
+    <p class="intro">
+      One application over a DataView database — a PPDM 3.9 derivative — shipped with
+      millions of agency well headers already in it.
+    </p>
+
+    <div class="grid g3">
+      <div class="card c-gold">
+        <span class="tag">Ingest</span>
+        <h3>File Catalog</h3>
+        <p>Crawls a folder, identifies every format, extracts what each file says, stages the rows and promotes what passes the gates. LAS, DLIS, LIS, SEG-Y, P190, PDF, Word, shapefiles.</p>
+      </div>
+      <div class="card c-gold">
+        <span class="tag">Ingest</span>
+        <h3>Data Assistant</h3>
+        <p>Tabular loads with foreign-key resolution, column mapping that remembers what it learned, and bulk-copy staging that verifies row counts against the source file.</p>
+      </div>
+      <div class="card c-gold">
+        <span class="tag">Ingest</span>
+        <h3>Document Assistant</h3>
+        <p>Reads reports and reports back. Extracts tables, names what it recognises, asks about what it does not, and writes nothing into production.</p>
+      </div>
+      <div class="card c-blue">
+        <span class="tag">Explore</span>
+        <h3>Mapping</h3>
+        <p>Wells, fields, leases, pipelines and seismic coverage. Hexagon density at continental zoom, individual wells and their paths up close, a natural-language filter, and scout tickets with a provenance footer.</p>
+      </div>
+      <div class="card c-blue">
+        <span class="tag">Explore</span>
+        <h3>DB Explorer</h3>
+        <p>Query, browse and export any table in the database, with schema introspection that reflects what is actually there rather than what a snapshot once said.</p>
+      </div>
+      <div class="card c-blue">
+        <span class="tag">Govern</span>
+        <h3>Reference Tables</h3>
+        <p>The controlled vocabularies promote checks against. Seeding one arms a gate: an unregistered code holds its rows instead of silently landing.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── laws ──────────────────────────────────────────────────────── -->
+<section id="laws">
+  <div class="wrap">
+    <h2>How it behaves under pressure</h2>
+    <p class="intro">
+      These are not slogans. Each one was paid for by a defect, and each is enforced in
+      code rather than in documentation.
+    </p>
+
+    <div class="law">
+      <h3>The model proposes, tested code executes</h3>
+      <p>No language model writes SQL that reaches the database. It names an operation from a catalogue, or returns a specification; deterministic Python performs it, and you see the specification before anything runs.</p>
+    </div>
+    <div class="law">
+      <h3>Automation may skip ceremony, never a decision</h3>
+      <p>A one-button load was built and removed, because seeding an entity parent is a decision rather than a step. Anything that would commit you to a judgement stops and asks.</p>
+    </div>
+    <div class="law">
+      <h3>Hold, don't drop</h3>
+      <p>A row that cannot promote stays in staging with a named reason. Held is recoverable; discarded is not. The backlog is a work queue, not an error log.</p>
+    </div>
+    <div class="law">
+      <h3>The first one in wins</h3>
+      <p>Promotion is insert-only. Whichever load inserts a row owns it, so re-running a pipeline refreshes rather than duplicates, and provenance stays answerable.</p>
+    </div>
+    <div class="law">
+      <h3>Every row can name its source document</h3>
+      <p>Credit follows the file's own identifier into the destination tables — not a timestamp, which the deep formats never get. A report that cannot say where a number came from says so.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <strong style="font-family:var(--mono);color:var(--ink)">Data Wrangler Solutions LLC</strong><br>
+      Petroleum data management · SQL Server · Oracle · Snowflake
+    </div>
+    <div>
+      <a href="https://github.com/perrystokes00/data-wrangler-v4">Source on GitHub</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

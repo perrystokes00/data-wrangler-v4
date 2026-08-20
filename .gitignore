@@ -170,3 +170,18 @@ _quarantine/
 .dev_pid
 loaded_modules.txt
 dataview/mapping/user_prefs.json
+
+# Superseded by docs/ (the published product site). Left on disk, not committed.
+site/
+
+# Demo export artifacts produced by the app
+exports/
+
+# --- exception: the product site's media IS committed -----------------------
+# The blanket *.mp4 / videos/ rules above keep recordings out of the source
+# tree, which is right. GitHub Pages serves the site from docs/, so those files
+# have to be in the repo. The directory must be un-ignored BEFORE the files
+# inside it — git will not look inside an excluded directory.
+!docs/videos/
+!docs/videos/*.mp4
+!docs/videos/*.jpg

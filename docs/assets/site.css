@@ -1,0 +1,142 @@
+/* Data Wrangler — product site
+   Palette and type are the same system the narrated videos use, so the page and
+   the films read as one object. Light is the bare :root; dark is applied under
+   prefers-color-scheme and by [data-theme], never the other way round. */
+
+:root{
+  --ground:#FBFAF6; --panel:#FFFFFF; --panel-2:#F2EFE8;
+  --ink:#191C21; --ink-mid:#41474F; --ink-mute:#6B7280;
+  --rule:#E3DED2; --rule-soft:#EFEBE2;
+  --gold:#8A6412; --gold-bright:#B98A1E; --gold-wash:rgba(185,138,30,.10);
+  --loaded:#1D7A52; --staged:#2F6FB0; --held:#9C5F14; --nothing:#A5372C;
+  --shadow:0 1px 2px rgba(25,28,33,.06),0 8px 24px rgba(25,28,33,.07);
+  --mono:ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --wrap:1180px;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0E1116; --panel:#161A21; --panel-2:#1C222B;
+    --ink:#E6E9ED; --ink-mid:#B8C0CB; --ink-mute:#8D97A5;
+    --rule:#29303B; --rule-soft:#1F2630;
+    --gold:#E9B949; --gold-bright:#F2CB6B; --gold-wash:rgba(233,185,73,.10);
+    --loaded:#46BE87; --staged:#5FA0E0; --held:#D89A45; --nothing:#E2685B;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0E1116; --panel:#161A21; --panel-2:#1C222B;
+  --ink:#E6E9ED; --ink-mid:#B8C0CB; --ink-mute:#8D97A5;
+  --rule:#29303B; --rule-soft:#1F2630;
+  --gold:#E9B949; --gold-bright:#F2CB6B; --gold-wash:rgba(233,185,73,.10);
+  --loaded:#46BE87; --staged:#5FA0E0; --held:#D89A45; --nothing:#E2685B;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35);
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;background:var(--ground);color:var(--ink);
+  font-family:var(--sans);font-size:17px;line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:var(--wrap);margin:0 auto;padding:0 28px}
+a{color:var(--gold-bright)}
+h1,h2,h3{font-family:var(--mono);letter-spacing:-.01em;line-height:1.15;margin:0}
+code{font-family:var(--mono);color:var(--gold-bright);font-size:.92em}
+
+/* ── header ─────────────────────────────────────────────────────────── */
+.topbar{
+  position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--ground) 88%,transparent);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--rule);
+}
+.topbar .wrap{display:flex;align-items:center;gap:28px;height:64px}
+.brand{font-family:var(--mono);font-weight:700;font-size:17px;color:var(--ink);text-decoration:none;white-space:nowrap}
+.brand span{color:var(--gold)}
+.topnav{margin-left:auto;display:flex;gap:26px;flex-wrap:wrap}
+.topnav a{color:var(--ink-mute);text-decoration:none;font-size:15px}
+.topnav a:hover{color:var(--gold-bright)}
+
+/* ── hero ───────────────────────────────────────────────────────────── */
+.hero{padding:96px 0 72px;border-bottom:1px solid var(--rule)}
+.eyebrow{
+  font-family:var(--mono);font-size:13px;letter-spacing:.22em;
+  text-transform:uppercase;color:var(--gold);margin-bottom:26px;
+}
+.hero h1{font-size:clamp(38px,6vw,74px);max-width:17ch}
+.hero .lede{font-size:clamp(19px,2.2vw,25px);color:var(--ink-mid);max-width:62ch;margin:28px 0 0}
+.hero .sub{color:var(--ink-mute);max-width:62ch;margin:18px 0 0}
+.cta{display:flex;gap:14px;margin-top:38px;flex-wrap:wrap}
+.btn{
+  display:inline-block;padding:13px 24px;border-radius:10px;text-decoration:none;
+  font-family:var(--mono);font-size:15px;border:1px solid var(--rule);
+  color:var(--ink);background:var(--panel);
+}
+.btn:hover{border-color:var(--gold)}
+.btn.primary{background:var(--gold);border-color:var(--gold);color:#141414;font-weight:600}
+.btn.primary:hover{background:var(--gold-bright);border-color:var(--gold-bright)}
+
+/* ── sections ───────────────────────────────────────────────────────── */
+section{padding:82px 0;border-bottom:1px solid var(--rule)}
+section h2{font-size:clamp(28px,3.4vw,40px);margin-bottom:16px}
+section .intro{color:var(--ink-mid);max-width:66ch;margin:0 0 44px}
+
+.grid{display:grid;gap:22px}
+.g3{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.g2{grid-template-columns:repeat(auto-fit,minmax(420px,1fr))}
+/* The four states are a set — 3-and-1 reads as "three states and an afterthought",
+   which is the opposite of the point. 250px keeps all four on one row at the
+   1180px wrap and still wraps cleanly on a phone. */
+.g4{grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
+
+.card{
+  background:var(--panel);border:1px solid var(--rule);border-radius:14px;
+  padding:28px;box-shadow:var(--shadow);border-top:3px solid var(--rule);
+}
+.card h3{font-size:21px;margin-bottom:10px}
+.card p{color:var(--ink-mute);margin:0;font-size:16px}
+.card .tag{
+  font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--ink-mute);display:block;margin-bottom:12px;
+}
+.c-gold{border-top-color:var(--gold)}   .c-gold h3{color:var(--gold-bright)}
+.c-green{border-top-color:var(--loaded)} .c-green h3{color:var(--loaded)}
+.c-blue{border-top-color:var(--staged)}  .c-blue h3{color:var(--staged)}
+.c-amber{border-top-color:var(--held)}   .c-amber h3{color:var(--held)}
+.c-red{border-top-color:var(--nothing)}  .c-red h3{color:var(--nothing)}
+
+/* ── video ──────────────────────────────────────────────────────────── */
+.film{
+  background:var(--panel);border:1px solid var(--rule);border-radius:14px;
+  overflow:hidden;box-shadow:var(--shadow);display:flex;flex-direction:column;
+}
+.film video{width:100%;display:block;background:#0B0E12;aspect-ratio:16/9}
+.film .meta{padding:22px 24px 26px}
+.film .meta h3{font-size:19px;margin-bottom:8px}
+.film .meta p{color:var(--ink-mute);font-size:15px;margin:0}
+.runtime{
+  font-family:var(--mono);font-size:12px;color:var(--gold);
+  letter-spacing:.1em;display:block;margin-bottom:10px;
+}
+.film.wide{grid-column:1/-1}
+.film.wide video{max-height:min(66vh,640px);object-fit:contain}
+
+/* ── laws ───────────────────────────────────────────────────────────── */
+.law{border-left:3px solid var(--gold);padding:6px 0 6px 24px;margin:0 0 30px}
+.law h3{font-size:19px;margin-bottom:8px}
+.law p{color:var(--ink-mute);margin:0;max-width:70ch}
+
+/* ── stats ──────────────────────────────────────────────────────────── */
+.stats{display:flex;gap:56px;flex-wrap:wrap;margin-top:8px}
+.stat .n{font-family:var(--mono);font-size:44px;font-weight:700;color:var(--gold-bright);line-height:1}
+.stat .l{color:var(--ink-mute);font-size:15px;margin-top:8px}
+
+footer{padding:56px 0 76px;color:var(--ink-mute);font-size:15px}
+footer .wrap{display:flex;justify-content:space-between;gap:24px;flex-wrap:wrap}
+footer a{color:var(--ink-mute)}
+
+@media (max-width:640px){
+  .hero{padding:64px 0 52px}
+  section{padding:60px 0}
+  .stats{gap:32px}
+}
