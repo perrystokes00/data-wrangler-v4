@@ -40,10 +40,12 @@
       prove.
     </p>
     <p class="sub">
-      DataView began as a PPDM 3.9 derivative and has grown past it. The file catalogue
-      lives <em>inside</em> the database rather than beside it, and the mapping tool reads
-      the same tables — so you can ask where as easily as what, without standing up a GIS
-      to do it.
+      DataView began as a PPDM 3.9 derivative and grew past it — easier to load into and
+      to customise than a conformant implementation, carrying the provenance of every row.
+      The file catalogue is an extension of that same schema, and the map reads it
+      directly. MapBox and QGIS were both tried and were too slow: what other mapping tool
+      handles 3.9 million federated wells and links each one to the documents in a file
+      catalogue?
     </p>
     <div class="cta">
       <a class="btn primary" href="#films">Watch it run &nbsp;→</a>
@@ -53,7 +55,7 @@
     <div class="listen">
       <div class="listen-label">
         <span class="listen-icon" aria-hidden="true">▸</span>
-        Listen to this page &nbsp;·&nbsp; 2:51
+        Listen to this page &nbsp;·&nbsp; 3:01
       </div>
       <audio controls preload="none" src="audio/page-narration.m4a">
         Your browser does not support audio playback.
@@ -71,14 +73,14 @@
     <div class="eyebrow">The platform</div>
     <h2>One tool between your documents and your database</h2>
     <p class="intro">
-      Data Wrangler v4 is built on <strong>DataView</strong>, which started life as a
-      PPDM 3.9 derivative and has since evolved: the file catalogue is a set of tables in
-      the database, not a separate system, and the map is coupled tightly enough to it
-      that <strong>you do not need a GIS to ask a spatial question</strong>. It ships with
-      3.9 million agency well headers already loaded. Point it at a folder, a spreadsheet
-      or a scanned report and it does what a data manager does by hand: identify the
-      format, extract what it says, resolve the keys against what is already there, and
-      load what it can prove.
+      Seven modules, each doing one job and handing its result to the next, over a
+      <strong>DataView</strong> database. Every record carries its provenance, so the file
+      a row came from can be opened. Multiple schemas are supported at once — the Gulf of
+      Mexico, and the Federation, where each agency's data sits in its own schema and the
+      common fields are federated so <strong>one map shows 3.9 million wells</strong>.
+      Point it at a folder, a spreadsheet or a scanned report and it does what a data
+      manager does by hand: identify the format, extract what it says, resolve the keys
+      against what is already there, and load what it can prove.
     </p>
 
     <div class="grid g3">
@@ -99,8 +101,8 @@
       <div class="card c-green">
         <span class="tag">Exports</span>
         <h3>Whatever the next tool needs</h3>
-        <p>CSV, Excel with a sheet per section, a PPDM 3.9 well extract. GeoJSON,
-        shapefile, file geodatabase. A Petrel project, an OSDU manifest, or a direct
+        <p>Scout tickets, CSV, multi-page Excel, a PPDM 3.9 well extract. GeoJSON,
+        shapefile, file geodatabase. Petrel, GeoGraphix, an OSDU manifest — or a direct
         write into another database.</p>
       </div>
     </div>

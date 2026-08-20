@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Overview — Data Wrangler</title>
+<meta name="description" content="The whole platform in seven modules, each doing one job and handing its result to the next.">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="../index.html">DATA<span>·</span>WRANGLER</a>
+    <nav class="topnav">
+      <a href="../components.html">All components</a>
+      <a href="overview.html" aria-current="page" >Overview</a>
+      <a href="dataview.html">DataView</a>
+      <a href="file-catalog.html">File Catalog</a>
+      <a href="data-assistant.html">Data Assistant</a>
+      <a href="document-assistant.html">Document Assistant</a>
+      <a href="mapping.html">Mapping</a>
+      <a href="../index.html#films">Walkthroughs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="doc">
+  <div class="wrap">
+    <a class="backlink" href="../components.html">&larr; All components</a>
+    <div class="eyebrow">Component documentation</div>
+    <h1>Overview</h1>
+    <p class="standfirst">The whole platform in seven modules, each doing one job and handing its result to the next.</p>
+<h2>Data Wrangler v4 — overview</h2>
+<p><em>Data Wrangler Solutions LLC</em></p>
+<p>Data Wrangler 4.0 is a petroleum data management platform. It is built from seven modules, each of which does one job and hands its result to the next.</p>
+<h2>1 · DataView — the database</h2>
+<p>A customized database schema derived from PPDM 3.9, made more adaptable and flexible for today’s messy data environment. DataView is much easier to load data into and to customize than a conformant PPDM implementation.</p>
+<p>It carries the <strong>provenance of every record</strong>, so the file a row was loaded from is identified and can be opened.</p>
+<p>It handles <strong>multiple schemas</strong> — a modified schema for the Gulf of Mexico, and the Federation, where each state and federal agency’s data was loaded into its own schema and the common fields were then federated so a single map can display all of it.</p>
+<h2>2 · File Catalog</h2>
+<p>An extension of the DataView schema with tables for the inventory of files on a shared drive, and for the cataloguing and extraction of the tables of relevant data those files contain.</p>
+<p><strong>Structured files:</strong> LAS, DLIS, LIS, SEG-Y, P190, Esri shapefile. <strong>Unstructured files:</strong> Word, Excel and PDF.</p>
+<p>The extracted data can optionally be loaded into the main DataView schema, or into another database.</p>
+<h2>3 · Data Assistant</h2>
+<p>Where flat data files are bulk loaded into DataView. The data is loaded to staging tables; the mapping of tables and columns is presented for review; the data is normalized and validated; foreign keys are presented for resolution wherever one has been violated. Once the mapping and the foreign keys are resolved, the data is promoted into the DataView tables.</p>
+<p><strong>The mapping is remembered.</strong> Each file’s column shape is kept as a fingerprint, and a synonym store is built alongside it. The result is that once a file format has been seen, a file of that format moves through the system in a few clicks — and the same applies to a whole directory of CSV or Excel files.</p>
+<p>Headers, stratigraphy, log summaries, directional surveys, completions and production can be bulk loaded at the same time, provided those formats have been loaded before. Updating the database with data arriving from the field or from a provider becomes virtually automatic.</p>
+<h2>4 · Mapping</h2>
+<p>Data Wrangler was designed to be fully integrated with a mapping front end.</p>
+<p>The map carries a drop-down query tool and an <strong>AI query tool</strong> for asking more complex questions. It provides access to scout tickets for wells, and to every document related to a well — final well report, LAS files and the rest — for the wells selected on the map. No SQL required.</p>
+<p>The <strong>export tool</strong> writes the selection out in a range of formats: scout tickets, CSV, multi-page Excel, Petrel, GeoGraphix and OSDU.</p>
+<p>The mapping tool also has <strong>viewers</strong> for log data (LAS, LIS, DLIS), seismic data (SEG-Y) and the standard desktop formats.</p>
+<div class="quote">Several existing mapping tools were tried, including MapBox and QGIS. They were too slow and not flexible enough, so the mapping tool was built to fit. What other mapping tool handles 3.9 million federated wells and links each one to the documents in a file catalog?</div>
+<h2>5 · Document Assistant</h2>
+<p>A tool for training the system to recognise tables in a document <strong>by their shape</strong>.</p>
+<p>When the recogniser extracts a table it has seen the shape of before, the File Catalog passes it straight through to the database. The user can inspect a set of files to check that the recogniser identified the table correctly and mapped every column; where it did not, the user corrects the mapping or claims the columns that were missed.</p>
+<p><strong>Those corrections go into the knowledge base</strong> and are used from then on. So the system grows as more documents are read and the vocabulary accumulates E&amp;P terminology.</p>
+<p>The technology is not specific to petroleum — it works on any kind of document with tables in it.</p>
+<h2>6 · DB Explorer</h2>
+<p><em>To be written.</em></p>
+<h2>7 · Reference Tables</h2>
+<p><em>To be written.</em></p>
+<h2>Where the detail lives</h2>
+<p>Each module has its own component document:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Document</th><th>Covers</th></tr></thead>
+<tbody>
+<tr><td>DataView — the database</td><td>The schema, what it inherits from PPDM 3.9 and where it departs</td></tr>
+<tr><td>File Catalog</td><td>Crawl, inventory, extract, vault, promote</td></tr>
+<tr><td>Data Assistant</td><td>Bulk tabular loading, the mapping memories, foreign-key resolution</td></tr>
+<tr><td>Mapping</td><td>Layers, filters, the AI query tool, scout tickets and export</td></tr>
+<tr><td>Document Assistant</td><td>Shape recognition, the vocabulary, and how it is taught</td></tr>
+</tbody></table></div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <strong style="font-family:var(--mono);color:var(--ink)">Data Wrangler Solutions LLC</strong><br>
+      Petroleum data management · SQL Server · Oracle · Snowflake
+    </div>
+    <div><a href="../index.html">Overview</a> &nbsp;·&nbsp; <a href="../components.html">Components</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

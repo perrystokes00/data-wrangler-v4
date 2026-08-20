@@ -22,6 +22,8 @@ OUT = os.path.join(ROOT, "docs", "components")
 
 # source .docx -> (output slug, nav label, one-line standfirst)
 PAGES = [
+    ("0.Data_Wrangler_Overview.docx", "overview", "Overview",
+     "The whole platform in seven modules, each doing one job and handing its result to the next."),
     ("1. DataView_Database.docx", "dataview", "DataView",
      "The database. Derived in part from PPDM 3.9, then evolved - an integrated file catalogue and geometry the map reads directly."),
     ("4. File_Catalog.docx", "file-catalog", "File Catalog",
@@ -126,6 +128,7 @@ def convert(path):
 
 
 NAV = [("../components.html", "All components"),
+       ("overview.html", "Overview"),
        ("dataview.html", "DataView"),
        ("file-catalog.html", "File Catalog"),
        ("data-assistant.html", "Data Assistant"),

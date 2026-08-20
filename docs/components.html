@@ -34,7 +34,9 @@
       all of them.
     </p>
     <p class="sub">
-      Below is what each part is for. Five have full technical documentation —
+      Below is what each part is for, taken from the
+      <a href="components/overview.html">platform overview</a>. Five have a full component
+      document as well —
       the same documents the software was built against, covering what each
       component does, the decisions behind it, and what it deliberately refuses
       to do.
@@ -52,12 +54,12 @@
       <a class="comp" href="components/dataview.html">
         <h3>DataView</h3>
         <p>
-          Derived in part from PPDM 3.9, and evolved from there. Wells, tops, surveys,
-          completions, production, cores and petrophysics — plus two things PPDM does not
-          give you: a file catalogue held as tables in the database itself, and geography
-          columns the mapping tool reads directly. That coupling is why you can query the
-          data spatially without a GIS alongside it. Ships with 3.9 million agency well
-          headers loaded.
+          A schema derived from PPDM 3.9 and made more adaptable for messy data — easier
+          to load into and to customise than a conformant PPDM implementation. It carries
+          the provenance of every record, so the file a row came from is identified and can
+          be opened. It also handles multiple schemas: a modified one for the Gulf of
+          Mexico, and the Federation, where each state and federal agency's data sits in its
+          own schema and the common fields are federated so one map shows all of it.
         </p>
         <span class="more">Read the documentation &rarr;</span>
       </a>
@@ -73,10 +75,11 @@
       <a class="comp" href="components/file-catalog.html">
         <h3>File Catalog</h3>
         <p>
-          Point it at a folder and it works through everything in there: well logs,
-          seismic, scout tickets, end-of-well reports, shapefiles. It identifies each
-          format, pulls out what it can read, stages the rows, and loads the ones that
-          pass. Anything it will not load is listed with the reason.
+          An extension of the DataView schema — tables for the inventory of files on a
+          shared drive, and for cataloguing and extracting the tables of data inside them.
+          Structured: LAS, DLIS, LIS, SEG-Y, P190, Esri shapefile. Unstructured: Word,
+          Excel and PDF. What it extracts can be loaded into DataView, or into another
+          database entirely.
         </p>
         <span class="more">Read the documentation &rarr;</span>
       </a>
@@ -84,10 +87,12 @@
       <a class="comp" href="components/data-assistant.html">
         <h3>Data Assistant</h3>
         <p>
-          For data that already has columns — spreadsheets and CSVs. It recognises a
-          file by its shape, proposes a mapping from its columns to database fields,
-          and works out the loading order so nothing is written before the record it
-          depends on. You review the mapping before anything lands.
+          Bulk loading for flat files. Data goes to staging, the table and column mapping
+          is presented for review, values are normalised and validated, and any violated
+          foreign key is put in front of you to resolve before the data is promoted. The
+          mapping is then remembered — each file's column shape is kept as a fingerprint
+          with a synonym store beside it, so the second file of that format takes a few
+          clicks, and so does a whole directory of them.
         </p>
         <span class="more">Read the documentation &rarr;</span>
       </a>
@@ -95,10 +100,12 @@
       <a class="comp" href="components/document-assistant.html">
         <h3>Document Assistant</h3>
         <p>
-          For reports rather than tables. It reads a document, finds the tables inside
-          it, names the columns it recognises and asks about the ones it does not. It
-          writes nothing to the database — the point is to see what it understood
-          before you decide to keep it.
+          Trains the system to recognise tables in a document by their shape. Once a shape
+          has been seen, the File Catalog passes that table straight through. You inspect
+          what the recogniser found, correct any mapping it got wrong, and claim the columns
+          it missed — and those corrections join the knowledge base, so the vocabulary
+          accumulates as more documents are read. The technique is not petroleum-specific;
+          it works on any document with tables in it.
         </p>
         <span class="more">Read the documentation &rarr;</span>
       </a>
@@ -115,10 +122,11 @@
       <a class="comp" href="components/mapping.html">
         <h3>Mapping</h3>
         <p>
-          For the questions you cannot phrase as a query — what is in this area, who
-          operates it, which of these has a directional survey. Draw a box and you have
-          a well list; open a well and you have its scout ticket and its documents;
-          export the selection in whatever format the next tool needs.
+          A drop-down query tool and an AI query tool for the harder questions, scout
+          tickets for the wells you select, and every document attached to them — final
+          well report, LAS files and the rest. No SQL required. It has viewers for log data
+          (LAS, LIS, DLIS), seismic (SEG-Y) and the usual desktop formats, and exports the
+          selection as scout tickets, CSV, multi-page Excel, Petrel, GeoGraphix or OSDU.
         </p>
         <span class="more">Read the documentation &rarr;</span>
       </a>
@@ -126,21 +134,18 @@
       <div class="comp nodoc">
         <h3>DB Explorer</h3>
         <p>
-          Query, browse and export any table in the database directly. It reads the
-          schema as it actually is rather than from a stored snapshot, so it stays
-          right when the database changes.
+          Query, browse and export any table in the database directly.
         </p>
-        <span class="more">Covered in the DataView documentation</span>
+        <span class="more">Component document to follow</span>
       </div>
 
       <div class="comp nodoc">
         <h3>Reference Tables</h3>
         <p>
-          The controlled vocabularies — well status, well type, units, depth datum,
-          data source. Loading checks values against these, so an unregistered code
-          holds its rows for review instead of quietly landing in your database.
+          The controlled vocabularies loading checks against — well status, well type,
+          units, depth datum, data source.
         </p>
-        <span class="more">Covered in the DataView documentation</span>
+        <span class="more">Component document to follow</span>
       </div>
 
     </div>
