@@ -7,7 +7,7 @@
 <title>Data Wrangler — petroleum data management</title>
 <meta name="description" content="Documents in, a governed PPDM-derivative database out. Data Wrangler catalogues logs, scout tickets and reports, promotes what it can prove, holds what it cannot, and never invents a value.">
 <meta property="og:title" content="Data Wrangler — petroleum data management">
-<meta property="og:description" content="Documents in, a governed PPDM-derivative database out. Twenty-three minutes of narrated walkthroughs, recorded against a live database.">
+<meta property="og:description" content="Documents in, a governed PPDM-derivative database out. Nineteen minutes of narrated walkthroughs, recorded against a live database.">
 <meta property="og:image" content="videos/poster-file-catalog.jpg">
 <meta property="og:type" content="website">
 <link rel="stylesheet" href="assets/site.css">
@@ -142,8 +142,8 @@
     </p>
 
     <div class="stats" style="margin-bottom:44px">
-      <div class="stat"><div class="n">23:11</div><div class="l">of walkthrough</div></div>
-      <div class="stat"><div class="n">6</div><div class="l">narrated films</div></div>
+      <div class="stat"><div class="n">19:10</div><div class="l">of walkthrough</div></div>
+      <div class="stat"><div class="n">5</div><div class="l">narrated films</div></div>
       <div class="stat"><div class="n">1080p</div><div class="l">no edits to the data</div></div>
     </div>
 
@@ -157,9 +157,10 @@
           <span class="runtime">4:59 &nbsp;·&nbsp; File Catalog</span>
           <h3>From a folder of documents to a queryable well database</h3>
           <p>
-            A full pipeline run over 182 files: scan, extract, capture, promote. Then the
-            backlog — what promote refused, why, and how it drains. Ends on
-            <code>Held 0</code>.
+            One run over 182 files, start to finish: crawl the folder, read each file,
+            stage the rows, load what passes. Then the part nobody shows you — the files
+            that did not load, the reason for each, and clearing them until none are
+            left. Ends on <code>Held 0</code>.
           </p>
         </div>
       </div>
@@ -172,9 +173,10 @@
           <span class="runtime">2:26 &nbsp;·&nbsp; Mapping</span>
           <h3>Find, inspect, document, export</h3>
           <p>
-            A rectangle on a map becomes fifty wells, one opens as a scout ticket with its
-            documents attached, and the selection leaves as a spreadsheet, a shapefile, a
-            Petrel project, an OSDU manifest, or a table in another database.
+            Draw a box on the map and you have fifty wells. Open one and you get its
+            scout ticket and every document filed against it. Then send the whole
+            selection out — a spreadsheet, a shapefile, a Petrel project, an OSDU
+            manifest, or straight into another database.
           </p>
         </div>
       </div>
@@ -185,11 +187,12 @@
         </video>
         <div class="meta">
           <span class="runtime">4:16 &nbsp;·&nbsp; Data Assistant</span>
-          <h3>Eleven spreadsheets, one wired database</h3>
+          <h3>Structured data import tool, one wired database</h3>
           <p>
-            Files recognised by column shape, loading order read from the live foreign
-            keys so no child is written before its parent, and every column mapped to a
-            target you can review before anything lands.
+            Spreadsheets and CSVs into the database. It recognises a file by its columns,
+            works out the loading order from the database's own relationships so nothing
+            lands before the record it depends on, and shows you every column mapping
+            before it writes.
           </p>
         </div>
       </div>
@@ -200,26 +203,12 @@
         </video>
         <div class="meta">
           <span class="runtime">6:36 &nbsp;·&nbsp; Concept</span>
-          <h3>The four states of a file</h3>
+          <h3>Extraction and importing unstructured data</h3>
           <p>
-            Why "did this document reach the database?" has exactly four honest answers,
-            what a staging mirror is for, and what it means to drain a backlog rather than
-            report a percentage.
-          </p>
-        </div>
-      </div>
-
-      <div class="film">
-        <video controls preload="none" poster="videos/poster-mapping-explainer.jpg">
-          <source src="videos/mapping-explainer.mp4" type="video/mp4">
-        </video>
-        <div class="meta">
-          <span class="runtime">4:00 &nbsp;·&nbsp; Concept</span>
-          <h3>What the map refuses to draw</h3>
-          <p>
-            Geometry is read from the database, never computed at draw time. A well with
-            no survey gets no path — because absent geometry is not straight geometry, and
-            an invented curve on a map gets believed.
+            What happens to a scanned report or a log between the folder and the database.
+            How the text becomes rows, why those rows wait in a staging area before they
+            are trusted, and why "did this document load?" has four different answers
+            rather than a percentage.
           </p>
         </div>
       </div>
@@ -230,10 +219,12 @@
         </video>
         <div class="meta">
           <span class="runtime">0:52 &nbsp;·&nbsp; Document Assistant</span>
-          <h3>Reads a report, writes no data</h3>
+          <h3>Reads a report and maps the tables for extraction</h3>
           <p>
-            Tells you what it found and what it could not name. The only thing it changes
-            is the vocabulary it is learning — capture and promotion stay separate acts.
+            Point it at a report and it finds the tables inside, names the columns it
+            recognises, and asks you about the ones it does not. It writes nothing to the
+            database — reading and loading stay separate steps, so you see what it
+            understood before anything is committed.
           </p>
         </div>
       </div>
@@ -324,7 +315,7 @@
     <div class="eyebrow">Ready when you are</div>
     <h2>Ready to load some wells?</h2>
     <p class="intro">
-      The fastest way to judge it is to watch it work on a real database — twenty-three
+      The fastest way to judge it is to watch it work on a real database — nineteen
       minutes, no edits, every number on screen. Then read the source, because a platform
       that asks you to trust its numbers should be willing to show you how it gets them.
     </p>
