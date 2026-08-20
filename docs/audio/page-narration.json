@@ -1,35 +1,35 @@
 [
   {
     "source": "(no video - this narrates the web page itself)",
-    "note": "Rendered to docs/audio/page-narration.m4a and played by the 'Listen to this page' control in the hero. Same voice as the films: SAPI Microsoft Zira Desktop, rate 0."
+    "note": "Rendered to docs/audio/page-narration.m4a and played by the 'Listen to this page' control in the hero. Same voice as the films: SAPI Microsoft Zira Desktop, rate 0. Acronyms are spelled out for the synthesiser (L A S, S Q L, P P D M, geo jason, geo graphics, Ezri) - written normally they are guessed at, and 'here is'/'here has' elide into something that sounds like a word of its own. Keep both habits when editing."
   },
   {
     "id": "P01",
     "at": 0.0,
     "window": 0.0,
     "label": "What this is",
-    "text": "Data Wrangler. Round up your data and documents, and load them into the DataView database. Every tool can read your documents now — the difference is what happens to what they say. Data Wrangler puts it somewhere you can defend, and refuses to put in what it cannot prove. This is a short tour of the page. Everything described here is shown running in the films further down."
+    "text": "Data Wrangler. Round up your data and documents, and load them into the DataView database. Every tool can read your documents now — the difference is what happens to what they say. Data Wrangler puts it somewhere you can defend, and refuses to put in what it cannot prove. This is a short tour of the page. Everything described below is shown running in the films further down."
   },
   {
     "id": "P02",
     "at": 0.0,
     "window": 0.0,
     "label": "Wrong is worse than missing",
-    "text": "Start with the position everything else follows from. Wrong is worse than missing. A confident wrong value plots on a map, exports to a spreadsheet, and gets quoted in a meeting. A missing one is visible. So a file here has exactly four states, and they are never collapsed into a percentage. Loaded — its rows are in the database. Staged — extracted, and waiting. Held — blocked, with a named reason you can act on. Or nothing at all, which is the only real failure."
+    "text": "Start with the position everything else follows from. Wrong is worse than missing. A confident wrong value plots on a map, exports to a spreadsheet, and gets quoted in a meeting. A missing one is visible. So every file has exactly four states, and they are never collapsed into a percentage. Loaded — its rows are in the database. Staged — extracted, and waiting. Held — blocked, with a named reason you can act on. Or nothing at all, which is the only real failure."
   },
   {
     "id": "P03",
     "at": 0.0,
     "window": 0.0,
     "label": "Reads, writes, exports",
-    "text": "What it reads: well logs in LAS, DLIS and LIS. Seismic in SEG-Y and P190. Esri shapefiles. Scout tickets, end of well reports and completion records as Word, Excel and PDF. What it writes: SQL Server, Oracle or Snowflake. And what it exports: scout tickets, C S V, multi-page Excel, a PPDM extract, GeoJSON, shapefile, Petrel, GeoGraphix, an OSDU manifest, or a direct write into another database."
+    "text": "What it reads: well logs in L A S, D L I S and L I S. Seismic in seg why and P one ninety. Ezri shapefiles. Scout tickets, end of well reports and completion records as Word, Excel and P D F. What it writes: S Q L Server, Oracle or Snowflake. And what it exports: scout tickets, C S V, multi-page Excel, a P P D M extract, geo jason, shapefile, Petrel, geo graphics, an O S D U manifest, or a direct write into another database."
   },
   {
     "id": "P04",
     "at": 0.0,
     "window": 0.0,
     "label": "The components",
-    "text": "Seven modules, each doing one job and handing its result to the next. DataView is the database — derived from PPDM three point nine, but easier to load into and to customise, and it carries the provenance of every row, so the file a value came from can be opened. The File Catalog is an extension of that same schema: tables for the files on a shared drive and for what was extracted from them. The Data Assistant bulk loads flat files and remembers the mapping, so the second file of a format takes a few clicks. The Document Assistant learns to recognise tables by their shape — and that part is not petroleum specific; it works on any document with tables in it. Mapping is the front end. MapBox and QGIS were both tried and were too slow, so the map was built to fit: three point nine million federated wells, each linked to its documents, and no SQL required."
+    "text": "Seven modules, each doing one job and handing its result to the next. DataView is the database — derived from P P D M three point nine, but easier to load into and to customise, and it carries the provenance of every row, so the file a value came from can be opened. The File Catalog is an extension of that same schema: tables for the files on a shared drive and for what was extracted from them. The Data Assistant bulk loads flat files and remembers the mapping, so the second file of a format takes a few clicks. The Document Assistant learns to recognise tables by their shape — and that part is not petroleum specific; it works on any document with tables in it. Mapping is the front end. Map Box and Q G I S were both tried and were too slow, so the map was built to fit: three point nine million federated wells, each linked to its documents, and no S Q L required."
   },
   {
     "id": "P05",
