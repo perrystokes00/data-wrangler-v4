@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Components — Data Wrangler</title>
+<meta name="description" content="What each part of Data Wrangler does: the DataView database, the File Catalog, the Data Assistant, the Document Assistant, Mapping, DB Explorer and Reference Tables — with the full technical documentation for each.">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="index.html">DATA<span>·</span>WRANGLER</a>
+    <nav class="topnav">
+      <a href="index.html#what">The platform</a>
+      <a href="index.html#films">Walkthroughs</a>
+      <a href="components.html" aria-current="page">Components</a>
+      <a href="index.html#laws">How it behaves</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<div class="hero" style="padding:80px 0 56px">
+  <div class="wrap">
+    <div class="eyebrow">Component documentation</div>
+    <h1 style="max-width:20ch">Seven parts,<br>one database</h1>
+    <p class="lede">
+      Data Wrangler is one application over a DataView database. Each part does a
+      narrow job and hands off to the next, so you can adopt one without adopting
+      all of them.
+    </p>
+    <p class="sub">
+      Below is what each part is for. Five have full technical documentation —
+      the same documents the software was built against, covering what each
+      component does, the decisions behind it, and what it deliberately refuses
+      to do.
+    </p>
+  </div>
+</div>
+
+<section style="border-bottom:none">
+  <div class="wrap">
+
+    <h2 style="font-size:24px;margin-bottom:6px">The database</h2>
+    <p class="intro" style="margin-bottom:26px">Everything else writes into this.</p>
+
+    <div class="grid g2" style="margin-bottom:60px">
+      <a class="comp" href="components/dataview.html">
+        <h3>DataView</h3>
+        <p>
+          A PPDM 3.9 derivative, reshaped for data that arrives messy. Wells, tops,
+          surveys, completions, production, cores and petrophysics — plus geography
+          columns, so the map reads shapes the database already agreed to. Ships with
+          3.9 million agency well headers loaded.
+        </p>
+        <span class="more">Read the documentation &rarr;</span>
+      </a>
+    </div>
+
+    <h2 style="font-size:24px;margin-bottom:6px">Getting data in</h2>
+    <p class="intro" style="margin-bottom:26px">
+      Three routes, chosen by what the data looks like rather than where it came from.
+    </p>
+
+    <div class="grid g2" style="margin-bottom:60px">
+
+      <a class="comp" href="components/file-catalog.html">
+        <h3>File Catalog</h3>
+        <p>
+          Point it at a folder and it works through everything in there: well logs,
+          seismic, scout tickets, end-of-well reports, shapefiles. It identifies each
+          format, pulls out what it can read, stages the rows, and loads the ones that
+          pass. Anything it will not load is listed with the reason.
+        </p>
+        <span class="more">Read the documentation &rarr;</span>
+      </a>
+
+      <a class="comp" href="components/data-assistant.html">
+        <h3>Data Assistant</h3>
+        <p>
+          For data that already has columns — spreadsheets and CSVs. It recognises a
+          file by its shape, proposes a mapping from its columns to database fields,
+          and works out the loading order so nothing is written before the record it
+          depends on. You review the mapping before anything lands.
+        </p>
+        <span class="more">Read the documentation &rarr;</span>
+      </a>
+
+      <a class="comp" href="components/document-assistant.html">
+        <h3>Document Assistant</h3>
+        <p>
+          For reports rather than tables. It reads a document, finds the tables inside
+          it, names the columns it recognises and asks about the ones it does not. It
+          writes nothing to the database — the point is to see what it understood
+          before you decide to keep it.
+        </p>
+        <span class="more">Read the documentation &rarr;</span>
+      </a>
+
+    </div>
+
+    <h2 style="font-size:24px;margin-bottom:6px">Getting answers out</h2>
+    <p class="intro" style="margin-bottom:26px">
+      Once the data is in, three ways to ask it questions.
+    </p>
+
+    <div class="grid g2" style="margin-bottom:60px">
+
+      <a class="comp" href="components/mapping.html">
+        <h3>Mapping</h3>
+        <p>
+          For the questions you cannot phrase as a query — what is in this area, who
+          operates it, which of these has a directional survey. Draw a box and you have
+          a well list; open a well and you have its scout ticket and its documents;
+          export the selection in whatever format the next tool needs.
+        </p>
+        <span class="more">Read the documentation &rarr;</span>
+      </a>
+
+      <div class="comp nodoc">
+        <h3>DB Explorer</h3>
+        <p>
+          Query, browse and export any table in the database directly. It reads the
+          schema as it actually is rather than from a stored snapshot, so it stays
+          right when the database changes.
+        </p>
+        <span class="more">Covered in the DataView documentation</span>
+      </div>
+
+      <div class="comp nodoc">
+        <h3>Reference Tables</h3>
+        <p>
+          The controlled vocabularies — well status, well type, units, depth datum,
+          data source. Loading checks values against these, so an unregistered code
+          holds its rows for review instead of quietly landing in your database.
+        </p>
+        <span class="more">Covered in the DataView documentation</span>
+      </div>
+
+    </div>
+
+    <div class="cta">
+      <a class="btn primary" href="index.html#films">Watch the walkthroughs &nbsp;&rarr;</a>
+      <a class="btn" href="index.html">Back to the overview</a>
+    </div>
+
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <strong style="font-family:var(--mono);color:var(--ink)">Data Wrangler Solutions LLC</strong><br>
+      Petroleum data management · SQL Server · Oracle · Snowflake
+    </div>
+    <div><a href="index.html">Overview</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

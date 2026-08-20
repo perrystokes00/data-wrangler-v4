@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Document Assistant — Data Wrangler</title>
+<meta name="description" content="Identify the table, not the document. Shape recognition that learns as it reads.">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="../index.html">DATA<span>·</span>WRANGLER</a>
+    <nav class="topnav">
+      <a href="../components.html">All components</a>
+      <a href="dataview.html">DataView</a>
+      <a href="file-catalog.html">File Catalog</a>
+      <a href="data-assistant.html">Data Assistant</a>
+      <a href="document-assistant.html" aria-current="page" >Document Assistant</a>
+      <a href="mapping.html">Mapping</a>
+      <a href="../index.html#films">Walkthroughs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="doc">
+  <div class="wrap">
+    <a class="backlink" href="../components.html">&larr; All components</a>
+    <div class="eyebrow">Component documentation</div>
+    <h1>Document Assistant</h1>
+    <p class="standfirst">Identify the table, not the document. Shape recognition that learns as it reads.</p>
+<h2>Document Assistant — shape recognition</h2>
+<p><em>Component documentation · Data Wrangler v4</em> <em>Written 8 August 2026 against the</em> <em>docshape</em> <em>package and</em> <em>doc_flow.py</em><em>. Every rule in section 9 was learned from a document that read wrongly.</em></p>
+<h2>1 · The idea</h2>
+<p>A scout ticket, a casing record and an end-of-well report look nothing alike. But the <em>casing table</em> inside each of them looks like every other casing table: a string type, a size, a set depth, a top of cement. The table has a shape, and the shape is stable even when the document isn’t.</p>
+<p>That is the whole idea. <strong>Identify the table, not the document.</strong></p>
+<p>Everything else follows from it. If you identify tables rather than documents, you don’t need to recognise a vendor’s report format before you can read what’s in it. A layout nobody has seen still yields its casing table. And a new vendor costs a wording, not a parser.</p>
+<h2>2 · How it worked before, and why that stalled</h2>
+<p>This is worth setting out, because the previous approach is the obvious one and it fails in a way that’s hard to see.</p>
+<p><strong>Extraction used to be type-first.</strong> A PDF arrived, a classifier read its banner text and keyword-matched it into one of a handful of document types. Each type had a reader written for it: a scout-ticket reader that knew where a scout ticket puts its header, an end-of-well reader, a survey reader. Office files were routed by <strong>filename keywords</strong> — a name containing “tops” went to the formation-tops loader, “complet” to the completion loader. LAS and SEG-Y had their own parsers, and the whole per-format dispatch existed in two hand-synchronised copies, one for the interactive path and one for the worker pool.</p>
+<p>It worked, for the documents it had been written for. The problems were structural:</p>
+<p><strong>A document had to be recognised before anything inside it could be read.</strong> Unclassified meant nothing extracted — not a partial result, nothing. A Final Well Report matched no filename keyword and returned “no loader found.”</p>
+<p><strong>The failure was silent and looked like success.</strong> The old path would resolve a well <em>header</em>, write a row, and then have nothing whatever to say about the tables inside the document. The run reported files processed and rows written. Scout tickets, casing records and end-of-well reports produced <strong>no detail rows at all</strong>, for weeks, without an error anywhere.</p>
+<p><strong>A new vendor layout meant new code.</strong> Not a configuration change — a Python change, tested and deployed, per layout.</p>
+<p><strong>And it was expensive.</strong> The classifier opened the file, the extended classifier opened it again, the extractor a third time, and the Office path re-parsed inside the loader. One run measured 526 seconds, of which extract and capture were 90%.</p>
+<p>The scale of what was being missed only became measurable when the recogniser was switched on over the same corpus: capture went from <strong>3 files to 8, and from a few hundred rows to 10,006</strong>.</p>
+<p><strong>The inversion.</strong> Instead of <em>what document is this, and which reader handles it</em>, the question became <em>what tables are in this file, and what is each one</em>. The reader’s job shrinks to producing tables from a format. Identification becomes a matching problem over the table’s own header — and a matching problem can be solved with a vocabulary, which is data, rather than a parser, which is code.</p>
+<h2>3 · What a shape is</h2>
+<p>A <strong>shape</strong> is a claim: <em>a table with these fields in its header is a table of this kind.</em></p>
+<p>frac_stage
+  required : stage, top_md
+  optional : base_md, clusters, fluid_vol, proppant, pressure, rate, date, …
+  target   : cat_well_stimulation</p>
+<p><strong>Required fields must discriminate, not merely be present.</strong> This is the single most important rule in the pack, and it took a real failure to learn: formation_tops requires only formation and top depth, which almost any depth-indexed table satisfies — so it claimed core runs, petrophysics and perforations. A new shape built on commonly-required fields loses to the general shape every time.</p>
+<p>The tie-break is (score, optional-hits): at equal score, the shape that also explains more of the table wins. So a specific shape beats a greedy general one by <em>covering more</em>, which is the right reason.</p>
+<p>The pack currently holds roughly 90 fields and 19 shapes, 14 of which name a target table.</p>
+<h2>4 · How matching works</h2>
+<p>A header cell is tokenised — punctuation stripped, characters mapped, noise words removed — and matched against each field’s aliases as a <strong>set</strong>.</p>
+<p><strong>Aliases are phrases and order is ignored.</strong> “Top of Cement”, “Cement Top” and “Cement, Top of” all match the same field. Interleaving is tolerated: “Top of the Cement Column (ft)” still matches.</p>
+<p><strong>Longest alias wins</strong>, so a two-token alias beats a one-token one.</p>
+<p><strong>Contiguity breaks a tie.</strong> When two aliases match with the same token count, the one appearing as an unbroken run in the header wins. That rule exists because “Top of Cement” was resolving to <em>measured depth</em> — “top of cement” and “top md” are both two tokens after noise removal, and dictionary order was deciding. A cement top would have been written silently into the casing string’s own depth column.</p>
+<p><strong>Values, not just headers, when the table is rotated.</strong> Many documents write a header as label/value pairs down the page rather than columns across it. Those are detected structurally by the reader and pivoted, and the labels are resolved with the pack’s <em>own</em> alias matching — one vocabulary used both ways, so a wording added for a column header works for the rotated form free.</p>
+<p><strong>And what it cannot do:</strong> one cell holding two attributes. “Top / Base MD (ft)” picks one. That’s a cell-splitting problem, not a matching one, and nothing does it today.</p>
+<h2>5 · Four layers, and what each is allowed to know</h2>
+<p>docshape is a separate top-level package with <strong>no imports from the rest of the platform</strong>. The dependency only runs one way, so it can become its own repository by moving the folder. Perry’s reason: <em>“</em><em>that is the most unique part of the system and could be deployed for many different groups.</em><em>”</em></p>
+<div class="tablewrap"><table>
+<thead><tr><th>Layer</th><th>Knows</th><th>Never knows</th></tr></thead>
+<tbody>
+<tr><td>engine</td><td>tokenising, subset matching, scoring, tie-breaks</td><td>any domain — it never says “uwi”, it asks the pack</td></tr>
+<tr><td>packs</td><td>fields, shapes, aliases, noise, targets, transforms</td><td>file formats, databases</td></tr>
+<tr><td>readers</td><td>PDF, DOCX, XLSX, HTML, LAS, SEG-Y</td><td>what a curve or a well is</td></tr>
+<tr><td>backends</td><td>types, quoting, inserts</td><td>review status, provenance, meaning</td></tr>
+<tr><td>store</td><td>provenance, review state, meaning</td><td>how any one database spells a float</td></tr>
+</tbody></table></div>
+<p><strong>The abstraction is proven, not asserted.</strong> A <em>legal</em> pack — 26 fields, 6 shapes: payment schedules, parties, obligations, clause indexes — recognises legal tables at full confidence including a vendor variant, and correctly <strong>refuses</strong> frac stages and directional surveys. Zero engine changes. The same store generates the legal tables with the identical provenance and review block.</p>
+<p>Two decisions inside that split are worth stating:</p>
+<p><strong>Review lives in the store, not the backends.</strong> A backend that knew about review status would need updating on every platform each time the review model changed.</p>
+<p><strong>Documents are keyed by content hash, not path.</strong> The same file captured from two folders is one document, and re-capture replaces rather than duplicates — which fixes by construction the class of failure where two copies of one sample set looked like two different sets.</p>
+<h2>6 · The vocabulary loop</h2>
+<p>The vocabulary is data, so it can be corrected without a deployment. It lives in three layers, applied left to right:</p>
+<p><strong>Base pack</strong> → considered, version-controlled, ships to every deployment. <strong>Overlay</strong> → a JSON file beside it; learned, local, promotable. <strong>Sandbox</strong> → experiments, on top of the overlay.</p>
+<p>The merge rules are deliberate and asymmetric. <strong>Aliases extend</strong> — a correction adds a wording, never discards ones that worked. <strong>Shapes replace wholesale</strong> — a shape is one coherent claim, and half-overriding produces a definition nobody wrote. A shape can be <strong>disabled</strong> reversibly rather than deleted.</p>
+<p>That asymmetry has a sharp edge, and it bit: after overlay entries were folded into the base pack, the overlay copies stayed — and because a shape replaces, the stale copies were <strong>actively subtracting fields</strong> from the improved base versions. Six shapes silently lost fields, which surfaced as columns going unmapped for no visible reason. <strong>After folding an overlay into the pack, the overlay copies must be removed.</strong></p>
+<p><strong>The sandbox sits on top of the overlay, not instead of it</strong> — an experiment has to be judged against the established vocabulary, since testing a new wording against a stale one proves nothing.</p>
+<h3>Three ways to correct something</h3>
+<p><strong>Point at it.</strong> Every unmapped column gets a dropdown of fields; choosing one records an <em>alias</em> — “this header wording means this field” — not a per-document fix. The next document from that vendor is right before anyone looks at it.</p>
+<p><strong>Describe it.</strong> A text box and a translate button: say what’s wrong in words, and the model returns proposed corrections in the same approval form, with the same checks.</p>
+<p><strong>Let it propose.</strong> A batch pass over unrecognised tables, ranked by how many documents each proposal would unlock.</p>
+<p>All three land in one approval form with the same deterministic vetting — already-resolves, superset tie-break, discriminating-required, missing-field guards — and all three write to the sandbox, not to live vocabulary.</p>
+<h3>And a guard that stops a plausible mistake</h3>
+<p>Before offering to widen a shape to claim a column, the form checks whether <strong>another</strong> shape would explain more of the table. If one would, it says so and refuses to lead with the claim:</p>
+<div class="quote">⚠ completion would explain more of this table (10 columns vs 4). Widening well_header here would teach it to claim tables like this one permanently. Fix the identification first.</div>
+<p>That check exists because a real screenshot showed a completion spreadsheet identified as a well header, with the claim form filled in and one click from cementing it. <strong>Widening the wrong shape is how a general shape quietly becomes a specific one for every future document.</strong></p>
+<h2>7 · Two audiences, one page</h2>
+<p>Perry, after a day of using it: <em>“</em><em>I think the document assistant may be too complex for mere mortals.</em><em>”</em> He was right, and the day’s own evidence was that the author of the vocabulary got caught by a missing wording, an empty required list, and an unwinnable tie.</p>
+<p>The page now separates two jobs that had been sharing a screen.</p>
+<p><strong>The everyday job</strong> is a per-document walk in plain language:</p>
+<div class="quote"><em>18 survey stations · well header · 7 log curves · 2 formation tops · logging run · 1 core run</em></div>
+<p>Two buttons — <strong>✔ Looks right</strong> and <strong>⚑ Something’s wrong</strong> — with an optional note. The file, table, header and samples attach automatically. Nothing else is on screen. A document that couldn’t be read says so plainly rather than showing an empty form.</p>
+<p><strong>Vocabulary engineering</strong> is behind a toggle, default off. That’s where the teach form, the correction channels, the sandbox and promotion live. It opens with the reader-reported flag queue first, because a report from someone who read the document beats a frequency ranking.</p>
+<p>Perry’s summary of the split: <em>“</em><em>Simple: pass and collect $200. Fail — go to jail.</em><em>”</em></p>
+<h2>8 · Working at scale</h2>
+<p>Opening documents one at a time doesn’t survive fifty thousand of them.</p>
+<p><strong>The census</strong> identifies across a whole folder or inventory and stamps a verdict per document — readable, partial, unknown-only, no tables, failed. It ranks the <strong>unknown table signatures</strong> by how many documents each would unlock, which is the teach-priority queue. Duplicates are detected by size then hash, so a document is assessed once and every copy is stamped.</p>
+<p><strong>It gave a false all-clear, once, and the fix is worth recording.</strong> A corpus reported 33 of 33 tables recognised and “no shape candidates” — a clean bill of health that was not one, because every real issue that week was <em>column coverage inside tables that identified perfectly</em>. Discovery only re-read documents with unknowns, so with zero unknowns it found nothing. <strong>Recognising a table says nothing about how much of it was kept.</strong> It now sweeps readable documents for unclaimed columns when there are no unknowns.</p>
+<p><strong>The expert loop</strong> closes the case where the answer isn’t in the building. A bundle exports the situation — pack name and version hash, local overlay, reader flags, unknown table groups with vendor wordings and section titles, near-misses, unclaimed columns — carrying table <em>shapes</em>, not well data. Alongside it, a baseline snapshot of what the pack reads today, and a checker that loads a candidate pack <strong>without installing it</strong>, runs static lints, and re-identifies every snapshot header as fixed, regressed or unchanged. It exits non-zero on a regression.</p>
+<p>That last piece answers a real question: can a customer with no history get a vocabulary fix and know it didn’t break anything. The bundle carries the situation, the checker carries the proof, and the pack’s own comments carry the accumulated judgement — which is why those comments are load-bearing rather than decoration.</p>
+<h2>9 · The rules, each earned</h2>
+<p><strong>A word that is both a unit and a term must never be noise.</strong> “Days On” made <em>day</em> a noise word, so the alias “day no” eroded to a bare “no” and matched any header containing “No”. Same failure with <em>hrs</em>, <em>bbl</em>, <em>mD</em> and <em>$K</em>. Four separate instances.</p>
+<p><strong>A noise word inside an alias makes the alias mean something shorter than it reads.</strong> “total depth md” erodes to “depth md”, which then hijacks a plain “Depth (ft MD)”.</p>
+<p><strong>An alias cannot win a tie — only pack order can.</strong> When a wording ties across two fields, adding it to the loser does nothing. The vetting warning “already resolves to X” is the tell, and it means <em>this cannot be fixed from the UI at all</em>.</p>
+<p><strong>Generic words are resolved by the shape, not the engine.</strong> “Status” means well status in a header and perforation status in a perforation table. “Result” means a test result in a DST and a parameter value in a key-value table. Same word, different meaning per table, decided where the context lives.</p>
+<p><strong>A garbled header is an extraction problem.</strong> “Avg VcHl y(%dr)” is not a vocabulary gap, and teaching it would bind the vocabulary to one PDF’s rendering defect. Say so; never invent an alias for it.</p>
+<p><strong>There are six reasons a column goes unmapped</strong>, and only two are fixable from the UI: the shape doesn’t list a field it understands · the vocabulary lacks the wording · the wording ties with an incumbent · another column already filled that field · it’s structurally the value or label of a key-value table · the header is garbled.</p>
+<h3>And on the reader side</h3>
+<p><strong>Sorting characters left-to-right looks obviously right and corrupts overlapping cells.</strong> One PDF composed a header as “(psGi)radient” because two cells overlapped by five points. The content stream had the characters in the right order; only the positions overlapped. Group in stream order, treat a negative gap as a column boundary.</p>
+<p><strong>Some PDFs have no space glyphs at all</strong> — “FinalPressure”, “ftMD”. Re-spacing has to be unit-aware, or “Mobility(mD/cP)” becomes “Mobility(m D/c P)” and the unit is destroyed while the header appears fixed.</p>
+<p><strong>A placeholder row is the document saying a section is empty.</strong> “No survey data” must be dropped, not turned into a well test that never happened.</p>
+<p><strong>And a structural rule for pair grids:</strong> a real table’s value columns are type-consistent because they <em>are</em> columns; a pair grid’s same position holds an operator, then a UWI, then a state. Requiring mixed types before flattening is what stops a genuine table being collapsed into one row.</p>
+<h2>10 · What earns a place in the database</h2>
+<p>Recognition is not the same as correctness. A table can identify perfectly and still have a column pointed at the wrong field.</p>
+<p>The design that addresses it rests on a distinction: <strong>wrong and missing are not the same failure.</strong> Missing is recoverable and visible — the value sits in the extras, the census names it, nothing in the database is false. Wrong is invisible and permanent: permeability filed as measured depth, net pay overwriting gross thickness, a combined figure in the oil column. All three were real, all found in one day, all silently true for weeks.</p>
+<p>So the admission test is <strong>strict about wrongness and tolerant of incompleteness</strong> — refusing a table for one unclaimed column withholds good data to guard the lesser failure, and makes the gate unreachable.</p>
+<p>Each failure names itself, and the work queue groups <strong>by reason rather than by document</strong>: one vocabulary change clears thirty tables. Held tables are stored and re-testable, so improving the vocabulary promotes them with no re-extraction.</p>
+<p>There is also a measurement available that beats an estimate. The mapping tool exports a scout ticket as HTML — data that <em>left</em> the database — and that file reads back through the recogniser at full confidence. Comparing what returns against what went out gives a <strong>measured extraction fidelity per field</strong>, and it costs nothing because both halves already exist.</p>
+<p><em>Status: the store carries the review machinery this would set. Nothing reads it yet. Migration out of the store is the piece that makes the capture → review → migrate loop real.</em></p>
+<h2>11 · Open items</h2>
+<p><strong>Migration from the store into the database is not built</strong> — review status is written and nothing reads it.</p>
+<p><strong>Roughly 635 captured rows sit in shapes with no target</strong>: key-value pairs, curve readings, cement bond, operations NPT, fluid samples. Each needs a table and a decision, and the key-value ones may be better pivoted than stored as pairs.</p>
+<p><strong>One ruled-path PDF still mangles two headers.</strong> Diagnosed — the cell boxes themselves overlap, so rebuilding from characters catches the neighbour’s — and an attempted fix made it worse and was reverted. The real fix has to clip each cell’s characters against a neighbour that starts later.</p>
+<p><strong>Perforation and reservoir shapes don’t exist</strong>, so their mirrors stay empty. Whether to write them depends on whether the source documents carry those sections.</p>
+<p><strong>The census reports pair-grid value cells as unclaimed columns</strong> on shapes carrying a transform. Suppressed in the two reports that matter, but the underlying signal is still noisy.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <strong style="font-family:var(--mono);color:var(--ink)">Data Wrangler Solutions LLC</strong><br>
+      Petroleum data management · SQL Server · Oracle · Snowflake
+    </div>
+    <div><a href="../index.html">Overview</a> &nbsp;·&nbsp; <a href="../components.html">Components</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

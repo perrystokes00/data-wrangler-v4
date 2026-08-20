@@ -1,0 +1,41 @@
+[
+  {
+    "source": "(no video - this narrates the web page itself)",
+    "note": "Rendered to docs/audio/page-narration.m4a and played by the 'Listen to this page' control in the hero. Same voice as the films: SAPI Microsoft Zira Desktop, rate 0."
+  },
+  {
+    "id": "P01",
+    "at": 0.0,
+    "window": 0.0,
+    "label": "What this is",
+    "text": "Data Wrangler. Documents in, and a database you can defend. Every tool can read your documents now — the difference is what happens to what they say. Data Wrangler puts it into a governed PPDM derivative, and refuses to put in what it cannot prove. This is a short tour of the page. Everything described here is shown running in the films further down."
+  },
+  {
+    "id": "P02",
+    "at": 0.0,
+    "window": 0.0,
+    "label": "Wrong is worse than missing",
+    "text": "Start with the position everything else follows from. Wrong is worse than missing. A confident wrong value plots on a map, exports to a spreadsheet, and gets quoted in a meeting. A missing one is visible. So a file here has exactly four states, and they are never collapsed into a percentage. Loaded — its rows are in the database. Staged — extracted, and waiting. Held — blocked, with a named reason you can act on. Or nothing at all, which is the only real failure."
+  },
+  {
+    "id": "P03",
+    "at": 0.0,
+    "window": 0.0,
+    "label": "Reads, writes, exports",
+    "text": "What it reads: well logs in LAS, DLIS and LIS. Seismic in SEG-Y and P190. Scout tickets, end of well reports and completion records as PDFs. Word documents, shapefiles and spreadsheets. What it writes: SQL Server, Oracle or Snowflake, into a PPDM derivative your people can already read. And what it exports: a spreadsheet with a sheet per section, a shapefile, a file geodatabase, a Petrel project, an OSDU manifest, or a direct write into another database."
+  },
+  {
+    "id": "P04",
+    "at": 0.0,
+    "window": 0.0,
+    "label": "The components",
+    "text": "Seven components, each doing a narrow job. DataView is the database, shipped with three point nine million agency well headers already in it. The File Catalog takes a folder of anything and works through it. The Data Assistant handles data that already has columns. The Document Assistant reads reports and finds the tables inside them. Mapping is for the questions you cannot phrase as a query. DB Explorer queries the database directly, and the reference tables hold the vocabularies that loading checks against."
+  },
+  {
+    "id": "P05",
+    "at": 0.0,
+    "window": 0.0,
+    "label": "The films",
+    "text": "Below this you will find five walkthroughs — nineteen minutes, recorded against a live database, nothing mocked and nothing sped up. Every number spoken in them is a number on the screen at the time. The File Catalog film is the one to start with: a full run over a hundred and eighty two files, ending with an empty backlog."
+  }
+]

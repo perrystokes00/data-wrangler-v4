@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>File Catalog — Data Wrangler</title>
+<meta name="description" content="The unstructured half. Crawl a share, catalogue what is there, extract what is useful.">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="../index.html">DATA<span>·</span>WRANGLER</a>
+    <nav class="topnav">
+      <a href="../components.html">All components</a>
+      <a href="dataview.html">DataView</a>
+      <a href="file-catalog.html" aria-current="page" >File Catalog</a>
+      <a href="data-assistant.html">Data Assistant</a>
+      <a href="document-assistant.html">Document Assistant</a>
+      <a href="mapping.html">Mapping</a>
+      <a href="../index.html#films">Walkthroughs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="doc">
+  <div class="wrap">
+    <a class="backlink" href="../components.html">&larr; All components</a>
+    <div class="eyebrow">Component documentation</div>
+    <h1>File Catalog</h1>
+    <p class="standfirst">The unstructured half. Crawl a share, catalogue what is there, extract what is useful.</p>
+<h2>File Catalog — the unstructured data component</h2>
+<p><em>Component documentation · Data Wrangler v4</em> <em>Written against the code as of 8 August 2026 and the measured runs of 7–8 August. Timings and counts are from real runs over 1,055 files, not estimates.</em></p>
+<h2>1 · What the File Catalog is for</h2>
+<p>A company’s subsurface data is mostly not in a database. It is in folders — decades of scout tickets, end-of-well reports, casing records, LAS files, SEG-Y volumes, shapefiles, spreadsheets — on a shared drive nobody has fully read. The File Catalog is the component that goes and looks.</p>
+<p>It does four things, and they are separable on purpose:</p>
+<p><strong>Crawls</strong> a directory tree and records what is there</p>
+<p><strong>Reads</strong> each file far enough to say what it is and which well or survey it concerns</p>
+<p><strong>Extracts</strong> the data inside it</p>
+<p><strong>Files</strong> the documents themselves into a curated vault, organised by well and survey</p>
+<p><strong>Loads</strong> the extracted data into DataView, but only what passes a stated test</p>
+<p>The last two are optional and independent. A customer can crawl and read without a single row entering the database — often the more urgent question is simply <em>what do we have</em> — and can vault the documents without loading them, or load without vaulting.</p>
+<p><strong>Boundaries with the other three components.</strong> The Bulk Tabular Loader owns CSV and Excel; those extensions are deliberately excluded from the crawl (see 3.1). The Document Assistant owns shape recognition — the File Catalog <em>calls</em> the recogniser but does not define shapes or vocabulary. DataView is the destination; the File Catalog never writes dv_* directly, only through promote.</p>
+<h2>2 · The inventory</h2>
+<p>Everything hangs off one table: <strong>file_catalog.GLOBAL_FILE_CATALOG</strong>, one row per file. It carries identity (path, name, extension, size, modified date), content fingerprints, what the file was found to be, which well it matched, and every state the pipeline records as it works.</p>
+<h3>2.1 INVENTORY_ID</h3>
+<p>INVENTORY_ID is a SHA-1 of the file’s path. It is the identity that ties the whole system together: capture stamps it on every row extracted from that file, promote carries it into dv_*, and a single join answers <strong>which document did this number come from</strong> — the question the whole product exists to make answerable.</p>
+<p>Two consequences follow from keying on the <em>path</em> rather than the content:</p>
+<p><strong>The same file in two folders is two entries.</strong> Detectable via the content fingerprint (FILE_HASH / DUPLICATE_GROUP), which is recorded precisely so duplicates can be found after the fact.</p>
+<p><strong>A path key still resolves when the file changes.</strong> Correct and re-save a document and the entry survives, reporting a changed hash — which is more useful than a content key that silently dangles. Content identity is recorded alongside; it just isn’t the key.</p>
+<p>The choice is also practical: a path hash is computable in T-SQL (HASHBYTES('SHA1', UPPER(path))), a content hash is not, and naming a file by its content means reading every byte just to identify it.</p>
+<h3>2.2 The path must be canonical</h3>
+<p>Windows collapses repeated separators, so a root pasted as C:\\Users\\perry\\docs opens exactly the same folder as C:\Users\perry\docs. The scan runs perfectly and finds every file — but str(Path(...)) keeps the spelling it was given, and the id is a hash of that string.</p>
+<p>This happened: <strong>1,050 catalog rows for 525 PDFs</strong>, one set from a run whose root had doubled separators and one from a later run that doubled them again. Nothing errored, because as far as the operating system was concerned nothing was wrong. Every count in every report was doubled, and rows stamped under one spelling could never resolve against an entry keyed by the other.</p>
+<p>Fixed in the File Manager scan by normalising at the point the id is minted, and defended at the UI by a _canon_root on the scan-root box that strips quotes, a leading &amp;, and expands variables while preserving a UNC prefix.</p>
+<p><strong>It is not fixed everywhere.</strong> The pipeline has its own scan, and that one still hashes the raw string: paths come from os.scandir on whatever root it was handed, and the id function uppercases without normalising. A run started from the page is protected by _canon_root; a run started from the command line is not. The correct place for this is the minting site, not the UI — which is what the File Manager scan already does and the pipeline scan does not.</p>
+<h2>3 · The pipeline, in order</h2>
+<p>One run, orchestrated by run_pipeline. Each stage is independently switchable, and each records its own timing.</p>
+<p>scan → extract → enrich → triage → capture → [deep] → [vault] → promote → report</p>
+<h3>3.1 Scan</h3>
+<p>Walks the tree, hashes, and MERGEs into GLOBAL_FILE_CATALOG. New files are inserted, changed files updated, unchanged files left alone.</p>
+<p>What gets scanned is decided by extension group: <strong>Well Logs</strong> (.las .dlis .dis .lis), <strong>Seismic</strong> (.segy .sgy .seg .p190 .p90 .p1), <strong>Spatial</strong> (.shp .geojson .gdb .kml .kmz), <strong>Documents</strong> (.pdf .docx .doc).</p>
+<p><strong>Tabular formats are excluded deliberately.</strong> .csv .tsv .xlsx .xls .xlsm .xlsb belong to the Bulk Tabular Loader, which loads them with mapping and FK resolution. The File Catalog has no extractor for them, so inventorying one produces a row that can never drain — it sits in “pending” forever and makes a finished run look unfinished. Typing one into the Formats-to-scan box now gets a redirect to the right tool rather than a silent scan.</p>
+<p>A consequence worth stating plainly: <strong>the file count on disk and the inventoried count will differ, and that is correct.</strong> On one test tree, 347 files on disk against 291 inventoried — the 56 being shapefile sidecars (.dbf/.shx/.prj/.cpg; only .shp is scanned), excluded CSVs, and unsupported types.</p>
+<p><em>Measured: 1,055 files across 4 folders in 1.6–3.7 seconds.</em></p>
+<h3>3.2 Extract</h3>
+<p>A process pool — six workers by default — opens each file and pulls out its header-level facts: well name, UWI, operator, dates, depths, and for seismic the survey geometry and CRS. Results land in FILE_WELL_HEADER and FILE_SEIS_HEADER.</p>
+<p><em>Measured: 1,055 files in 144–165s. Parse cost by type: PDF 0.23s each (525 files), LAS 0.10s (438), DOCX 0.05s (92).</em></p>
+<p><strong>Extract is write-bound, not parse-bound</strong>, and that took instrumentation to establish rather than reasoning. Of 144s, header_write is 103s (72%), parse_wait 33s (23%), claim_query 8s (5%). The pool parallelises fine — 179 worker-seconds became 33s of wall time on six workers.</p>
+<p>The write is a per-row MERGE into FILE_WELL_HEADER, one statement per file, and <strong>it is deliberate and it is also the fast form.</strong> Batching it with a multi-row VALUES source was tried and made it <em>worse</em> — 136s to 178s — because a multi-row source changes the plan the optimiser picks, while the single-row form seeks. The batched version is still in the code, unused, with the measurement in its comment, so the next person can read why it loses before spending an afternoon on it. The original per-row form also avoids a fast_executemany truncation trap where string buffers are sized from the first row.</p>
+<h3>3.3 Enrich</h3>
+<p>Resolves what the documents couldn’t. Three passes against the <strong>master well header reference</strong> — 3.9 million wells from state and federal agencies, shipped with the product:</p>
+<p><strong>Curate</strong> <strong>UWI14</strong>, the persisted 14-character key</p>
+<p><strong>Resolve missing UWIs</strong> by joining what the document <em>did</em> state (well name, operator, field, county, state) against the master, corroborated by total depth and spud date. A shared well name alone never auto-fills.</p>
+<p><strong>Fill blank attributes</strong> on headers that identify a well but say little else</p>
+<p><em>Measured: 14s. UWI14 valid on 921 files, 974 blank-attribute fills, and 74 files given coordinates they did not carry.</em></p>
+<p>Those coordinates matter more than they look. Promote holds any well without a surface location, so a backfilled coordinate is the difference between a document’s contents landing and waiting indefinitely.</p>
+<h3>3.4 Triage</h3>
+<p>Normalises keys, cross-fills UWIs between files that describe the same well, attempts a reference fill, and scores each file into a tier.</p>
+<p><em>Measured: 9–12s. 994 HIGH, 22 LOW, 39 REVIEW.</em></p>
+<p>The tier is a routing decision, not a quality judgement — REVIEW means a person should look, not that the file is bad.</p>
+<h3>3.5 Capture — the stage with two lanes</h3>
+<p>This is where the data inside the document is read, and it is the most architecturally interesting stage.</p>
+<p><strong>Lane A — bulk BCP, for LAS and SEG-Y.</strong> These are high-volume and uniform. bcp_capture peels them off, parses in its own pool, aggregates into per-table buckets, and bulk-loads. Roughly 40 files/sec — 6.6× the per-file path, about three minutes for 7,326 LAS files.</p>
+<p><strong>Lane B — the process pool plus the recogniser, for documents.</strong> PDF, DOCX and the rest go to a general pool. Each worker builds one pack and recogniser per process, reads the tables, identifies each by shape, and maps its columns to a target.</p>
+<p>The two lanes exist because they are <strong>execution modes, not duplicate implementations</strong>. Funnelling bulk LAS through the per-file path would throw away the throughput; funnelling a scout ticket through BCP would gain nothing.</p>
+<p>Lane A also gets something Lane B structurally cannot: because it aggregates before loading, it can <strong>reconcile keys across a batch</strong>. A well with two LAS files gets LOG_&lt;uwi&gt; and LOG_&lt;uwi&gt;_2. A strictly per-file worker cannot see which files share a well, so it cannot assign the suffix and the second log would be silently skipped.</p>
+<p><em>Measured: 617 documents, 10,006 rows captured from 592 of them, 37s. Writes batched at 100 documents — 7 flushes for 617 files.</em></p>
+<p>Batching that write was worth doing: <strong>insert time went 124.5s to 8.1s</strong>, 1,907 calls to 149. The reason is that write cost is <strong>per call, not per row</strong> — measured at 1 row 59.6ms, 500 rows 221.4ms — and it scales with column count. The fix for a slow write is always fewer, bigger statements.</p>
+<p>A batch failure does not cost the batch: a failing table retries one call per document, which is exactly the granularity the unbatched path had.</p>
+<h3>3.6 Vault — optional, and it is the answer to “the drive keeps moving”</h3>
+<p>Cataloguing tells you what you have. The vault protects it. Documents on a shared drive get moved, renamed and deleted by people who have no idea anything depends on them, and a catalog entry keyed on a path is only as durable as the path.</p>
+<p>The vault <strong>copies</strong> qualifying files into a curated tree, filed by what they are about rather than by whoever happened to save them:</p>
+<p>Wells    &lt;vault&gt;\&lt;COUNTRY&gt;\&lt;STATE&gt;\&lt;UWI14&gt;\&lt;WELL_NAME&gt;\&lt;file&gt;
+Seismic  &lt;vault&gt;\&lt;COUNTRY&gt;\&lt;STATE&gt;\&lt;2D|3D&gt;\&lt;SURVEY_NAME&gt;\&lt;file&gt;</p>
+<p>Copies, never moves — the shared drive is untouched, and nobody’s workflow breaks because Data Wrangler ran.</p>
+<p>Several details in it are worth knowing, because each encodes a decision:</p>
+<p><strong>It runs after enrichment, and must.</strong> It keys off the curated FILE_WELL_HEADER.UWI14, not GLOBAL_FILE_CATALOG.MATCHED_UWI — enrichment writes the first and never updates the second. Run it earlier and the well-keyed files simply don’t qualify.</p>
+<p><strong>A valid well key is the only test for wells.</strong> The catalog score is ignored. A document that identifies its well belongs in that well’s folder regardless of how much else was extracted from it — filing and extraction are different jobs.</p>
+<p><strong>Seismic needs a survey name</strong> <em><strong>and</strong></em> <strong>a seismic extension.</strong> The extension gate exists to keep mis-catalogued GIS files out of the seismic bucket.</p>
+<p><strong>It never guesses.</strong> No country becomes the configured default; no state becomes _NoState; a volume with no clear 2D/3D marker goes to _UnknownDim. A folder named for a guess is worse than one named for the absence.</p>
+<p><strong>Sidecars travel with their parent.</strong> A .shp without its .dbf and .prj is not a shapefile, it is a file. The vault carries the whole set.</p>
+<p><strong>Copies are idempotent.</strong> A destination that already exists at the same size is skipped; a name clash at a <em>different</em> size gets a numbered suffix rather than overwriting. A source that has moved or vanished since the scan is reported, not fatal.</p>
+<p>The result is a tree a geologist can navigate without the application — which matters more than it sounds. It is the part of the output that survives the software.</p>
+<h3>3.7 Promote</h3>
+<p>Moves rows from cat_* into dv_*. Covered in the DataView document; the parts that matter here are in §5.</p>
+<p><em>Measured: 8,749 eligible, 8,484 moved, 12s on a warm metadata cache.</em></p>
+<h3>3.8 Report</h3>
+<p>A markdown run report plus rollups. One design rule, learned the hard way: <strong>a run report describes the run.</strong> A rollup that describes the <em>database</em> — every file ever catalogued, not the ones this run touched — was costing 75 seconds of every run and feeding one section. It is now opt-in, and when off the section still prints, saying it was skipped and why. Dropping it silently would read as “nothing landed”, the opposite of the truth.</p>
+<p><em>Measured: 75s → 0.2s.</em></p>
+<h2>4 · What the whole run costs</h2>
+<p>Full corpus, after a catalog clear, 8 August:</p>
+<p>218s total · 1,055 files · 617 documents · 10,006 rows captured · 8,484 promoted
+
+extract 144s · capture 37s · enrich 13s · promote 13s · triage 9s · scan 2s</p>
+<p>For context, the same corpus took <strong>486s</strong> a week earlier. The path down was 486 → 330 → 261 → 235 → 218, and every step came from measurement rather than reasoning — seven consecutive theories about where the time went were wrong, including one that was shipped and reverted.</p>
+<p><strong>Run-to-run variance is ±20%.</strong> header_write has measured 103, 111, 136 and 178 seconds, two of those on identical code. No change worth less than about 25 seconds can be judged from a single run.</p>
+<h2>5 · The staging mirror, and what it means when it’s full</h2>
+<p>Documents are catalogued <em>before</em> the well exists. A scout ticket arrives with tops, casing and completion details for a well that may not be in dv_well yet. file_catalog.cat_* holds that: every dv_* column, same name and type, but <strong>always nullable and with no foreign keys</strong> — capture is tolerant and parentless — plus provenance columns and a UWI helper.</p>
+<p>The mirrors are <strong>generated from</strong> the model rather than written by hand, so the two cannot drift in shape. Promote then moves rows by column-name intersection, with no hand-maintained column map.</p>
+<p><strong>cat_</strong> <strong>is a drain, not a record.</strong> Promote deletes rows as it lifts them, so:</p>
+<p>An empty cat_ table with a full dv_ table is what success looks like</p>
+<p>A <strong>full</strong> cat_ table means rows are <strong>held</strong>, not that capture is working</p>
+<p>“Captured” must be tested as cat_ <strong>OR</strong> dv_, because after a successful promote the cat_ side is empty</p>
+<p>Rows are held, never discarded, by three gates: a well with no surface coordinate, a detail row whose well isn’t in dv_well yet, and a coded value not present in its reference table. Each is reported by name and count. Improving the reference vocabulary or loading the missing header promotes the held rows on the next run with <strong>no re-extraction</strong>.</p>
+<h2>6 · Knowing what actually happened</h2>
+<p>This turned out to be harder than doing the work, and it produced the component’s sharpest lesson.</p>
+<p><strong>Three reports had three different definitions of</strong> <strong>“</strong><strong>landed.</strong><strong>”</strong> One counted dv_prod_entity and dv_well_dir_srvy_hdr but not dv_well; another counted the opposite pair; a third had its own logic. Same file, two reports, two answers.</p>
+<p>Worse, the per-file stamps lie by omission. Documents get PROMOTED_AT stamped; logs and seismic never did, because they travel a different route. So a report reading the stamp alone said logs and seismic were never promoted <strong>when their data was in</strong> <strong>dv_*</strong> <strong>and queryable</strong> — the files most likely to have worked were the ones most likely to look like they had failed.</p>
+<p>promotion_lineage.py fixes this by defining the test <strong>once</strong>: every dv_ detail table carries the INVENTORY_ID of the file its rows came from, so a file is promoted when its id appears in any of them. Twelve entries, each naming its cat_ and dv_ table, and every table probed for existence and for the column before it enters a query — so the module runs unchanged against a partially built database and a missing table narrows the answer rather than raising.</p>
+<p>Adding a dv_ table used to mean remembering two reports. Now it means editing one tuple.</p>
+<h2>7 · The traps</h2>
+<p>Each is paired with the failure that taught it.</p>
+<p><strong>A path is not its spelling.</strong> Doubled separators produced 1,050 catalog rows for 525 files, silently. Canonicalise where the id is minted, not only at the UI.</p>
+<p><strong>One identity, one function.</strong> Three live functions currently mint INVENTORY_ID — the File Manager scan hashes the path in its original case, the pipeline scan hashes it uppercased, and the Data Assistant hashes it uppercased as UTF-16-LE. All produce 40 hex characters, all look identical in the table, <strong>none of them join</strong>. This database has only ever been scanned by one path, so the divergence is latent — but it is the same failure class as the doubled backslashes, in code rather than in a pasted path. It should collapse to one shared function.</p>
+<p><strong>“</strong><strong>0 cataloged</strong><strong>”</strong> <strong>usually means</strong> <strong>“</strong><strong>already cataloged.</strong><strong>”</strong> CAPTURED_HASH makes re-capture idempotent, so a re-run of unchanged files reports zeros. This has been mistaken for a regression more than once. A clear resets the stamps precisely so a cleared catalog genuinely re-processes.</p>
+<p><strong>A temp table is a session-scoped assumption.</strong> #doc_ids worked from the CLI, where one cursor runs the whole job, and failed from the page, where statements run on different pooled connections. Anything a Streamlit page may call must carry its working set in Python or in a real table.</p>
+<p><strong>A delete must not inherit a definition a later feature invalidated.</strong> The catalog clear scoped dv_* deletions to “has an INVENTORY_ID”, which meant “came from the catalog” until the Bulk Tabular Loader started stamping ids on its own rows. After that the predicate matched everything — one click from deleting 6,737 bulk-loaded production rows while labelling them “catalog rows”. Now scoped to ids whose file is a <em>document</em>.</p>
+<p><strong>Ordering matters when a tool empties its own evidence.</strong> The clear removes GLOBAL_FILE_CATALOG in the same transaction as the dv_* deletes, so the document ids must be captured <em>first</em> — by the time those deletes run, the catalog can no longer say which ids were documents.</p>
+<p><strong>A feature that defaults off is a feature nobody runs.</strong> The recogniser path was complete and wired since July and defaulted to recognise=False. Turning it on took capture from 3 files to 8 and from a few hundred rows to 10,006. Scout tickets, casing records and end-of-well reports had been producing nothing at all, silently, because the older per-format extractors have no handler for them.</p>
+<p><strong>The test data must be one generation.</strong> Documents generated against one well set, loaded against a database holding a different set, produce a total promote stall with no error anywhere — every detail row held on the “does this well exist” gate. The gate behaved perfectly; the data didn’t match.</p>
+<p><strong>SUM(CASE WHEN EXISTS (...))</strong> <strong>is illegal in SQL Server.</strong> Rewrite as a CTE plus a LEFT JOIN. This has bitten twice.</p>
+<h2>8 · What earns a place in the database</h2>
+<p>The honest version of the product promise is not “it reads everything.” The first real folder disproves that. It is: <strong>it reads most things, tells you exactly what it could not, and makes fixing that cheap and permanent.</strong></p>
+<p>The design that supports the last clause rests on a distinction worth stating: <strong>wrong and missing are not the same failure.</strong></p>
+<p>Missing is recoverable and visible — the value sits in the extras, the census names it, nothing in the database is false. Wrong is invisible and permanent: permeability filed as measured depth, net pay overwriting gross thickness, a combined figure in the oil column. Nobody queries those and sees an error; they see a number. All three were real, all found in a single day, all silently true for weeks.</p>
+<p>So the admission test is <strong>strict about wrongness and tolerant of incompleteness.</strong> Refusing a table because one column went unclaimed withholds good data to guard against the lesser failure, and makes the gate unreachable.</p>
+<p>The test is not “is this perfect” — the system cannot certify that a number is correct and should never claim to. It is “are the conditions present under which we have historically been wrong”: the table identified cleanly, no rival shape explains more of it, no two fields landed in one target column, the header looks like a header, types fit, row counts are conserved.</p>
+<p>Each failure names itself, and <strong>the work queue groups by reason rather than by document</strong> — one vocabulary change clears thirty tables. Held tables are captured, stored and re-testable, so improving the vocabulary promotes them with no re-extraction.</p>
+<p><em>Status: designed and specified, not built. The store already carries the</em> <em>review_status</em> <em>machinery this would set; nothing reads it yet.</em></p>
+<h2>9 · Open items</h2>
+<p><strong>Collapse the three</strong> <strong>INVENTORY_ID</strong> <strong>functions to one.</strong> Latent today, and the identity everything joins on.</p>
+<p><strong>The catalog clear behaves differently depending on how it’s invoked.</strong> Its import of the table allowlist resolves from the repo root; run as a script it silently falls back to a stale hardcoded list that omits casing and perforation. So the CLI and the button clear different sets.</p>
+<p><strong>No shape emits perforation or field rows.</strong> Both mirrors exist and both stay empty. Either the shapes get written — if the source documents carry those sections — or the mirrors go.</p>
+<p><strong>Two documents lose a row each to a date conversion</strong>, every run. The batch falls back to per-document and drops two rather than the whole batch, which is the guard working, but those headers don’t land.</p>
+<p><strong>LAS is parsed in three places</strong> and a fix for mislabelled version headers landed in only one of them.</p>
+<p><strong>The pipeline reorder is parked.</strong> Extract and the recogniser both open the same 617 documents; scoping extract to the formats only it can read would remove roughly 100 seconds. Perry’s call: <em>“</em><em>I feel it may be too risky.</em><em>”</em> Correct — three quiet dependencies for ~100s on a run already 55% faster than it started.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <strong style="font-family:var(--mono);color:var(--ink)">Data Wrangler Solutions LLC</strong><br>
+      Petroleum data management · SQL Server · Oracle · Snowflake
+    </div>
+    <div><a href="../index.html">Overview</a> &nbsp;·&nbsp; <a href="../components.html">Components</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

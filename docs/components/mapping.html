@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Mapping — Data Wrangler</title>
+<meta name="description" content="The exploration surface. For the questions you cannot phrase as a query.">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="../index.html">DATA<span>·</span>WRANGLER</a>
+    <nav class="topnav">
+      <a href="../components.html">All components</a>
+      <a href="dataview.html">DataView</a>
+      <a href="file-catalog.html">File Catalog</a>
+      <a href="data-assistant.html">Data Assistant</a>
+      <a href="document-assistant.html">Document Assistant</a>
+      <a href="mapping.html" aria-current="page" >Mapping</a>
+      <a href="../index.html#films">Walkthroughs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="doc">
+  <div class="wrap">
+    <a class="backlink" href="../components.html">&larr; All components</a>
+    <div class="eyebrow">Component documentation</div>
+    <h1>Mapping</h1>
+    <p class="standfirst">The exploration surface. For the questions you cannot phrase as a query.</p>
+<h2>Mapping — DataView’s exploration surface</h2>
+<p><em>Component documentation · Data Wrangler v4</em> <em>Written 8 August 2026 against</em> <em>dataview/mapping/page_well_map.py</em> <em>(~8,700 lines) and</em> <em>page_well_documents.py</em><em>. Behaviour described here has been exercised against the live database.</em></p>
+<h2>1 · What Mapping is for</h2>
+<p>A database of three million wells answers questions you can already phrase. Mapping is for the ones you can’t.</p>
+<p><em>What’s in this area? Who operates it? Which of these wells has a directional survey? What documents do we hold on that lease?</em> Those start as a rectangle drawn on a screen, not as SQL — and the answer is usually another question. The map is where a person goes from “we own data about this region” to a specific well and the document it came from.</p>
+<p><strong>It is not a separate application.</strong> DataView is the database and the tool for exploring it; Mapping is the second half. The distinction that matters is in section 3: <strong>the map draws what the database holds</strong>, rather than computing shapes at render time. A line on screen is a row you can query.</p>
+<h2>2 · What it draws</h2>
+<p>Layers come from three places, and knowing which is which explains most of what’s confusing about the page.</p>
+<h3>Stored geography — the dv_* tables</h3>
+<p>Each of these is a geography column, SRID 4326, written by promote or by a computation that ran once:</p>
+<div class="tablewrap"><table>
+<thead><tr><th>Layer</th><th>Source</th><th>Geometry</th></tr></thead>
+<tbody>
+<tr><td>Well points</td><td>dv_well.geog</td><td>POINT, derived from surface lat/long at promote</td></tr>
+<tr><td>Well paths</td><td>dv_well_dir_srvy_hdr.PATH_GEOG</td><td>LINESTRING — the real survey trajectory</td></tr>
+<tr><td>Fields</td><td>dv_field.geog</td><td>Polygon</td></tr>
+<tr><td>Leases / tracts</td><td>dv_land_tract.geog</td><td>Polygon</td></tr>
+<tr><td>Boundaries</td><td>dv_boundary.geog</td><td>Polygon</td></tr>
+<tr><td>Pipelines</td><td>dv_pipeline.geog</td><td>Line</td></tr>
+<tr><td>Seismic lines</td><td>dv_seis_line.geog</td><td>LINESTRING — trace order, not a hull</td></tr>
+<tr><td>Seismic footprints</td><td>dv_seis_set.geog</td><td>Polygon only</td></tr>
+</tbody></table></div>
+<p>That last constraint is not stylistic. A LINESTRING once landed in the survey-footprint column and the whole seismic layer vanished — the page shares one error handler across footprints and lines, so the type mismatch took both. <strong>A geometry type in a shared column is a rendering contract, not a detail.</strong></p>
+<h3>Catalogued geography — straight from the file catalog</h3>
+<p>Shapefiles classified as FIELD, LAND_TRACT, BOUNDARY or PIPELINE store their outline as WKT directly in GLOBAL_FILE_CATALOG.SPATIAL_OUTLINE, with the category in CATALOG_TABLE. Seismic outlines go to FILE_SEIS_HEADER.SURVEY_OUTLINE. <strong>Neither needs a promote</strong> — they draw as soon as the file is catalogued.</p>
+<p>The WKT is already reprojected to WGS84 and ring-oriented by the extractor, which matters: a clockwise exterior ring read as geography means <em>the whole Earth except this polygon</em>.</p>
+<h3>Computed at render — seismic coverage</h3>
+<p>2D surveys are drawn as a <strong>deliberately approximate</strong> blob — the convex hull of each survey’s line bounding boxes, buffered. Perry’s word for them is “computed blobs”, and the buffer exists so they read as an approximation rather than a claim.</p>
+<p>3D surveys prefer the real outline, dissolved per survey, and fall back to a bounding-box rectangle only where no outline exists. That preference took 3D coverage from 3 footprints to 5 and gives truer shapes, since a bbox over-covers a non-rectangular survey.</p>
+<h3>And H3, for scale</h3>
+<p>dv_well carries h3_r4–h3_r7. At continental zoom, aggregating 3.9 million wells is a GROUP BY on a string rather than a spatial operation; zooming in is choosing a finer resolution column. It’s also what lets wells from differently-shaped source schemas be counted together — a cell is derivable from a coordinate alone.</p>
+<h2>3 · Geometry lives in the database</h2>
+<p>The map issues SELECT geog.STAsText(). It does not compute shapes.</p>
+<p>That sounds like an implementation note and it’s the central design position. A well path drawn on screen was computed once — minimum curvature over the survey stations, projected through UTM, stored as a LINESTRING — so the same geometry is available to any query, export or report without re-deriving it, and two people looking at the same well see the same line.</p>
+<p>The alternative, computing at render, was built and kept as a <em>second</em> function for a specific case: a live layer that recomputes on every draw, suitable for a field-sized selection where you want the current answer rather than the stored one. Two functions, named for what they do, rather than one that guesses.</p>
+<p><strong>Well paths are worth a note of their own</strong>, because the computation has three traps that each look like a rendering bug:</p>
+<p><strong>Azimuth reference.</strong> Survey azimuths are usually true north; adding a north offset to a UTM northing moves along <em>grid</em> north. At 1.3° from a zone’s central meridian that’s 7.4 m over 621 m of displacement. The two implementations of the path calculation disagreed by exactly that until the convergence rotation was added.</p>
+<p><strong>Units.</strong> A metres survey computed as feet is off by 3.28× and still looks like a well.</p>
+<p><strong>TVD versus TVDSS.</strong> Fine in plan view, wrong in a cross-section.</p>
+<p>A cross-check against each survey’s own reported TVD catches all three before anything is written.</p>
+<h2>4 · Finding wells</h2>
+<p><strong>Filters push down to SQL.</strong> Operator, county, well type, depth range — applied in the query, not in the browser.</p>
+<p>Two things about that were learned the hard way and are worth stating as rules. The dropdown’s options come from a <strong>separate</strong> query scoped by the spatial clause but never by the attribute clause — options built from the currently-filtered wells collapse to a single value the moment the filter works, with no way back. And every query in the family must agree on the expression: one built COALESCE(w.operator_name, ba.ba_name) against a query that didn’t join ba, which errored, returned a sentinel, emptied the map, and made the control vanish and reset itself.</p>
+<p><strong>Drawing</strong> a rectangle or circle selects wells into a shadow set, so a well found by drawing stays findable after the fact.</p>
+<p><strong>The AI filter</strong> takes a natural-language question and returns a <strong>JSON spec</strong>, not SQL. The spec is applied in pandas over already-loaded wells, and the panel says so. The distinction matters for trust: nothing the model produces reaches the database as a query.</p>
+<p>Four things about it are worth knowing because each was a real defect:</p>
+<p>Comparisons fall back to <strong>text</strong> when numeric parsing fails. ISO dates sort correctly as strings, so no date parser is needed — and an unevaluable clause counts as <strong>not matching</strong> rather than silently passing. Before that, float("2020-01-01") raised inside a bare except: pass and “since 2020” matched every well.</p>
+<p>bcp writes an unset value as the literal text NULL, and "NULL" &gt;= "2020-01-01" is true lexicographically. Absent values are now recognised as absent.</p>
+<p>The filter was correct and <strong>the map ignored it</strong> — the drill shadow was merged back in <em>after</em> the filter ran. Now the shadow goes through the same filter.</p>
+<p>The panel’s diagnostics render the spec as a readable WHERE clause and apply each clause <em>alone</em> with example values, because a combined zero tells you nothing: sensible filter with no matching data, filter on an empty column, and a model that got it wrong all look identical otherwise.</p>
+<h2>5 · From a map to an answer</h2>
+<p>Selecting a well opens the <strong>scout ticket</strong> — a report assembled from the database: header, tops, surveys, completions, stimulations, DSTs, cores, petrophysics, production.</p>
+<p>Beneath it, inside the border so it travels with every export, is the <strong>provenance footer</strong>:</p>
+<div class="quote"><em>N rows across M tables · K (P%) traceable to a document · D source documents</em></div>
+<p>Then each document as a link with its modified date, and a warning where source ids resolve to nothing. Counts come from introspection — every dv_ table carrying both a uwi and an inventory_id — so a table added to the model appears without an edit. Where a well is entirely bulk-loaded it says so plainly rather than showing an empty box.</p>
+<p>That footer is the thing the scout ticket cannot otherwise answer: <strong>is any of this traceable, and to what.</strong> It never raises; a ticket that failed to render because its footer couldn’t count something would be a poor trade.</p>
+<p>From there, <strong>Documents</strong> and <strong>Export</strong> are sub-pages reached from the results panel.</p>
+<h2>6 · Documents on the map</h2>
+<p>A second page maps wells that have documents, one marker per <strong>well</strong> with an aggregated count — not one marker per file, since several documents attach to one well.</p>
+<p><strong>Position comes from</strong> <strong>dv_well</strong><strong>, not from the document.</strong> Perry’s reasoning: multiple documents attach to a well, and dv_well is the consolidated table populated from every source, so the location comes from whichever source carried one. The per-file header remains a fallback, which keeps the original promise that a well appears as soon as it is catalogued.</p>
+<p>The accepted trade: a document matched to a well that never promoted won’t appear.</p>
+<p>Two joins in that page were quietly wrong and are worth recording as a pattern. The well key had to become COALESCE(GLOBAL_FILE_CATALOG.MATCHED_UWI, header.UWI) — MATCHED_UWI is what the assignment panel and the Excel round-trip write, so <strong>every manually assigned UWI was invisible</strong>. And the header join had to become a LEFT join, because a file can carry a matched UWI without ever getting a header row.</p>
+<p>The companion fix is the one that makes it correct rather than merely fuller: the per-well document list keyed on the <em>header’s</em> UWI, so a well plotted from MATCHED_UWI would have opened an empty document table. Both now share one key expression, defined once precisely so they cannot drift.</p>
+<p><strong>The join needs a cast.</strong> dv_well.uwi is char(14) and MATCHED_UWI is nvarchar; without CAST(... AS char(14)) SQL Server promotes char to nvarchar and the index goes unusable — the same trap that took a gold join from 3.71s to 0.03s once fixed.</p>
+<h2>7 · What it refuses to draw</h2>
+<p><strong>A well with no survey gets no path.</strong> Absent geometry is not straight geometry, and an invented curve on a map gets believed.</p>
+<p><strong>A well whose path would be a dot doesn’t get a line.</strong> Below a minimum closure — about 500 ft — a near-vertical well is a point at map scale, and a drawn line implies a shape nobody can see. Those wells still appear as points. Nothing is lost; a misleading rendering is avoided.</p>
+<p><strong>A well with no coordinate never reaches</strong> <strong>dv_well</strong><strong>.</strong> That’s promote’s gate rather than the map’s, but it’s why “every well in the database” and “every well the map can draw” are the same set — there is no silent population of invisible rows.</p>
+<h2>8 · The traps</h2>
+<p><strong>Streamlit discards a widget’s value when the widget stops rendering.</strong> A control gated on a non-empty result loses its state whenever the query returns nothing and reappears at index 0 — which reads as “the filter reset itself” and hides the real failure upstream. Give such controls a fallback so they degrade instead of vanishing.</p>
+<p><strong>Action widgets cannot have their value set.</strong> Sub-pages keep state alive across a page switch by self-assigning every key — standard, and correct for inputs. It is <em>invalid</em> for buttons, downloads and uploaders, and <strong>the error surfaces when the widget is created, on a later run, on a different page</strong>. Returning from Export poisoned a button on the map. A name-by-name deny list could not hold; the test is now on how keys are named, and the file is swept in both directions after any new button — 20 action keys with none uncaught, 29 input keys with none wrongly skipped.</p>
+<p><strong>Trace outward through every enclosing condition.</strong> A geography layer was added correctly and drew nothing, because the block containing it was gated on a <em>different</em> layer being switched on. Same class as a reset button placed inside a collapsed expander that only rendered in one mode. On a page this size, “I put it next to X” is only as good as X’s own visibility.</p>
+<p><strong>Expanders do not nest.</strong> A block already inside one needs no second disclosure — the parent is the disclosure.</p>
+<p><strong>bcp</strong> <strong>is how the page reads wells, not a different source.</strong> The query is dumped to CSV by the bcp utility and parsed <strong>positionally</strong> against a column list, with no header row — so a mismatch between the SELECT and that list would silently misname every column from the mismatch onward.</p>
+<p><strong>Three layers depend on shapely and all degrade silently.</strong> 2D zones and geographic entities return nothing; 3D falls back to bounding boxes. Check the library is installed before diagnosing a blank layer as a data problem.</p>
+<p><strong>A registry nothing reads is worse than no registry.</strong> A layer table survived after its controls were removed, so registering a new layer there did nothing and produced a confidently wrong diagnosis. Dead code that <em>looks</em> live costs more than dead code that looks dead.</p>
+<h2>9 · Open items</h2>
+<p><strong>The map can point at a different database from the rest of the app.</strong> Its bcp path reads a session value seeded from a module constant rather than from the live connection, so reconnecting mid-session leaves the map pointed elsewhere. The fix is to seed it from the connection.</p>
+<p><strong>Cached queries don’t know about a load.</strong> Well queries cache for 10 and 60 minutes, and loading or promoting wells doesn’t invalidate them — so the map can serve a stale set for up to ten minutes after a load. The cache-busting parameter exists and is currently a constant; a session version bumped by the loader would close it.</p>
+<p><strong>The AI filter’s match count is counted against loaded wells only</strong>, so with shadow wells on the map the panel’s “N of M” can read lower than what is drawn. Not wrong, but worth knowing before it’s reported as a new bug.</p>
+<p><strong>Two seismic surveys draw in no layer at all</strong> — their type is neither 2D nor 3D, and both layers filter on exactly those. Real surveys the classifier didn’t type; they need an unclassified bucket.</p>
+<p><strong>2D zones could use the real outlines</strong> rather than hulling bounding boxes, which would follow the actual line corridors. Deliberately not done: the hull works, and dissolving hundreds of geometries per render is a real cost. Worth revisiting only if the blobs look too fat.</p>
+<p><strong>One</strong> <strong>MATCHED_UWI</strong> <strong>per file</strong> means a shapefile containing many wells surfaces only its representative well on the documents map, even though capture fanned all of them into dv_well.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <strong style="font-family:var(--mono);color:var(--ink)">Data Wrangler Solutions LLC</strong><br>
+      Petroleum data management · SQL Server · Oracle · Snowflake
+    </div>
+    <div><a href="../index.html">Overview</a> &nbsp;·&nbsp; <a href="../components.html">Components</a></div>
+  </div>
+</footer>
+
+</body>
+</html>

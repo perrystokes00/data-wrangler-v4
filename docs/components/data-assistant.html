@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Data Assistant — Data Wrangler</title>
+<meta name="description" content="Bulk tabular loading, where the mapping is proposed and you say where it is wrong.">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="../index.html">DATA<span>·</span>WRANGLER</a>
+    <nav class="topnav">
+      <a href="../components.html">All components</a>
+      <a href="dataview.html">DataView</a>
+      <a href="file-catalog.html">File Catalog</a>
+      <a href="data-assistant.html" aria-current="page" >Data Assistant</a>
+      <a href="document-assistant.html">Document Assistant</a>
+      <a href="mapping.html">Mapping</a>
+      <a href="../index.html#films">Walkthroughs</a>
+    </nav>
+  </div>
+</header>
+
+<main class="doc">
+  <div class="wrap">
+    <a class="backlink" href="../components.html">&larr; All components</a>
+    <div class="eyebrow">Component documentation</div>
+    <h1>Data Assistant</h1>
+    <p class="standfirst">Bulk tabular loading, where the mapping is proposed and you say where it is wrong.</p>
+<h2>Data Assistant — the structured data component</h2>
+<p><em>Component documentation · Data Wrangler v4</em> <em>Written 8 August 2026 against the code and the measured loads of late July and August. Row counts and timings are from real loads, not estimates.</em></p>
+<h2>1 · What the Data Assistant is for</h2>
+<p>Every company has folders of tabular data — a well header export from a state agency, a formation-tops spreadsheet from a consultant, thirty years of monthly production in a workbook with merged headers. Each one arrived from somewhere different and none of them share a column naming convention.</p>
+<p>The Data Assistant loads them into DataView. Not by asking the operator to write a mapping, but by proposing one and being told where it’s wrong.</p>
+<p><strong>The design law, stated once and enforced throughout:</strong></p>
+<div class="quote"><strong>The AI proposes. The deterministic core verifies and executes. The human confirms. The stores remember.</strong></div>
+<p>Each clause matters. The AI is good at reading a header that lies — Monthly Production / Unnamed: 4 / Unnamed: 5 — and saying what shape the data is really in. It is not the thing that checks a foreign key, measures a column width, or decides whether “Anadarko” is the party already in the database. Those are done by SQL against the live schema, every time, and they block a load when they fail.</p>
+<p><strong>And the terminal state is not a plan.</strong> <em>A plan is not a solution until the data loads.</em> The screen that says “adopted” or “remembered” has not finished; the one that says “4,529 inserted, 391 held” has.</p>
+<p><strong>Boundary with the other components.</strong> The Data Assistant owns delimited files and spreadsheets — CSV, TSV, XLSX, XLS, XLSM. Those extensions are deliberately excluded from the File Catalog’s crawl, because it has no extractor for them and an inventoried CSV would sit in “pending” forever. The File Catalog owns documents and logs; the Document Assistant owns shape recognition. This component’s input is a file whose columns are already columns.</p>
+<p><strong>A naming note.</strong> The UI calls it the Bulk Tabular Loader, the module is bulk_dir_loader.py, and the per-file planner lives in page_load_assistant.py. All three names refer to parts of this one component.</p>
+<h2>2 · Two modes, because there are two jobs</h2>
+<p>The page opens with a mode radio, and the choice is read before anything else renders.</p>
+<p><strong>🧭 Plan &amp; derive</strong> — one file at a time, with a plan you can argue with. Point it at a file and it produces a mapping, a fit check, a gap list, the parents that must exist first, and a transform if the shape is wrong. Use it when the file is new, or strange, or when a bulk run has sent it here.</p>
+<p><strong>📦 Load</strong> — a directory, or a single file, through six phases. Use it when the files are understood and the job is to move them.</p>
+<p>The two are one engine. The planner is a thin surface over the loader’s own functions, not a separate application, so a mapping taught in one is a mapping the other already knows.</p>
+<h2>3 · The plan, step by step</h2>
+<h3>① The mapping grid</h3>
+<p>One row per source column, a dropdown of target columns, and a provenance marker on each: <strong>📇 store</strong> (remembered), <strong>🤖 AI</strong> (proposed), <strong>✋ you</strong> (hand-set).</p>
+<p>That marker is the most useful thing on the screen. It says which decisions are settled and which are guesses, and it’s what the fast path keys on — a plan where every column says 📇 is one nobody needs to look at.</p>
+<h3>①b The fit pre-flight</h3>
+<p>Widths, types and nullability, read from the live schema. Errors <strong>block</strong> the load rather than warning about it.</p>
+<p>One subtlety cost a valid load and is worth stating: the check measures the value <strong>as it will be written</strong>, not as it sits in the file. Promote strips separators from identifier columns and pads a UWI to 14, so 42-329-10001-0000 is 17 characters in the file and exactly 14 in the database. Measuring the raw value refused a load that would have worked.</p>
+<p>The same pass emits a warning nobody asked for and everybody needs: an over-length UWI never trips a width check at all, because promote truncates it — silent digit loss on a well identifier.</p>
+<h3>② Required gaps</h3>
+<p>Target columns that are NOT NULL and have no source. Each is either generatable — a constant, a derived rule, a computed key — or it is a hard stop.</p>
+<h3>③ Parents, and a deterministic verify</h3>
+<p>Which parent tables must be populated first, and a check that actually asks the database rather than reasoning about it.</p>
+<h3>④ Transforms</h3>
+<p>Sometimes the columns map fine and the <strong>shape</strong> is wrong. A picks-per-row tops file cannot become an interval table by column mapping, however good the mapping is.</p>
+<p>The catalogue holds tested Python — pivot, unpivot, derive — and the AI’s job is to <strong>select and parameterise</strong> one against a header that lies. That division is worth being precise about, because it’s where the credit usually goes wrong: the transforms are ordinary code with tests. What generalises is choosing the right one when the header says Unnamed: 4, and that is the part a synonym store can never do.</p>
+<h3>④b The foreign-key grid</h3>
+<p>Four columns, and the shape is Perry’s: <strong>add ✔ | value | rows | standard value | replace ✔</strong>. Neither ticked means null the value; both ticked is an error. Applied set-based between staging and promote.</p>
+<p>There’s a check-all on each parent, because fifty unmatched values is fifty clicks — and the warning that a <strong>data</strong> parent is not a reference table sits <em>above</em> the check-all rather than below the grid. A warning underneath the thing it warns about is read too late, and “add all” on a data parent creates one stub well per value.</p>
+<h3>⑤ Load</h3>
+<p>Right-sized staging columns, BULK INSERT with an executemany fallback, promote SQL built with the UWI pad and the hold filters, per-phase timings. Excel skips the CSV conversion entirely and stages its first sheet directly.</p>
+<p>Derived files each get their own load button, in parent-first order. The result is <strong>parked</strong> in a banner with Next and Dismiss — advancing is an explicit click, because a result that scrolls away unread is a result nobody checked.</p>
+<h3>⑥ Adopt</h3>
+<p>The stores learn. Only from a load that worked.</p>
+<h2>4 · The six phases, for a directory</h2>
+<p>Same engine, batch-shaped: <strong>scan → files-to-tables → mappings → FK analysis → FK resolution → promote → verify</strong>.</p>
+<p>After a scan, three tabs. <strong>✅ Ready to load</strong> carries a per-file skip and a load order derived from the FK graph, with a preview sentence naming the order in words. <strong>🧭 Needs planning</strong> is anything with no table or a weak match, each row with a button that hands the file to the planner and runs the analysis. <strong>⏭ Skipped</strong> can be put back.</p>
+<p><strong>Nothing is ever skipped automatically.</strong> That was not the original design — the screen used to pre-tick a skip when a match looked weak or a required column had no source, and it took three rounds of the screen re-deriving its own opinion and discarding operator edits before the auto-skip logic was removed outright. What remains is a why column that warns in detail and a checkbox the operator owns.</p>
+<div class="quote">The screen warns. The operator decides.</div>
+<h2>5 · The three memories</h2>
+<p>This is the part that makes the second load cheaper than the first, and it took until 8 August to establish that one of the three had never survived a reset.</p>
+<p><strong>dv_column_map</strong> <strong>— fingerprint recall.</strong> Keyed on a hash of the file’s whole column set, normalised and sorted. Holds the exact source→target pairs saved for that shape. It’s what “📇 remembered” means, and it currently covers 15 layouts across 338 pairs.</p>
+<p>It is <strong>exact and all-or-nothing</strong>. One column added, dropped or renamed and the fingerprint misses entirely — returning nothing, not a partial. That’s the right behaviour for what it is, but it means a vendor adding a field costs as much as a brand-new format.</p>
+<p><strong>dv_column_synonym</strong> <strong>— the column-level store.</strong> Maps a column <em>name</em> to a target on any file, regardless of what else is in it. This is what makes a one-column change cost one decision instead of twenty. It is populated by learn_from_load after every <strong>verified</strong> load — never from a proposal, never from a save, because a synonym learned from a mapping that later failed would poison every future file silently.</p>
+<p>Conflicts are reported, not overwritten. The same name meaning different things in different tables is fine — the store is keyed per target table — but the same name meaning two things in one table is a human’s call.</p>
+<p><strong>dv_target_attribute</strong> <strong>— the schema mirror.</strong> Live column types, widths and nullability, refreshed from the database. The fit pre-flight reads it.</p>
+<p><strong>All three are</strong> <strong>dv_*</strong> <strong>tables, and until 8 August only the first was protected by the reset paths.</strong> So the synonym store filled after every verified load and was emptied by the next reset, indefinitely — working call sites, zero rows, and no contradiction. It also couldn’t bootstrap: seeding raises if the attribute table is empty, and that was empty for the same reason. Both reset paths now protect all three, and the store seeds 480 synonyms from a curated pack on install.</p>
+<p>The design target is explicit: <strong>AI usage decays as the store fills.</strong></p>
+<h2>6 · What the loader refuses to do</h2>
+<p>More of this component’s character is in its refusals than its features.</p>
+<p><strong>It will not seed an entity parent.</strong> A file says the operator is “Anadarko”; dv_well wants a surrogate ba_id. Turning one into the other is a decision — is this the party already in the database under a slightly different spelling, or a new one? — and no button makes that call. Reference parents can be seeded from the FK grid; entity parents (DV_BUSINESS_ASSOCIATE, DV_FIELD) are deliberately excluded, so their rows violate loudly rather than holding quietly.</p>
+<p>This is why the one-button bulk load was <strong>built and then removed</strong>. It worked — eleven files, 17,912 rows, one click — and it was withdrawn the same evening, because a bulk run reaches tables whose entity parents aren’t in the folder, and skipping to a load meant meeting the problem as an integrity error afterwards.</p>
+<div class="quote"><strong>Automation may skip ceremony, never a decision.</strong></div>
+<p>The single-file fast path survives, because it asks the database first and diverts to the FK grid on any violation.</p>
+<p><strong>It will not load a derived column.</strong> h3_r4–h3_r7, h3_coord_hash, geog are computed from the coordinates. A file has no business supplying them, and accepting one is worse than leaving them empty — the database can then hold a cell index that contradicts its own coordinates, and nothing notices, because a wrong value looks like data while a NULL looks like a gap. Worse, the placeholder <strong>disables its own repair</strong>: the backfill keys on “is null” and steps over it.</p>
+<p>So those columns are filtered out of every target dropdown, at the single place the live schema map is built, and the exclusion is reported rather than silent.</p>
+<p><strong>It will not guess at a partial mapping.</strong> A store mapping covering some columns and not others is a refusal, not a load. A partial mapping loaded silently is how a column goes missing for six months.</p>
+<p><strong>And it holds rather than fails.</strong> A detail row whose parent doesn’t exist is parked with a count and a reason, not rejected and not orphaned. Load the parent later and it promotes with no re-work.</p>
+<h2>7 · What it has actually loaded</h2>
+<p>Teapot Dome, reloaded from scratch through the taught path as the real test of everything above:</p>
+<p>wells        1,317
+tops         4,529 rows / 1,081 wells  (+391 held — 50 wells absent from the header export)
+surveys      hdr + 1,492 stations
+production   596,076 rows / 1,123 entities / 1922-12 → 2005-11</p>
+<p>The reload asked <strong>zero</strong> questions: all four source files were recognised by column shape, in correct FK order.</p>
+<p><strong>And one performance finding worth carrying into any similar system.</strong> A tops load took 154 seconds to promote 4,529 rows. The cause was not the data volume — staging columns are NVARCHAR while dv_well.uwi is CHAR(14), and nvarchar has higher datatype precedence, so SQL Server converted the <em>indexed column</em> on every comparison and both the dedupe and the hold filter degraded from seeks to scans.</p>
+<p>Casting every staging expression to the target’s exact type took the same load from <strong>154.26s to 0.89s</strong> — 173×, with identical row counts. A type mismatch between staging and target is a performance bug, not only a correctness one.</p>
+<p>Production then loaded at roughly 25,000 rows/second.</p>
+<h2>8 · The traps</h2>
+<p><strong>The UWI pad lives in three places.</strong> build_promote_sql, the repair UPDATE, and the FK analysis all implement “strip separators, right-pad to 14”. They must agree, because the FK analysis has to compare <em>what promote will write</em> — when it didn’t, 50 wells that existed read as unmatched.</p>
+<p><strong>Promote is insert-only.</strong> Re-supplied rows are skipped, not updated. Re-loading an unchanged file inserts 0 rows — a successful no-op, not a failure, and the screen has to say so or it reads as a broken load.</p>
+<p><strong>Provenance goes to the first file in.</strong> Several files of one column shape share a staging table, so at promote time a row cannot say which one it came from. Rather than abandon provenance, the first file’s id is stamped — which is already how insert-only behaves, since whichever load inserts a row owns it.</p>
+<p><strong>A computed id beats a mapped column.</strong> These CSVs often carry their own INVENTORY_ID column, and a saved mapping will faithfully copy it through. But inventory_id is a claim about <em>which file this row came from</em>, and only the loader reading the file can know that. The mapped pair is dropped when a computed id exists.</p>
+<p><strong>Day-first dates.</strong> 18-09-1992 parsed as US month-first gives silent transposition, and the fix has to land in both the promote cast and the QA counter or the two disagree about what’s invalid.</p>
+<p><strong>Tab-delimited</strong> <strong>.csv</strong> <strong>files exist.</strong> A comma reader collapses the whole header into one mangled column. Detected and rewritten to a sidecar rather than handled inline, so everything downstream stays comma-only.</p>
+<p><strong>Headers lie about meaning, not just naming.</strong> One real tops file had strat_uni_id holding unit <em>names</em>, a column called base (leading space) holding unit <em>codes</em>, and strat_unit_type holding the pick type. No column-name matcher survives that; it needs sample values, which is exactly what the AI step is for.</p>
+<p><strong>Streamlit, six scars:</strong> fixed-key widgets never re-default, so keys carry a version; every rebuild harvests pending edits first; a data_editor’s input frame must be render-stable or user edits silently reset; expanders don’t nest; a data_editor outside a form reruns the page on every keystroke; and a widget’s own key must never be assigned after the widget exists — use a request flag consumed before it’s drawn.</p>
+<h2>9 · Open items</h2>
+<p><strong>Compound-key foreign keys are unchecked.</strong> The FK scan skips any FK with more than one child column, so a key like (uwi, survey_id) is silently unverified and fails at promote instead. That’s a hole in a check the operator already trusts, and it’s the first thing I’d close.</p>
+<p><strong>Entity resolution has no screen.</strong> The gap behind the removed one-button load: a name needs matching to a party, with the option of creating a new one, then one set-based update substituting the id into staging.</p>
+<p><strong>No upsert.</strong> Insert-only means a corrected re-supply is ignored rather than applied.</p>
+<p><strong>Plans are session-only.</strong> A wiped derived file means re-deriving by hand. A plan-as-data “recipe box” has been asked for three times.</p>
+<p><strong>A synonym app.</strong> Browse, edit and retire by table; a coverage view; import a vendor header list and preview what would match before loading anything.</p>
+<p><strong>Column profiling.</strong> Evidence-based matching from sample values rather than names alone — it would have caught the base column holding unit codes, and would enable conditional mappings.</p>
+<p><strong>And the backfill that’s now available:</strong> dv_column_map’s 338 taught pairs are source-name → target-column pairs, which is exactly what the synonym store holds. Seeding it from them would convert 15 remembered layouts into column-level knowledge that survives a layout change — with conflicts reported rather than picked.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <strong style="font-family:var(--mono);color:var(--ink)">Data Wrangler Solutions LLC</strong><br>
+      Petroleum data management · SQL Server · Oracle · Snowflake
+    </div>
+    <div><a href="../index.html">Overview</a> &nbsp;·&nbsp; <a href="../components.html">Components</a></div>
+  </div>
+</footer>
+
+</body>
+</html>
