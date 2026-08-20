@@ -217,3 +217,32 @@ footer a{color:var(--ink-mute)}
 .listen-icon{margin-right:6px}
 .listen audio{width:100%;height:38px;display:block}
 .listen-note{font-size:14px;color:var(--ink-mute);margin:12px 0 0;line-height:1.45}
+
+/* ── the three-layer market map ─────────────────────────────────────── */
+.layers{display:flex;flex-direction:column;gap:14px;margin:8px 0 34px}
+.layer{
+  display:grid;grid-template-columns:190px 1fr 260px;gap:26px;align-items:center;
+  background:var(--panel);border:1px solid var(--rule);border-radius:12px;
+  padding:22px 26px;box-shadow:var(--shadow);position:relative;
+}
+.layer .lname{font-family:var(--mono);font-size:17px;font-weight:700;color:var(--ink)}
+.layer .lwhat{color:var(--ink-mid);font-size:16px}
+.layer .lwho{color:var(--ink-mute);font-size:14px;line-height:1.5}
+.layer.us{border-color:var(--gold);background:var(--gold-wash)}
+.layer.us .lname{color:var(--gold-bright)}
+.spanbar{
+  display:flex;align-items:center;gap:14px;margin:0 0 34px;padding:16px 26px;
+  border:1px dashed var(--gold);border-radius:12px;background:var(--gold-wash);
+}
+.spanbar .mark{font-family:var(--mono);color:var(--gold-bright);font-weight:700;white-space:nowrap}
+.spanbar p{margin:0;color:var(--ink-mid);font-size:16px}
+.pull{
+  font-family:var(--mono);font-size:clamp(20px,2.6vw,30px);line-height:1.35;
+  color:var(--ink);border-left:3px solid var(--gold);padding:6px 0 6px 26px;
+  margin:38px 0;max-width:40ch;
+}
+.stat-note{color:var(--ink-mute);font-size:15px;margin-top:10px;max-width:64ch}
+@media (max-width:820px){
+  .layer{grid-template-columns:1fr;gap:8px}
+  .layer .lwho{font-size:13px}
+}
