@@ -272,7 +272,52 @@ def load_well_test(engine, dialect: str, well_info: dict,
     try:
         n = capture(engine, "cat_well_dst", [rec], uwi=uwi,
                     inventory_id=inv, source_path=sp, source=source)
-        return _result(loaded=n, dst_id=rec["dst_id"])
+
+        # THE PERIODS ARE THE TEST. Previously only the maxima above were
+        # kept, so a six-period multi-rate test survived as three numbers and
+        # the shut-in/buildup periods — the ones the pressure analysis rests
+        # on — vanished entirely. cat_well_dst_period is the child mirror
+        # (added to MIRROR_TABLES and LINEAGE in the same change; a mirror in
+        # neither list is invisible twice over).
+        periods = []
+        for fr in flow:
+            seq = _safe_float(fr.get("PERIOD"))
+            if seq is None:
+                continue
+            hrs = _safe_float(fr.get("HRS"))
+            periods.append({
+                "dst_id":         rec["dst_id"],
+                "period_id":      _uid(),
+                "period_seq":     int(seq),
+                "period_type":    _trunc(fr.get("TYPE"), 40),
+                "duration_min":   hrs * 60.0 if hrs is not None else None,
+                "start_pressure": _safe_float(fr.get("FWHP (PSI)")),
+                "end_pressure":   _safe_float(fr.get("FBHP (PSI)")),
+                "pressure_ouom":  "PSI",
+                # A shut-in period reports no rate at all; the source prints
+                # an em-dash and _safe_float returns None. That NULL is the
+                # true reading, not a failed parse.
+                "avg_oil_rate":   _safe_float(fr.get("OIL (BBL/D)")),
+                "avg_gas_rate":   _safe_float(fr.get("GAS (MCF/D)")),
+                "avg_water_rate": _safe_float(fr.get("WATER (BBL/D)")),
+                # One rate_ouom for three fluids, matching the parent row:
+                # oil and water are BBL/D, gas is MCF/D. Stated in the remark
+                # rather than left for a reader to assume.
+                "rate_ouom":      "BBL/D",
+                # choke_size stays NULL DELIBERATELY. The source prints a
+                # fraction ("32/64") and extract_well_test returns 3264.0 —
+                # the slash is lost upstream, so any value written here would
+                # be invented. Fix the extractor, then populate this.
+                "remark":         "gas rate in MCF/D; choke not parsed",
+                "active_ind":     "Y",
+                "row_created_by": "DataWrangler",
+                "row_created_date": ts,
+            })
+        n_p = 0
+        if periods:
+            n_p = capture(engine, "cat_well_dst_period", periods, uwi=uwi,
+                          inventory_id=inv, source_path=sp, source=source)
+        return _result(loaded=n + n_p, dst_id=rec["dst_id"], periods=n_p)
     except Exception as e:
         return _result(errors=[
             f"cat_well_dst capture: {str(e).splitlines()[0].strip()[:180]}"])

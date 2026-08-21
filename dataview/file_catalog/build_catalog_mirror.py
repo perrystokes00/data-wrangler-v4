@@ -63,6 +63,11 @@ MIRROR_TABLES = [
     "dv_well_casing",                                # casing + cementing
     "dv_well_perforation",                           # perforated intervals
     "dv_well_dst",                                    # drill-stem tests
+    # The per-period flow rows of a well test. Without this the periods had
+    # nowhere to land, so load_well_test kept only the MAXIMA and a WELL_TEST
+    # document's flow table was reduced to three numbers. A multi-rate test IS
+    # its periods; the maxima are a summary of them, not a substitute.
+    "dv_well_dst_period",                             # flow periods of a test
     "dv_prod_entity", "dv_prod_volume",              # production
 ]
 

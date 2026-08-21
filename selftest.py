@@ -245,6 +245,20 @@ LINTS = [
      ".sql",
      "unbracketed alias using a T-SQL reserved word — 'bulk' cost a run. "
      "Write [bulk] = ..."),
+    # A BACKSLASH escapechar under QUOTE_NONE doubles every separator in a
+    # Windows path, and BULK INSERT stores the doubled form verbatim. Fixed
+    # 16 Aug across three catalog staging writers — and came straight back,
+    # because a FOURTH writer (pipeline_run's scan stage, the DEFAULT path)
+    # was missed. Found 20 Aug: all 182 catalog rows carried a doubled
+    # FILE_PATH and ROOT_PATH, written by a scan the day before. The id is a
+    # SHA1 of the CLEAN path, so the escaped write leaves INVENTORY_ID and
+    # FILE_PATH describing different strings and provenance stops resolving.
+    # The note "one writer now" was true and protected nothing; this lint is
+    # what makes it stay true. Use path_identity.bulk_csv_writer + bulk_field.
+    (r"escapechar\s*=\s*['\"]\\\\['\"]", ".py",
+     "a BACKSLASH csv escapechar: with QUOTE_NONE the csv module escapes the "
+     "character itself, so every separator in a Windows path is doubled and "
+     "BULK INSERT stores it that way. Use path_identity.bulk_csv_writer."),
     (r"str\(file_path\)(?!\s*\))", ".py",
      "a path stored without normpath: a doubled-separator root scans fine "
      "and catalogs every file twice under a different id."),

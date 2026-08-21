@@ -412,17 +412,38 @@ def _stage_scan(engine, root, exts, log):
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False,
                                       newline="", encoding="utf-8")
     csv_path = tmp.name
-    w = csv.writer(tmp, delimiter="\t", quoting=csv.QUOTE_NONE, escapechar="\\")
+    # NO escapechar. This was the FOURTH catalog staging writer, and the one
+    # the 16 Aug sweep missed — so the bug came straight back through the
+    # pipeline, which is the DEFAULT path. Every scan since has written
+    # doubled paths: with QUOTE_NONE the csv module escapes the escape
+    # character itself, and BULK INSERT has no escape concept, so it stores
+    # the doubled form verbatim. iid is hashed from the CLEAN fpath, so the
+    # escaped write left INVENTORY_ID and FILE_PATH describing different
+    # strings; root[:900] goes through the same writer, which is why
+    # ROOT_PATH was doubled too. See path_identity.bulk_csv_writer.
+    from dataview.core.path_identity import bulk_csv_writer, bulk_field
+    w = bulk_csv_writer(tmp)
     n = 0
+    n_sanitised = 0
     for (fpath, fname, fext, size_kb, mtime_iso, _ep, fhash) in found:
         iid = inv_id(fpath)
         if iid in bad:
             continue
-        w.writerow([iid, fpath[:900], fname[:260], fext[:20],
-                    _ext_group(fext, EXT_GROUP)[:50],
-                    size_kb if size_kb else "",
-                    fhash, "", "UNCATALOGED", "", root[:900], now, now, now])
+        row = []
+        for _v in (iid, fpath[:900], fname[:260], fext[:20],
+                   _ext_group(fext, EXT_GROUP)[:50],
+                   size_kb if size_kb else "",
+                   fhash, "", "UNCATALOGED", "", root[:900], now, now, now):
+            _val, _changed = bulk_field(_v)
+            row.append(_val)
+            n_sanitised += bool(_changed)
+        w.writerow(row)
         n += 1
+    if n_sanitised:
+        # Report, never repair silently — the stored value now differs from
+        # the bytes on disk, and a wrong value outlives a missing one.
+        log(f"[scan] {n_sanitised} field(s) held a tab, quote or newline and "
+            f"were rewritten to load; stored value differs from disk.")
     tmp.close()
 
     dup_cnt = 0
