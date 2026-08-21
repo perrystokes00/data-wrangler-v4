@@ -222,6 +222,28 @@ def _role(name: str) -> str:
         return "lat"
     if "longitude" in n or n.endswith("_lon") or n == "lon":
         return "lon"
+    # UNITS ARE CLASSIFIED FIRST, and that ordering is the fix, not a style
+    # choice. "depth" was tested before this, so depth_ouom matched "depth"
+    # and was filled with a NUMBER (1137.7) instead of "FT"; elevation_ouom
+    # matched "elev" the same way, and formation_at_td matched "_td". A unit
+    # column is a unit column whatever it measures, so it must be decided
+    # before the thing it measures gets a chance to claim it.
+    #
+    # And a bare `"unit" in n` is NOT a units test: strat_unit_name,
+    # strat_unit_type and strat_unit_subtype are STRATIGRAPHIC units —
+    # formations — and that clause stamped "FT" into 512 formation names,
+    # where it reads as real data rather than as missing data.
+    if "ouom" in n or n.endswith("_uom") or n.endswith("_unit") or n == "unit":
+        return "uom"
+    # A FORMATION IS A NAME even when the column name mentions a depth.
+    # "formation_at_td" means the formation AT total depth; it matched "_td"
+    # and was filled with 693.1, and a number in a formation column reads as
+    # data rather than as absent. Decided before depth for the same reason
+    # units are. Columns that really ARE depths (formation_top_depth) keep
+    # their measure suffix and fall through.
+    if ("formation" in n or "strat" in n) and not any(
+            n.endswith(k) for k in ("_depth", "_top", "_base", "_md", "_tvd")):
+        return "name"
     if "elev" in n:
         return "elev"
     if any(k in n for k in ("depth", "_td", "td_", "md", "tvd")):
@@ -230,8 +252,6 @@ def _role(name: str) -> str:
         return "date"
     if n.endswith("_ind"):
         return "ind"
-    if "ouom" in n or n.endswith("_uom") or "unit" in n:
-        return "uom"
     if "remark" in n or "comment" in n or "description" in n or "desc" in n:
         return "remark"
     if n == "source" or n.endswith("_source"):
@@ -323,6 +343,19 @@ def _value_raw(col, ctx, rng):
     if role == "ind":
         return "Y"
     if role == "uom":
+        # _UOM has existed all along and was never consulted, so every unit
+        # column read "FT" — pressure in feet, flow rate in feet, permeability
+        # in feet. Match on the measure the column names, and fall back to FT
+        # only when nothing matches (most of them really are depths).
+        for _k, _u in _UOM.items():
+            if _k in key:
+                return _u
+        if "rate" in key:
+            return "BBL/D"
+        if "perm" in key:
+            return "MD"
+        if "dens" in key:
+            return "SPF"
         return "FT"
     if role == "remark":
         return "Synthetic test record"
