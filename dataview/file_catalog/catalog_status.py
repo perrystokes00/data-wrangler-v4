@@ -145,10 +145,13 @@ CLEAR_ROUTE = {
     _HOLD_WELL_MISSING: ("The well is in neither dv_well nor cat_well -- no "
                          "header has ever been captured for it. Catalog the "
                          "document that carries the header, or reject these."),
-    _HOLD_SEIS_UNNAMED: ("Run Pipeline -> (4) Key Wells & Surveys -> "
-                         "\"Seismic (need survey)\". 2D lines usually share one "
-                         "survey -- use \"Apply to all\" rather than typing it "
-                         "per file."),
+    # The panel is on THIS page now -- "Name a survey", just above the
+    # filters -- so the route is a scroll, not a navigation. Also in
+    # Run Pipeline -> (4) Key Wells & Surveys for anyone already there.
+    _HOLD_SEIS_UNNAMED: ("Open \"Name a survey\" above. 2D lines usually share "
+                         "ONE survey -- type it once and use \"Apply to all\" "
+                         "rather than accepting the per-file path guess, which "
+                         "offers a different name for every line."),
     _HOLD_SEIS_UNMAPPABLE: ("Arm a CRS and re-extract so the file gets a survey "
                             "outline or a complete bbox."),
 }

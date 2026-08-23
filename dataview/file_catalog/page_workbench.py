@@ -3376,6 +3376,35 @@ def _tab_status(engine, dialect):
     elif _held == 0:
         st.success("✅ Nothing held — every staged row passes promote's gates.")
 
+    # ── Clear the biggest seismic hold from HERE ─────────────────────────────
+    # THE FIX BELONGS NEXT TO THE DIAGNOSIS. CLEAR_ROUTE exists so "the fix is
+    # one click from the diagnosis instead of a hunt through four pages", and
+    # for unnamed surveys it pointed at a different tab — Perry followed it,
+    # found nothing, and reasonably concluded the feature did not exist. This
+    # is that route made into the actual control.
+    #
+    # 2D lines arrive as a SET: lineA..lineE are five files of ONE survey, and
+    # the per-file path guess offers five DIFFERENT names (LINEA, LINEB, …),
+    # so the path of least resistance was five surveys where there is one.
+    # Hence the group control rather than a row-by-row edit.
+    #
+    # Rendered only when something is actually held this way — an expander's
+    # body executes whether or not it is open (see the note further down), so
+    # gating on the count keeps its query off the page when there is no work.
+    _unnamed_n = sum(1 for _d in res.holds.values()
+                     if _cs._HOLD_SEIS_UNNAMED in _d)
+    if _unnamed_n:
+        # Sibling of the "Open a file" expander below, NOT nested inside it —
+        # expanders cannot nest. seis_survey_assign uses a bordered container
+        # for its group box for the same reason.
+        with st.expander(
+                f"🎛 Name a survey — {_unnamed_n} seismic file(s) held for "
+                f"having none. 2D lines usually share ONE survey.",
+                expanded=False):
+            from dataview.file_catalog.seis_survey_assign import (
+                seis_survey_grid as _seis_assign)
+            _seis_assign(engine)
+
     # ── Filters ──────────────────────────────────────────────────────────────
     st.divider()
     _states = [_SB_ANY] + sorted(df["state"].unique().tolist())
