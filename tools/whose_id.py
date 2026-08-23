@@ -1,7 +1,7 @@
 """
 whose_id.py — which file, and which algorithm, produced an orphaned id.
 
-    python whose_id.py --scan C:\\Users\\perry\\OneDrive\\Documents\\PPDM
+    python tools/whose_id.py --scan C:\\Users\\perry\\OneDrive\\Documents\\PPDM
 
 Read-only. Never writes.
 
@@ -28,6 +28,12 @@ import hashlib
 import ntpath
 import os
 import sys
+
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Every id scheme this codebase has minted, newest first. Keeping the dead
 # ones here on purpose: a stored id is a historical artefact, and reading it

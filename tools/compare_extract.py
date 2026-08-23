@@ -4,13 +4,20 @@ pipeline vs the FAST TRACK pool actually produced from the same corpus.
 Usage:
   1. Reset demo data.
   2. Run ONE path (regular pipeline --apply, OR Fast Track run-all).
-  3. py compare_extract.py snapshot regular     # saves counts
+  3. py tools/compare_extract.py snapshot regular     # saves counts
   4. Reset demo data again.
   5. Run the OTHER path.
-  6. py compare_extract.py snapshot fasttrack
-  7. py compare_extract.py diff                  # shows differences
+  6. py tools/compare_extract.py snapshot fasttrack
+  7. py tools/compare_extract.py diff                  # shows differences
 """
 import sys, json, os
+
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from dataview.file_catalog import worker_core as w
 from sqlalchemy import text
 

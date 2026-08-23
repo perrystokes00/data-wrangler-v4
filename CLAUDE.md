@@ -96,6 +96,29 @@ every enrichment write — batch AND the per-row fallback — raised
 `NameError`. It surfaced only because a test read the log; the stage reported
 completion.
 
+**A `sys.path` line pointing at the wrong directory reads exactly like the
+fix.** Python puts the SCRIPT's own directory on `sys.path[0]`, never the repo
+root, so `python tools/<name>.py` — how every one of them documents itself —
+died with `ModuleNotFoundError: No module named 'dataview'`. 26 of the 28
+`tools/` scripts that import `dataview` could not be run at all, found 23 Aug
+when `reconcile_orphans`, the tool that diagnoses orphaned provenance, was
+needed and would not start.
+
+Twelve had no `sys.path` line. The other **fourteen had one, and it was a
+no-op**: it pointed at `tools/` (already `sys.path[0]`) or at a `modules/`
+directory the v4 reorg deleted — `git ls-files` finds zero paths under it.
+`recatalog_seis` still told the reader to "run from the project root so that
+modules/ is on the path". So the obvious check — grep the source for
+`sys.path` — passes all fourteen and the bug survives it. Same shape as the
+invariant keyed on `FILE_NAME`: right question, wrong key. `tier_units`
+therefore EVALUATES the argument of every `sys.path.insert/append` with
+`__file__` bound to the script and requires the repo root to come back.
+
+One line, the one `app_v4.py` already uses, and a no-op under `python -m` so
+it never breaks the module form:
+
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 **`COL_LENGTH` returns NULL for a missing TABLE and a missing COLUMN alike.**
 Pair it with `OBJECT_ID` or a guard silently skips.
 
@@ -402,7 +425,16 @@ it's actually the correct default. **Open: make batched the default.**
   (`app_v3.py`, `page_run.py`) import it lazily inside the button handler and
   already catch the failure, so the button now reports "Reset failed: …"
   instead of crashing or silently doing nothing.
-- Compound-key FKs are silently unchecked (`if len(ccols) != 1: continue`)
+- `tools/bulk_runner.py` imports `dataview.import_data.page_bulk`, deleted in
+  the v4 reorg; `run_job` exists nowhere in the repo. The import is inside a
+  function, so `--help` succeeds and it dies only when a job actually runs.
+  Repoint it at the surviving loader or retire the headless runner.
+- ~~Compound-key FKs are silently unchecked (`if len(ccols) != 1: continue`)~~
+  **CLOSED 23 Aug — `promote_catalog._parent_fk_predicates` holds a child whose
+  parent row is missing instead of letting the INSERT 547 and fail the whole
+  mirror. Compound keys included; that is what `fk_log_curve_log (uwi, log_id)`
+  needed. `dv_well` stays excluded — the detail path already gates it with
+  UWI-14 normalisation a generic column comparison cannot reproduce.**
 - Entity-parent resolution (name → surrogate id) has no UI
 - A retarget doesn't update the fingerprint memory; a skip does
 - `_qry_wells_in_bbox` reads `dv_well` directly, so map drills can't reach

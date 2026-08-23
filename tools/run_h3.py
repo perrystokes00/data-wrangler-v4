@@ -2,13 +2,19 @@
 run_h3.py — H3 backfill for dv_well via BCP (no pyodbc row reads). Writes ONLY
 h3_r4..h3_r7 (nvarchar). Skips h3_coord_hash entirely (optional metadata).
 
-  py run_h3.py --all     # recompute all wells with coordinates
-  py run_h3.py           # only wells missing H3 (h3_r5 IS NULL)
-  py run_h3.py --grid 4 5 6 7   # backfill, then write those density grids
-  py run_h3.py --grid-only 4 5 6 7   # ONLY rebuild grids (no backfill)
+  py tools/run_h3.py --all     # recompute all wells with coordinates
+  py tools/run_h3.py           # only wells missing H3 (h3_r5 IS NULL)
+  py tools/run_h3.py --grid 4 5 6 7   # backfill, then write those density grids
+  py tools/run_h3.py --grid-only 4 5 6 7   # ONLY rebuild grids (no backfill)
 """
 import sys, os, csv, time, tempfile, subprocess, urllib.parse as _u
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "modules"))
+
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from sqlalchemy import create_engine, text
 from dataview.mapping import h3_grids
 

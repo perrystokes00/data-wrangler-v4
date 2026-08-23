@@ -1078,6 +1078,76 @@ def tier_units(res, verbose=False):
     check("LAS: the log header is staged whenever its curves are",
           _las_stages_parent_with_child)
 
+    # 19. A TOOL THAT CANNOT IMPORT THE REPO IS A TOOL THAT CANNOT BE RUN.
+    #     Python puts the SCRIPT's own directory on sys.path[0], never the repo
+    #     root, so `python tools/<name>.py` — how every one of them documents
+    #     itself — died with ModuleNotFoundError: No module named 'dataview'.
+    #     26 of the 28 tools/ scripts that import dataview could not run at all,
+    #     found when reconcile_orphans, the tool that diagnoses orphaned
+    #     provenance, was needed and would not start.
+    #
+    #     THIS DOES NOT TEST THAT THE WORDS "sys.path" APPEAR, and that is the
+    #     whole point. FOURTEEN of the offenders already had a sys.path line
+    #     and it was a NO-OP: it pointed at tools/ (already sys.path[0]) or at
+    #     a modules/ directory the v4 reorg deleted. A check keyed on the
+    #     string passes all fourteen while the bug survives — the same shape as
+    #     the invariant keyed on FILE_NAME that could never pass. So the
+    #     ARGUMENT is evaluated, with __file__ bound to the script, and the
+    #     repo root has to be the answer.
+    def _tools_can_import_the_repo():
+        from pathlib import Path
+        root = os.path.dirname(os.path.abspath(__file__))
+        tools = os.path.join(root, "tools")
+        if not os.path.isdir(tools):
+            return
+        broken = []
+        for name in sorted(os.listdir(tools)):
+            if not name.endswith(".py") or name == "__init__.py":
+                continue
+            path = os.path.join(tools, name)
+            try:
+                tree = ast.parse(open(path, encoding="utf-8",
+                                      errors="replace").read())
+            except SyntaxError:
+                continue                 # the imports tier owns that failure
+            wants = False
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    wants |= (node.module or "").split(".")[0] == "dataview"
+                elif isinstance(node, ast.Import):
+                    wants |= any(a.name.split(".")[0] == "dataview"
+                                 for a in node.names)
+            if not wants:
+                continue
+            reaches = False
+            for node in ast.walk(tree):
+                if not (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in ("insert", "append")
+                        and node.args):
+                    continue
+                target = node.args[-1]
+                try:
+                    # only the ARGUMENT, in a namespace holding nothing but
+                    # path helpers and this script's own path
+                    got = eval(compile(ast.Expression(target), path, "eval"),
+                               {"__builtins__": {"str": str}},
+                               {"os": os, "Path": Path, "__file__": path})
+                except Exception:
+                    continue             # _BASE_DIR, HERE, … — unresolvable
+                if (os.path.normcase(os.path.abspath(str(got)))
+                        == os.path.normcase(root)):
+                    reaches = True
+                    break
+            if not reaches:
+                broken.append(name)
+        assert not broken, (
+            f"{len(broken)} tools script(s) import dataview but never put the "
+            f"REPO ROOT on sys.path, so `python tools/<name>.py` cannot run: "
+            + ", ".join(broken))
+    check("every tools/ script that imports dataview can find it",
+          _tools_can_import_the_repo)
+
     return res
 
 

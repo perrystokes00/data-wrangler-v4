@@ -9,8 +9,8 @@ geojson) and adds the rest (KML/KMZ, PowerPoint, CSV/TSV/TXT, ASCII/.prn/.dev
 logs, email, OpenDocument, RTF, GeoPackage, MapInfo, GeoTIFF, plain image,
 WITSML, OSDU JSON well log).
 
-    python make_test_dataset_all.py --root C:\\Bulk\\TestDataAll
-    python make_test_dataset_all.py --root C:\\Bulk\\TestDataAll --validate
+    python tools/make_test_dataset_all.py --root C:\\Bulk\\TestDataAll
+    python tools/make_test_dataset_all.py --root C:\\Bulk\\TestDataAll --validate
 
 --validate runs each generated file back through modules.file_summarizer.summarize()
 and prints a coverage table (format · uwi · ok/err), so you can confirm the
@@ -25,6 +25,12 @@ import argparse
 import os
 import sys
 import zipfile
+
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import make_test_dataset as base   # noqa: E402  (reuse proven builders)

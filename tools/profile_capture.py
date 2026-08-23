@@ -5,9 +5,9 @@ No app context needed. Makes its own engine, runs the FAST capture, times it
 with per-stage reads, then dumps the DMV reports so you can SEE whether the
 per-file dv_well SELECT / GLOBAL_FILE_CATALOG UPDATE are gone.
 
-    python profile_capture.py                       # fast path (default)
-    python profile_capture.py --old                 # time the ORIGINAL for A/B
-    python profile_capture.py --limit 100 --ext .las .pdf
+    python tools/profile_capture.py                       # fast path (default)
+    python tools/profile_capture.py --old                 # time the ORIGINAL for A/B
+    python tools/profile_capture.py --limit 100 --ext .las .pdf
 
 Targets DataView_Demo by default.
 """
@@ -17,6 +17,12 @@ import sys
 
 import pyodbc
 from sqlalchemy import create_engine
+import os
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataview.import_data.pipeline_profiler import Profiler, analyze
 

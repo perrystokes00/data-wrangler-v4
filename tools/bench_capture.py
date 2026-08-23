@@ -4,13 +4,19 @@ of LAS files, incl. the DB writes the scanner never does, and extrapolate to a
 full run. Uses synthetic valid UWIs ('15999…') so every file captures fully;
 clean them up with --cleanup afterward.
 
-  py bench_capture.py --src "C:\...\LAS Files" --n 300
-  py bench_capture.py --n 300 --workers 6 --target 7326
-  py bench_capture.py --cleanup          # delete the synthetic 15999… bench rows
+  py tools/bench_capture.py --src "C:\...\LAS Files" --n 300
+  py tools/bench_capture.py --n 300 --workers 6 --target 7326
+  py tools/bench_capture.py --cleanup          # delete the synthetic 15999… bench rows
 """
 import sys, os, time, argparse, urllib.parse as _u
 from pathlib import Path
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules"))
+
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sqlalchemy import create_engine, text
 
@@ -77,7 +83,7 @@ def main():
         print(f"  {label:38} ~{est/60:.1f} min")
     print("\n+ extract stage (2nd header read + FILE_WELL_HEADER write) unless --single-pass;")
     print("  single-pass ~= this number; two-pass ~= this + ~50-70%.  promote adds ~3-5 min.")
-    print("\nrun 'py bench_capture.py --cleanup' to remove the synthetic bench rows.")
+    print("\nrun 'py tools/bench_capture.py --cleanup' to remove the synthetic bench rows.")
 
 if __name__ == "__main__":
     main()

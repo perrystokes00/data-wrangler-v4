@@ -1,9 +1,15 @@
 """recapture.py — now that MATCHED_UWI is set on the 402 files, run capture+promote
 directly (bypasses the pipeline file-guard) so the cat_* rows get written and
-promoted. py recapture.py"""
+promoted. py tools/recapture.py"""
 import sys, os, urllib.parse as _u
+
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 def main():
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules"))
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from sqlalchemy import create_engine
     from dataview.import_data.pipeline_run import run_pipeline

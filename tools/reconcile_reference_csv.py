@@ -2,8 +2,8 @@
 reconcile_reference_csv.py — what would happen if these PPDM reference CSVs
 were loaded into DataView. Reports only; writes nothing.
 
-    python reconcile_reference_csv.py --in "C:\\...\\reference_csv"
-    python reconcile_reference_csv.py --in <dir> --ddl        # also print DDL
+    python tools/reconcile_reference_csv.py --in "C:\\...\\reference_csv"
+    python tools/reconcile_reference_csv.py --in <dir> --ddl        # also print DDL
                                                               # for missing tables
 
 WHY LOOK FIRST
@@ -42,6 +42,12 @@ import csv
 import glob
 import os
 import sys
+
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DV_PREFIX = "dv_"          # PPDM r_well_status  ->  DataView dv_r_well_status
 

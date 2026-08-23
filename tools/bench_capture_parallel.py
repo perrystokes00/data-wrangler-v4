@@ -4,16 +4,21 @@ same ProcessPoolExecutor path the pipeline uses (engine-per-worker +
 worker_core.process_file). Reports actual files/sec at W workers and extrapolates
 to a full run — no efficiency guess. Synthetic 15999 UWIs; --cleanup removes them.
 
-  py bench_capture_parallel.py --src "C:\...\2020\_triage\good" --n 300 --workers 6
-  py bench_capture_parallel.py --n 300 --workers 8
-  py bench_capture_parallel.py --cleanup
+  py tools/bench_capture_parallel.py --src "C:\...\2020\_triage\good" --n 300 --workers 6
+  py tools/bench_capture_parallel.py --n 300 --workers 8
+  py tools/bench_capture_parallel.py --cleanup
 """
 import sys, os, time, argparse, urllib.parse as _u
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(HERE, "modules"))
 sys.path.insert(0, HERE)
 
 CONN = (r"DRIVER={ODBC Driver 18 for SQL Server};SERVER=localhost\SQLEXPRESS;"
@@ -25,7 +30,6 @@ def _worker(arg):
     url, rec = arg
     import os as _os, sys as _sys
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-    _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "modules"))
     try:
         from sqlalchemy import create_engine
         from dataview.file_catalog import worker_core as wc
@@ -95,7 +99,7 @@ def main():
         print(f"  + single-pass folds extract in (~same capture time, no 2nd read/write)")
         print(f"  + promote (set-based, scales with wells): ~3-5 min")
         print(f"  => est end-to-end single-pass: ~{est/60 + 4:.0f}-{est/60 + 5:.0f} min")
-    print("\nrun 'py bench_capture_parallel.py --cleanup' to remove the synthetic rows.")
+    print("\nrun 'py tools/bench_capture_parallel.py --cleanup' to remove the synthetic rows.")
 
 if __name__ == "__main__":
     main()

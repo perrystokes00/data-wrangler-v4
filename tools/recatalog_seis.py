@@ -5,18 +5,21 @@ Standalone script to re-catalog all SEG-Y and P190 files in SEIS_FILE_CATALOG.
 Re-parses each file from disk and updates ALL fields including coordinates.
 
 Usage:
-    python recatalog_seis.py
+    python tools/recatalog_seis.py
 
-Run from the Data Wrangler project root directory so that modules/ is on the path.
+Runs from anywhere: the header insert below puts the repo root on sys.path.
+(There is no modules/ directory any more -- the reorg moved it into dataview/.)
 Reads DB connection from .env (same as Data Wrangler).
 """
 
 import sys, os
 from pathlib import Path
 
-# ── Add project root to path ───────────────────────────────────────────────
-sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent / "modules"))
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ── Load .env ─────────────────────────────────────────────────────────────
 try:

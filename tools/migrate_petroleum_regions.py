@@ -19,7 +19,7 @@ RUNTIME: ~10 seconds (most of it is TIGER load)
 USAGE:
     cd C:\\Users\\perry\\OneDrive\\Documents\\PPDM\\claude_use_ai\\
        data_wrangler\\data_wrangler_v3
-    python migrate_petroleum_regions.py
+    python tools/migrate_petroleum_regions.py
 
 REVERSIBLE:
     Restore from petroleum_regions.py.bak if anything looks wrong.
@@ -31,6 +31,12 @@ import sys
 from pathlib import Path
 
 import geopandas as gpd
+import os
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ── CONFIG ──────────────────────────────────────────────────────────
 

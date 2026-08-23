@@ -26,16 +26,22 @@ Inferred edges are marked "(inf)" so you can tell them apart.
 
 Examples
 --------
-  python gen_schema_docs.py --database DataView
-  python gen_schema_docs.py --server "localhost\\SQLEXPRESS" \\
+  python tools/gen_schema_docs.py --database DataView
+  python tools/gen_schema_docs.py --server "localhost\\SQLEXPRESS" \\
       --database DataView --schema dataview --out ./schema_docs
-  python gen_schema_docs.py --database DataView --areas-in schema_areas.json
+  python tools/gen_schema_docs.py --database DataView --areas-in schema_areas.json
 """
 import argparse
 import json
 import sys
 from datetime import datetime
 from pathlib import Path
+import os
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dataview.core import schema_introspect as si
 

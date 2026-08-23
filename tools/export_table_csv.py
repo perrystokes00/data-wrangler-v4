@@ -2,10 +2,10 @@
 export_table_csv.py — write a dv_* table out as a CSV the Data Assistant can
 reload.
 
-    python export_table_csv.py --table dataview.dv_reservoir ^
+    python tools/export_table_csv.py --table dataview.dv_reservoir ^
         --out "C:\\...\\training\\synthetic_data\\dv_reservoir.csv"
 
-    python export_table_csv.py --table dataview.dv_reservoir --out x.csv --all
+    python tools/export_table_csv.py --table dataview.dv_reservoir --out x.csv --all
 
 Read-only against the database.
 
@@ -40,6 +40,12 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import os
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 SPATIAL = {"geography", "geometry"}
 AUDIT = {"row_created_by", "row_created_date", "row_changed_by", "row_changed_date"}

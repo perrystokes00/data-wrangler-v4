@@ -8,7 +8,7 @@ textual header (never from coordinate magnitudes — that is what put the
 Australian surveys off Norway), reprojects the sampled trace path, and writes
 GeoJSON.
 
-    py segy_lines_to_wgs84.py --db seismic.duckdb --out seismic_lines.geojson
+    py tools/segy_lines_to_wgs84.py --db seismic.duckdb --out seismic_lines.geojson
 
 Anything whose CRS is not declared is reported and skipped, never guessed.
 """
@@ -18,6 +18,12 @@ import argparse
 import json
 import os
 import sys
+
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

@@ -2,7 +2,7 @@
 extend_synonyms_round4.py — close the 22 coverage gaps + dump the next
 tables' schemas to a FILE (so nobody has to paste 300 lines).
 
-    py extend_synonyms_round4.py
+    py tools/extend_synonyms_round4.py
 
 Writes schema_dump.txt in the repo root. Upload that file and round 5 gets
 written against real columns for completions, DSTs, cores, casing, shows,
@@ -12,6 +12,12 @@ pressures, curves, mud logs and seismic sets.
 import sys
 import time
 import traceback
+import os
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 SERVER = r"localhost\SQLEXPRESS"
 DB = "DataView_Demo"

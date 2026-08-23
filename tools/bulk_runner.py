@@ -4,10 +4,10 @@ bulk_runner.py  --  Data Wrangler Headless Batch Runner
 Two modes:
 
   # Run queue once and exit:
-  python bulk_runner.py --db-server SERVER\INST --db-name PPDM39 --windows-auth
+  python tools/bulk_runner.py --db-server SERVER\INST --db-name PPDM39 --windows-auth
 
   # Watch folder continuously:
-  python bulk_runner.py --db-server SERVER\INST --db-name PPDM39 --windows-auth --watch
+  python tools/bulk_runner.py --db-server SERVER\INST --db-name PPDM39 --windows-auth --watch
 """
 
 import argparse
@@ -17,6 +17,12 @@ import sys
 import time
 import urllib.parse
 from datetime import datetime
+import os
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _BASE_DIR     = pathlib.Path(__file__).parent
 _QUEUE_FILE   = _BASE_DIR / "bulk_queue.json"

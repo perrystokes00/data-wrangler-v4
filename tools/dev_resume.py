@@ -8,10 +8,10 @@ When you next open/refresh the Streamlit app it will auto-load that state
 and drop you straight into the mapping grid.
 
 Usage:
-    python dev_resume.py                          # uses defaults below
-    python dev_resume.py --file my_wells.csv      # override source file
-    python dev_resume.py --table well_bore        # override target table
-    python dev_resume.py --stage 3                # stop at normalize (stage 3)
+    python tools/dev_resume.py                          # uses defaults below
+    python tools/dev_resume.py --file my_wells.csv      # override source file
+    python tools/dev_resume.py --table well_bore        # override target table
+    python tools/dev_resume.py --stage 3                # stop at normalize (stage 3)
 
 Stages:
     1 = connected
@@ -25,6 +25,12 @@ import os
 import pickle
 import sys
 import types
+
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ── Config — edit these defaults to match your environment ──────────────────
 DEFAULTS = dict(

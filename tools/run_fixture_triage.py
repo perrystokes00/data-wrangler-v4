@@ -8,14 +8,22 @@ This mirrors exactly what the pipeline's _stage_enrich + _stage_triage do, but
 isolated: no scan, no extract — it just works on the catalog/header rows that
 seed_triage_fixture.sql already put in the database.
 
-Run it from the folder that holds enrich_file_headers.py and triage_inventory.py:
+Run it from the repo root (the header insert below puts the repo on sys.path,
+so the folder you are standing in does not matter):
 
-    python run_fixture_triage.py --dry-run     # safe: computes, writes nothing
-    python run_fixture_triage.py               # for real: writes the backfill
+    python tools/run_fixture_triage.py --dry-run     # safe: computes, writes nothing
+    python tools/run_fixture_triage.py               # for real: writes the backfill
 """
 import argparse
 import types
 import urllib.parse
+import os
+import sys
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _engine(server: str, database: str):

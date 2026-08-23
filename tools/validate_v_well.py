@@ -14,7 +14,7 @@ Runs a battery of checks and prints pass/fail for each:
   8. Sample wells appear with correct values
 
 Run from V3 root:
-    python validate_v_well.py
+    python tools/validate_v_well.py
 
 Exits 0 if all checks pass, 1 if any fail. Use as a smoke test before
 migrating page consumers.
@@ -26,6 +26,12 @@ from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import text
+import os
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # V3 has dw_utils with make_engine — use the existing connection logic
 sys.path.insert(0, str(Path(__file__).parent))

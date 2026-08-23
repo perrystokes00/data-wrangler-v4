@@ -4,7 +4,7 @@ extractors on the SAME file and diff the rows they produce, key by key. No DB,
 no pipeline, no baseline — pure extractor-vs-extractor.
 
 Run from repo root with the venv active:
-    python compare_extractors.py
+    python tools/compare_extractors.py
 
 For PDF and DOCX both paths call the SAME loader (pdf_document_loader /
 docx_document_loader), so they should come back IDENTICAL — that confirms the
@@ -15,6 +15,13 @@ Provenance columns (INVENTORY_ID, SOURCE, ROW_*, …) are expected to differ and
 are excluded from the field comparison. Edit PATHS below if yours differ.
 """
 import traceback
+import os
+import sys
+
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. app_v4.py does the same insert; see tools/reconcile_orphans.py.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 BASE = (r"C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler"
         r"\training\training_data")
