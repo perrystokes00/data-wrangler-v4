@@ -349,6 +349,82 @@ def _reference_fk_predicates(cur, dv_table, shared, alias="m"):
     return "".join(preds), cols
 
 
+def _parent_fk_predicates(cur, dv_table, shared, alias="m"):
+    """Predicates that HOLD rows whose PARENT row does not exist, instead of
+    letting the INSERT abort the whole mirror on a 547.
+
+    The sibling of _reference_fk_predicates, for the other half of the FK graph.
+    That one guards dv_r_* vocabulary; this one guards real parent rows —
+    dv_well_log for dv_well_log_curve, dv_well_core for dv_well_core_sample —
+    and, unlike it, handles COMPOUND keys. `if len(ccols) != 1: continue` was
+    the documented gap, and fk_log_curve_log (uwi, log_id) is what fell through
+    it: 153 curve rows whose log header had never been staged took the whole
+    dv_well_log_curve promote down with a FOREIGN KEY 547, every run.
+
+    WHY THIS IS SAFE DESPITE THE "PARENTS PROMOTE IN THE SAME PASS" RULE that
+    keeps _reference_fk_predicates away from parent tables: discover_tables
+    topologically sorts mirrors parents-first from the live FK edges, so by the
+    time a child is promoted its parent has ALREADY had its turn. A parent row
+    still missing here is one that is not coming, and holding the child is the
+    honest outcome — the row stays in the mirror with a reason instead of
+    failing eighteen other tables' worth of work alongside it.
+
+    dv_well is deliberately excluded: the detail path already gates on it
+    explicitly (`EXISTS dv_well WHERE UWI = _norm(m.UWI)`) with UWI-14
+    normalisation this generic comparison cannot reproduce. Adding a second,
+    subtly different test for the same thing is how two gates come to disagree.
+
+    NULL SEMANTICS MATCH SQL SERVER'S. A composite FK is NOT enforced when ANY
+    of its columns is NULL, so the predicate passes on any-NULL rather than
+    all-NULL — a stricter test here would hold rows the database would have
+    accepted.
+
+    Returns (sql, [label, ...], [body, ...]) — the bodies are the same
+    predicates unwrapped, so the caller can count what THIS gate actually held
+    rather than listing every gate that might have.
+    """
+    cur.execute(
+        "SELECT fk.name, rt.name, cpa.name, cref.name "
+        "FROM sys.foreign_keys fk "
+        "JOIN sys.foreign_key_columns fkc "
+        "       ON fkc.constraint_object_id = fk.object_id "
+        "JOIN sys.tables  pt  ON pt.object_id = fk.parent_object_id "
+        "JOIN sys.schemas ps  ON ps.schema_id = pt.schema_id "
+        "JOIN sys.tables  rt  ON rt.object_id = fk.referenced_object_id "
+        "JOIN sys.columns cpa ON cpa.object_id = fkc.parent_object_id "
+        "                    AND cpa.column_id = fkc.parent_column_id "
+        "JOIN sys.columns cref ON cref.object_id = fkc.referenced_object_id "
+        "                     AND cref.column_id = fkc.referenced_column_id "
+        "WHERE ps.name = ? AND pt.name = ? "
+        "  AND rt.name NOT LIKE 'dv[_]r[_]%' "
+        "  AND rt.name <> 'dv_well' "
+        "  AND rt.object_id <> pt.object_id "        # not self-referencing
+        "ORDER BY fk.name, fkc.constraint_column_id",
+        DV_SCHEMA, dv_table)
+
+    by_fk: dict = {}
+    for fk_name, ref_table, local_col, ref_col in cur.fetchall():
+        by_fk.setdefault(fk_name, {"ref": ref_table, "cols": []})
+        by_fk[fk_name]["cols"].append((local_col, ref_col))
+
+    shared_lower = {s.lower() for s in shared}
+    preds, labels, bodies = [], [], []
+    for fk_name, d in by_fk.items():
+        cols = d["cols"]
+        # Every column of the key must be one we are actually promoting; a key
+        # we only half-supply is not a key we can test.
+        if not all(lc.lower() in shared_lower for lc, _ in cols):
+            continue
+        nulls = " OR ".join(f"{alias}.[{lc}] IS NULL" for lc, _ in cols)
+        join = " AND ".join(f"r.[{rc}] = {alias}.[{lc}]" for lc, rc in cols)
+        body = (f"({nulls} OR EXISTS "
+                f"(SELECT 1 FROM {DV_SCHEMA}.[{d['ref']}] r WHERE {join}))")
+        preds.append(" AND " + body)
+        bodies.append(body)
+        labels.append(f"{d['ref']}({','.join(lc for lc, _ in cols)})")
+    return "".join(preds), labels, bodies
+
+
 def _fill_cat_coords_from_gold(cur, cat, lat_col, lon_col, uwi_filter, params):
     """Pre-gate coord enrichment: fill cat_well surface coords so a well whose
     location is already KNOWN promotes instead of being held by
@@ -590,18 +666,43 @@ def _promote_detail(cur, dv, cat, shared, uwi_filter, params, apply):
     # the reference, so an unseeded code parks the row instead of aborting the
     # batch with a 547 FK violation.
     ref_pred, held_cols = _reference_fk_predicates(cur, dv, shared, "m")
-    where = base_where + ref_pred
+    # ...and hold rows whose PARENT ROW is missing, for the same reason and by
+    # the same mechanism. Without this a single orphan takes the whole mirror
+    # down with a 547 and every other row in it stays put — 153 log curves did
+    # exactly that. See _parent_fk_predicates for why this is safe to evaluate
+    # here (discover_tables promotes parents first).
+    par_pred, par_labels, par_bodies = _parent_fk_predicates(cur, dv, shared, "m")
+    where = base_where + ref_pred + par_pred
 
     cur.execute(f"SELECT COUNT(*) FROM {CAT_SCHEMA}.{cat} m WHERE {where}",
                 *params)
     eligible = cur.fetchone()[0]
     note = "ok" if has_inv else "insert-only (no INVENTORY_ID — run migration)"
-    if held_cols:
+    if held_cols or par_labels:
         cur.execute(f"SELECT COUNT(*) FROM {CAT_SCHEMA}.{cat} m "
                     f"WHERE {base_where}", *params)
         held = (cur.fetchone()[0] or 0) - (eligible or 0)
         if held > 0:
-            note += f" · held {held} (unresolved {','.join(held_cols)})"
+            # NAME THE GATE THAT ACTUALLY FIRED. Listing every label that
+            # could be responsible sends the reader after three vocabulary
+            # codes when the real answer is a missing parent row — the same
+            # "say WHICH reason" problem as the well-header hold. The parent
+            # gate is counted on its own; the reference labels keep their
+            # existing (looser) reporting rather than being changed here.
+            _par_held = 0
+            if par_bodies:
+                _neg = " OR ".join(f"NOT {b}" for b in par_bodies)
+                cur.execute(f"SELECT COUNT(*) FROM {CAT_SCHEMA}.{cat} m "
+                            f"WHERE {base_where} AND ({_neg})", *params)
+                _par_held = cur.fetchone()[0] or 0
+            _bits = []
+            if held_cols:
+                _bits.append("unresolved " + ",".join(held_cols))
+            if _par_held:
+                _bits.append(f"{_par_held} waiting on a parent row that does "
+                             f"not exist: {','.join(par_labels)}")
+            note += f" · held {held}" + (
+                f" ({'; '.join(_bits)})" if _bits else "")
     if not apply or not eligible:
         return (cat, eligible, 0, 0, note)
 
