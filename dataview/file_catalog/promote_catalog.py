@@ -1017,15 +1017,64 @@ def promote_seismic(cur, apply, log):
         GROUP BY {_norm}
         HAVING MAX(CASE WHEN {_MAPPABLE} THEN 1 ELSE 0 END) = 0""")
     _held_surveys = sorted(r[0] for r in cur.fetchall())
-    held = len(_held_surveys)
     if _held_surveys:
-        log(f"  seismic gate: {held} survey(s) HELD — no outline and no bbox, "
-            f"nothing to draw. Find/arm the CRS and re-extract, then re-run:")
+        log(f"  seismic gate: {len(_held_surveys)} survey(s) HELD — no outline "
+            f"and no bbox, nothing to draw. Find/arm the CRS and re-extract, "
+            f"then re-run:")
         for _hs in _held_surveys:
             log(f"      - {_hs}")
 
+    # HELD FOR HAVING NO NAME AT ALL — and invisible until now, because the
+    # query above filters on _NAMED. A file whose SURVEY_NAME is NULL fails
+    # that predicate, so it fell out of BOTH `eligible` and `held` and was
+    # reported as neither promoted nor held. That is precisely the collapse
+    # this module already warns about at the top ("stepped past — reported as
+    # neither moved nor held"), and CLAUDE.md's four states exist to stop it:
+    # Held is a file blocked by a NAMED gate, and it must say which.
+    #
+    # Observed 23 Aug after a reload: five Teapot 2D lines held here while
+    # promote logged "1 eligible, 0 held" and Perry reasonably read that as
+    # the other five having vanished. They had not — their SEG-Y rev-0 card
+    # image names no survey (the extractor refuses "AREA MAP ID", which is the
+    # blank form's printed labels), so they wait for a human to name them.
+    #
+    # A REJECTED file is NOT held: it is deliberately out of scope, which is
+    # why this reuses _NOT_REJECTED rather than simply negating _NAMED.
+    _gfc = object_exists(cur, "file_catalog", "GLOBAL_FILE_CATALOG")
+    _sel = "RIGHT(g.FILE_PATH, 52)" if _gfc else "CAST(s.INVENTORY_ID AS varchar(40))"
+    _join = ("LEFT JOIN file_catalog.GLOBAL_FILE_CATALOG g "
+             "ON g.INVENTORY_ID = s.INVENTORY_ID") if _gfc else ""
+    cur.execute(f"""
+        SELECT {_sel}
+        FROM file_catalog.FILE_SEIS_HEADER s
+        {_join}
+        WHERE NULLIF(LTRIM(RTRIM(s.SURVEY_NAME)), '') IS NULL
+          AND ({_NOT_REJECTED})""")
+    _held_unnamed = sorted(str(r[0]) for r in cur.fetchall() if r[0] is not None)
+    if _held_unnamed:
+        log(f"  seismic gate: {len(_held_unnamed)} file(s) HELD — no survey "
+            f"name. The header named no survey, or named only card-image "
+            f"labels, which are refused rather than promoted as a survey. "
+            f"Assign a survey name in Browse & View, then re-run:")
+        for _hu in _held_unnamed[:10]:
+            log(f"      - {_hu}")
+        if len(_held_unnamed) > 10:
+            log(f"      … and {len(_held_unnamed) - 10} more")
+
+    # SURVEYS and FILES are different units and the note says so rather than
+    # quietly adding them: an unnamed file has no survey to be counted as.
+    held = len(_held_surveys) + len(_held_unnamed)
+    # _gate_note, not _note: this function reuses _note further down for the
+    # dv_seis_line log, and a name collision here would make the returned note
+    # depend on how far execution got.
+    _gate_note = "seismic survey"
+    if _held_surveys or _held_unnamed:
+        _gate_note += (" · held " + " + ".join(filter(None, [
+            f"{len(_held_surveys)} unmappable survey(s)" if _held_surveys else "",
+            f"{len(_held_unnamed)} unnamed file(s)" if _held_unnamed else ""])))
+
     if not apply or not eligible:
-        return ("dv_seis_set", eligible, 0, held, "seismic survey")
+        return ("dv_seis_set", eligible, 0, held, _gate_note)
 
     # Pre-pass: some WKT (e.g. projected SEG-Y coords like 11770231, way outside
     # ±180 lon) throws at geography CONSTRUCTION — before MakeValid/STIsValid can
@@ -1293,7 +1342,9 @@ def promote_seismic(cur, apply, log):
         log(f"{'dv_seis_line':30} {vol_merged:>9} {vol_merged:>8} "
             f"{len(_held_lines):>9}  {_note}")
 
-    return ("dv_seis_set", eligible, merged, held, "seismic survey")
+    # The SAME note the dry run returns, so "what would happen" and "what
+    # happened" describe the held files identically.
+    return ("dv_seis_set", eligible, merged, held, _gate_note)
 
 
 

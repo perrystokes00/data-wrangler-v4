@@ -884,6 +884,40 @@ def tier_units(res, verbose=False):
     check("a load that cannot register its file reports it",
           _load_reports_provenance)
 
+    # 14. HELD IS NOT NOTHING. promote_seismic counted held surveys with a
+    #     query filtered on _NAMED, so a file with NO survey name failed that
+    #     predicate and fell out of BOTH `eligible` and `held` — reported as
+    #     neither promoted nor held, the exact collapse promote_catalog's own
+    #     header warns about and CLAUDE.md's four states exist to prevent.
+    #
+    #     Seen 23 Aug: five Teapot 2D lines held for having no name while
+    #     promote logged "1 eligible, 0 held". Now: "held=5 · 5 unnamed
+    #     file(s)", each named, with the remedy.
+    def _held_is_not_nothing():
+        import inspect
+        from dataview.file_catalog import promote_catalog as pc
+        src = inspect.getsource(pc.promote_seismic)
+        assert "_held_unnamed" in src, \
+            "promote_seismic no longer counts files held for having no survey " \
+            "name — they revert to being reported as neither promoted nor held"
+        assert "len(_held_surveys) + len(_held_unnamed)" in src, \
+            "the held tally dropped one of its two gates"
+        # A REJECTED file is out of scope, NOT held — so the unnamed query must
+        # reuse _NOT_REJECTED rather than simply negating _NAMED, or rejecting
+        # a file would make it reappear as a thing awaiting a name.
+        i = src.find("_held_unnamed = ")
+        assert i > 0
+        window = src[max(0, i - 900):i]
+        assert "_NOT_REJECTED" in window, \
+            "the unnamed-hold query does not exclude rejected files — a file " \
+            "marked bad would be reported as held, awaiting a name it will " \
+            "never be given"
+        # the dry run and the apply path must describe holds identically
+        assert src.count("_gate_note)") >= 2, \
+            "the apply path no longer returns the same note as the dry run"
+    check("seismic: a file held for having no name is reported, not skipped",
+          _held_is_not_nothing)
+
     return res
 
 
