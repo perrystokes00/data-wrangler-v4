@@ -6555,66 +6555,15 @@ def _well_key_grid(engine):
 
 
 def _seis_survey_grid(engine):
-    from sqlalchemy import text as _t
-    from dataview.core import path_identity as _pi
+    """Delegates to the ONE implementation — see seis_survey_assign.
 
-    with engine.connect() as con:
-        rows = con.execute(_t("""
-            SELECT sh.SEIS_HEADER_ID AS id, sh.INVENTORY_ID AS inv,
-                   g.FILE_NAME AS fname, g.FILE_PATH AS path,
-                   sh.SURVEY_NAME AS survey
-            FROM file_catalog.FILE_SEIS_HEADER sh
-            JOIN file_catalog.GLOBAL_FILE_CATALOG g
-                   ON g.INVENTORY_ID = sh.INVENTORY_ID
-            WHERE sh.SURVEY_NAME IS NULL OR LTRIM(RTRIM(sh.SURVEY_NAME)) = ''
-            ORDER BY g.FILE_NAME""")).fetchall()
+    This page and its twin each carried a private copy and they had already
+    DRIFTED: a data_editor version querying different columns with a LEFT JOIN
+    here, a paged text_input grid there. Two spellings of one feature is the
+    shape that let the escapechar bug return through a fourth writer.
 
-    if not rows:
-        st.success("Every seismic header already has a survey name.")
-        return
-
-    total = len(rows)
-    rows = rows[:_REVIEW_PAGE]
-    if total > _REVIEW_PAGE:
-        st.caption(f"{total} files need a survey name — showing the first "
-                   f"{_REVIEW_PAGE}. Save these, then the next batch appears.")
-    else:
-        st.caption(f"{total} file(s) need a survey name. Edit the value, then Save.")
-
-    h1, h2, h3, h4 = st.columns([3, 2, 2, 2])
-    h1.markdown("**File**")
-    h2.markdown("**Current**")
-    h3.markdown("**Guess (from path)**")
-    h4.markdown("**Assign survey**")
-
-    inputs = []  # (header_id, widget_key)
-    for r in rows:
-        g = _pi.survey_from_path(r.path or "") or ""
-        key = f"pl_seis_{r.id}"
-        if key not in st.session_state:
-            st.session_state[key] = g
-        c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
-        c1.write(r.fname or _pi._basename(r.path or "") or f"(inventory {r.inv})")
-        c2.write(r.survey or "—")
-        c3.write(g or "—")
-        c4.text_input("assign survey", key=key, label_visibility="collapsed",
-                      placeholder="survey name")
-        inputs.append((r.id, key))
-
-    if st.button("💾 Save survey names", type="primary", key="pl_seis_save"):
-        ups = []
-        for rid, key in inputs:
-            v = str(st.session_state.get(key, "") or "").strip()
-            if v:
-                ups.append({"id": rid, "v": v})
-        if not ups:
-            st.warning("No survey names to write.")
-        else:
-            with engine.begin() as con:
-                for up in ups:
-                    con.execute(_t(
-                        "UPDATE file_catalog.FILE_SEIS_HEADER "
-                        "SET SURVEY_NAME=:v, SURVEY_NAME_SOURCE='manual' "
-                        "WHERE SEIS_HEADER_ID=:id"), up)
-            st.success(f"Wrote {len(ups)} survey name(s).")
-            st.rerun()
+    The shared module also adds GROUP ASSIGN, which is the common case: 2D
+    lines arrive as a set and one survey spans all of them.
+    """
+    from dataview.file_catalog.seis_survey_assign import seis_survey_grid
+    return seis_survey_grid(engine)

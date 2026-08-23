@@ -918,6 +918,47 @@ def tier_units(res, verbose=False):
     check("seismic: a file held for having no name is reported, not skipped",
           _held_is_not_nothing)
 
+    # 15. ONE survey-name writer, and one panel. page_workbench and
+    #     page_file_catalog each carried a private _seis_survey_grid and they
+    #     had already DRIFTED — a data_editor version querying different
+    #     columns with a LEFT JOIN in one, a paged text_input grid in the
+    #     other. Same shape as the FILE_SEIS_HEADER MERGE that had four
+    #     writers: a fix to one silently misses whichever page you are on.
+    def _one_survey_assign_ui():
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent
+        writers = []
+        for py in (root / "dataview").rglob("*.py"):
+            if "_attic" in py.parts or "_quarantine" in py.parts:
+                continue
+            src = py.read_text(encoding="utf-8", errors="replace")
+            if "SET SURVEY_NAME=:v" in src:
+                writers.append(py.name)
+        assert writers == ["seis_survey_assign.py"], (
+            "the manual survey-name UPDATE is spelled out in " +
+            ", ".join(sorted(writers)) +
+            " — import seis_survey_assign.seis_survey_grid instead of copying it")
+        # and the panel must keep the group path, which is the whole point:
+        # 2D lines arrive as a set and typing one name per file is how five
+        # lines of one survey become five surveys
+        from dataview.file_catalog import seis_survey_assign as _ssa
+        s = (root / "dataview" / "file_catalog" /
+             "seis_survey_assign.py").read_text(encoding="utf-8", errors="replace")
+        assert "Apply to all" in s, "the group-assign control is gone"
+        assert "'manual'" in s or '"manual"' in s, \
+            "a typed survey name must be stamped SURVEY_NAME_SOURCE='manual', " \
+            "or enrich refills it from the file name and a re-extract blanks it"
+        # Streamlit scar #6: the bulk fill must go through a REQUEST consumed
+        # before the widgets are drawn, never a post-instantiation assignment
+        assert "_BULK_REQ" in s and "st.session_state.pop(_BULK_REQ" in s, \
+            "the group assign no longer uses a request flag consumed before " \
+            "the per-file widgets are created — assigning a widget's own key " \
+            "after instantiation raises on a LATER run, on whatever page " \
+            "draws next"
+        assert callable(_ssa.seis_survey_grid)
+    check("seismic: one survey-assign panel, with the group path intact",
+          _one_survey_assign_ui)
+
     return res
 
 

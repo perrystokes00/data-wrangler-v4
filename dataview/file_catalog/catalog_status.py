@@ -128,7 +128,13 @@ def _unresolved(col: str) -> str:
 # diagnosis instead of a hunt through four pages. Keep in step with the panel in
 # page_workbench._tab_status.
 CLEAR_ROUTE = {
-    _HOLD_NO_UWI: "Assign a UWI in Browse & View, or via the Excel round-trip.",
+    # NAME THE TAB THE PANEL IS ACTUALLY IN. Both of these said "Browse &
+    # View" and the panel is in Run Pipeline — 23 Aug, Perry went looking for
+    # the survey-name control where this text sent him and there was nothing
+    # there. A remedy that points at the wrong page is worse than none: it
+    # reads as "the feature does not exist".
+    _HOLD_NO_UWI: ("Run Pipeline -> (4) Key Wells & Surveys -> "
+                   "\"Wells (need UWI)\", or via the Excel round-trip."),
     _HOLD_NO_COORDS: ("Run coord enrich (gold, then dv_well). If the well is "
                       "genuinely new and coordless, the document must supply a "
                       "location -- the gate is not waived."),
@@ -139,7 +145,10 @@ CLEAR_ROUTE = {
     _HOLD_WELL_MISSING: ("The well is in neither dv_well nor cat_well -- no "
                          "header has ever been captured for it. Catalog the "
                          "document that carries the header, or reject these."),
-    _HOLD_SEIS_UNNAMED: "Assign a survey name in Browse & View.",
+    _HOLD_SEIS_UNNAMED: ("Run Pipeline -> (4) Key Wells & Surveys -> "
+                         "\"Seismic (need survey)\". 2D lines usually share one "
+                         "survey -- use \"Apply to all\" rather than typing it "
+                         "per file."),
     _HOLD_SEIS_UNMAPPABLE: ("Arm a CRS and re-extract so the file gets a survey "
                             "outline or a complete bbox."),
 }
