@@ -945,12 +945,24 @@ def tier_units(res, verbose=False):
         from dataview.file_catalog import seis_survey_assign as _ssa
         s = (root / "dataview" / "file_catalog" /
              "seis_survey_assign.py").read_text(encoding="utf-8", errors="replace")
-        assert "st.multiselect" in s, \
-            "the group selection is gone — a name can no longer be applied to " \
-            "a chosen set of lines, only file by file"
-        assert "default=_all_ids" in s, \
-            "the group no longer defaults to every held file; the common case " \
-            "(all these lines are one survey) stops being the zero-click path"
+        assert "seis_ck_" in s and "st.session_state[k] = True" in s, \
+            "the checkbox grid is gone — a name can no longer be applied to a " \
+            "chosen set of lines, only file by file"
+        assert "Select all" in s, \
+            "select-all is gone; the list can run to REVIEW_PAGE files and " \
+            "ticking them individually is the thing this panel exists to avoid"
+        # SELECT-ALL MUST BE A REQUEST consumed before the checkboxes exist.
+        # Writing their keys directly is the obvious implementation and it is
+        # the one that raises on a LATER run, on whatever page draws next
+        # (Streamlit scar #6) — so assert the flag, not just the feature.
+        assert "_SEL_REQ" in s and "st.session_state.pop(_SEL_REQ" in s, \
+            "select-all no longer routes through a request flag consumed " \
+            "before the checkboxes are created — assigning a widget's own key " \
+            "after instantiation crashes somewhere else entirely"
+        _pop = s.index("st.session_state.pop(_SEL_REQ")
+        assert _pop < s.index("st.checkbox("), \
+            "the select-all request is consumed AFTER a checkbox is drawn; it " \
+            "must be popped before any of them exist"
         assert "'manual'" in s or '"manual"' in s, \
             "a typed survey name must be stamped SURVEY_NAME_SOURCE='manual', " \
             "or enrich refills it from the file name and a re-extract blanks it"

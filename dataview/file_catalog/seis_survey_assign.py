@@ -25,27 +25,38 @@ decision — so this panel is where the decision gets made.
 
 THE GROUP IS THE UNIT, NOT THE FILE
 -----------------------------------
-2D lines arrive as a SET: lineA..lineE are five files of ONE survey. The first
-cut of this panel rendered a text box per file and the operator typed the same
-name five times, which is transcription, not review — and transcription is
-where a typo becomes two surveys that should have been one. The per-file
-"guess from path" made it worse by offering LINEA, LINEB, LINEC… — a different
-name for every line, as the path of least resistance.
+2D lines arrive as a SET: lineA..lineE are five files of ONE survey. Three
+cuts to get the interaction right, each fixing what the last one cost:
 
-The second cut added "apply to all", which still left five boxes to save and
-could not express "these three, not those two".
+  1. a text box per file          — typing one name five times is
+                                    transcription, not review, and the
+                                    per-file "guess from path" offered LINEA,
+                                    LINEB, LINEC…, a different name per line
+  2. + "apply to all"             — still two actions after typing, and
+                                    all-or-nothing: no way to say "these
+                                    three, not those two"
+  3. + a multiselect              — expressed a subset, but a wall of chips
+                                    once the list is long
+  4. a CHECKBOX GRID with select
+     all / clear                  — scannable at length, one name field, one
+                                    write. Where it stands.
 
-So the group is the primary object here: ONE name, a selection of the lines it
-covers (all of them by default, because that is the common case), one write.
-Per-file editing is still available behind a toggle for the genuinely mixed
-case — a toggle rather than an expander, because this panel renders INSIDE an
-expander on Status & Backlog and Streamlit forbids nesting them.
+The per-file path survives behind a toggle for the genuinely mixed case — a
+toggle rather than an expander, because this panel renders INSIDE an expander
+on Status & Backlog and Streamlit forbids nesting them.
 """
 from __future__ import annotations
 
 import streamlit as st
 
-REVIEW_PAGE = 200      # cap rows rendered at once (text_inputs are cheap, not free)
+REVIEW_PAGE = 200      # cap rows rendered at once (widgets are cheap, not free)
+
+# SELECT-ALL IS A REQUEST, NEVER A DIRECT WRITE. Streamlit scar #6: a widget's
+# own key must not be assigned after the widget is instantiated — it raises on
+# a LATER run, on whatever page draws next, so the crash lands far from its
+# cause. The buttons record an intent and rerun; it is honoured at the top of
+# the next run, ahead of every checkbox.
+_SEL_REQ = "seis_sel_req"
 
 _SQL_UNNAMED = """
     SELECT sh.SEIS_HEADER_ID AS id, sh.INVENTORY_ID AS inv,
@@ -62,6 +73,7 @@ _SQL_UNNAMED = """
 # _SQL_SEIS_MERGE treats 'manual' as outranking everything automatic, so a
 # re-extract cannot blank it. Writing the name without the source is how a
 # survey a person named comes back as 'lineA' with nothing recording the loss.
+# ONE constant, so neither write path can set the name and forget the source.
 _SQL_SET_NAME = ("UPDATE file_catalog.FILE_SEIS_HEADER "
                  "SET SURVEY_NAME=:v, SURVEY_NAME_SOURCE='manual' "
                  "WHERE SEIS_HEADER_ID=:id")
@@ -80,6 +92,9 @@ def seis_survey_grid(engine):
     from sqlalchemy import text as _t
     from dataview.core import path_identity as _pi
 
+    # CONSUMED BEFORE ANY CHECKBOX EXISTS. See _SEL_REQ.
+    sel_req = st.session_state.pop(_SEL_REQ, None)
+
     with engine.connect() as con:
         rows = con.execute(_t(_SQL_UNNAMED)).fetchall()
 
@@ -89,55 +104,74 @@ def seis_survey_grid(engine):
 
     total = len(rows)
     rows = rows[:REVIEW_PAGE]
-    if total > REVIEW_PAGE:
-        st.caption(f"{total} files need a survey name — showing the first "
-                   f"{REVIEW_PAGE}.")
 
-    def _label(r):
-        t = (r.stype or "").strip()
-        return f"{r.fname or _pi._basename(r.path or '') or r.inv}" + (f"  ({t})" if t else "")
-
-    _by_id = {r.id: r for r in rows}
-    _labels = {r.id: _label(r) for r in rows}
-    _all_ids = list(_by_id)
-
-    # ── the group path: one name, one selection, one write ──────────────────
     st.markdown("**Name one survey**")
-    st.caption(f"{total} file(s) need a survey name. 2D lines usually belong to "
-               f"ONE survey — name it once here. Everything is selected by "
-               f"default; deselect anything that belongs to a different survey.")
+    st.caption(
+        f"{total} file(s) need a survey name"
+        + (f" — showing the first {REVIEW_PAGE}." if total > REVIEW_PAGE else ".")
+        + " 2D lines usually all belong to ONE survey: type it once, tick the "
+          "lines it covers, and press Assign.")
 
     name = st.text_input(
         "Survey name", key="seis_grp_name",
         placeholder="e.g. NPR-3 2D",
-        help="Stored with SURVEY_NAME_SOURCE='manual', which stops enrich "
-             "and re-extract overwriting it. It does NOT survive a database "
-             "reset.")
+        help="Stored with SURVEY_NAME_SOURCE='manual', which stops enrich and "
+             "re-extract overwriting it. It does NOT survive a database reset.")
 
-    # default=all — the common case is that every held line is one survey, so
-    # the zero-click path is: type the name, press the button.
-    picked = st.multiselect(
-        "Files in this survey", options=_all_ids, default=_all_ids,
-        format_func=lambda i: _labels.get(i, str(i)),
-        key="seis_grp_pick")
+    # ── select all / clear ──────────────────────────────────────────────────
+    # Buttons rather than a master checkbox: a checkbox whose state drives
+    # other checkboxes has to detect its own transition, and the obvious way
+    # to do that is to write their keys — which is the thing scar #6 forbids.
+    b1, b2, b3 = st.columns([1, 1, 4])
+    if b1.button("☑ Select all", key="seis_sel_all", use_container_width=True):
+        st.session_state[_SEL_REQ] = True
+        st.rerun()
+    if b2.button("☐ Clear", key="seis_sel_none", use_container_width=True):
+        st.session_state[_SEL_REQ] = False
+        st.rerun()
 
-    _n = len(picked)
-    if st.button(f"💾 Assign this survey to {_n} file(s)", type="primary",
-                 key="seis_grp_save", disabled=not _n):
-        _v = str(name or "").strip()
-        if not _v:
+    # ── the grid ────────────────────────────────────────────────────────────
+    h1, h2, h3, h4 = st.columns([4, 1, 2, 3])
+    h1.markdown("**File**")
+    h2.markdown("**Type**")
+    h3.markdown("**Current**")
+    h4.markdown("**Guess (from path)**")
+
+    picked = []
+    for r in rows:
+        k = f"seis_ck_{r.id}"
+        if sel_req is not None:
+            st.session_state[k] = sel_req      # before the widget is created
+        elif k not in st.session_state:
+            st.session_state[k] = True         # default: everything is one survey
+        c1, c2, c3, c4 = st.columns([4, 1, 2, 3])
+        on = c1.checkbox(r.fname or _pi._basename(r.path or "") or str(r.inv),
+                         key=k)
+        c2.write((r.stype or "—"))
+        c3.write(r.survey or "—")
+        c4.write(_pi.survey_from_path(r.path or "") or "—")
+        if on:
+            picked.append(r.id)
+
+    n = len(picked)
+    b3.caption(f"{n} of {len(rows)} selected")
+
+    if st.button(f"💾 Assign this survey to {n} file(s)", type="primary",
+                 key="seis_grp_save", disabled=not n):
+        v = str(name or "").strip()
+        if not v:
             st.warning("Type a survey name first.")
         else:
-            n = _write(engine, [{"id": i, "v": _v} for i in picked], _t)
-            st.success(f"Named {n} file(s) “{_v}”. Re-run promote to lift them "
-                       f"into dv_seis_set.")
+            wrote = _write(engine, [{"id": i, "v": v} for i in picked], _t)
+            st.success(f"Named {wrote} file(s) “{v}”. Re-run promote to lift "
+                       f"them into dv_seis_set.")
             st.rerun()
 
     # ── the mixed case, behind a toggle ─────────────────────────────────────
-    # A TOGGLE, NOT AN EXPANDER. This panel is rendered inside an expander on
-    # Status & Backlog, and Streamlit forbids nesting them — the same reason
-    # _pipeline_stages reveals Triage & Review with a toggle instead.
-    if not st.checkbox("These are different surveys — let me name them one by one",
+    # A TOGGLE, NOT AN EXPANDER — this panel is rendered inside an expander on
+    # Status & Backlog, and Streamlit forbids nesting them. Same reason
+    # _pipeline_stages reveals Triage & Review with a toggle.
+    if not st.checkbox("These are different surveys — name them one by one",
                        key="seis_grp_per_file"):
         return
 
@@ -145,23 +179,15 @@ def seis_survey_grid(engine):
                "it offers a different name for every line, which is exactly how "
                "one survey becomes five. Use it only when the files really are "
                "unrelated.")
-    h1, h2, h3, h4 = st.columns([3, 2, 2, 2])
-    h1.markdown("**File**")
-    h2.markdown("**Current**")
-    h3.markdown("**Guess (from path)**")
-    h4.markdown("**Assign survey**")
-
     inputs = []
     for r in rows:
         g = _pi.survey_from_path(r.path or "") or ""
         key = f"pl_seis_{r.id}"
         if key not in st.session_state:
             st.session_state[key] = g
-        c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
-        c1.write(_labels[r.id])
-        c2.write(r.survey or "—")
-        c3.write(g or "—")
-        c4.text_input("assign survey", key=key, label_visibility="collapsed",
+        c1, c2 = st.columns([4, 3])
+        c1.write(r.fname or _pi._basename(r.path or "") or str(r.inv))
+        c2.text_input("assign survey", key=key, label_visibility="collapsed",
                       placeholder="survey name")
         inputs.append((r.id, key))
 
@@ -172,7 +198,7 @@ def seis_survey_grid(engine):
         if not ups:
             st.warning("No survey names to write.")
         else:
-            n = _write(engine, ups, _t)
-            st.success(f"Wrote {n} survey name(s). Re-run promote to lift them "
-                       f"into dv_seis_set.")
+            wrote = _write(engine, ups, _t)
+            st.success(f"Wrote {wrote} survey name(s). Re-run promote to lift "
+                       f"them into dv_seis_set.")
             st.rerun()
