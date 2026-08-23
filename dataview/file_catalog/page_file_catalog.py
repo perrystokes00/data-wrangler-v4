@@ -1451,7 +1451,13 @@ def _tab_pipeline(engine, dialect):
                     m4.metric("Skipped", f"{res.get('skipped', 0):,}")
                     _errs = res.get("errors") or []
                     if _errs:
-                        with st.expander(f"⚠️ Failures ({len(_errs)})"):
+                        # Inline in a bordered box, not an expander: this
+                        # runs inside the ⑤ Deep Catalog expander and
+                        # Streamlit forbids nesting. A toggle would not work
+                        # either — the body renders only on the run where
+                        # the button was pressed.
+                        with st.container(border=True):
+                            st.markdown(f"**⚠️ Failures ({len(_errs)})**")
                             for _e in _errs:
                                 st.text(_e)
                 st.code("\n".join(lines) or "(no output)")

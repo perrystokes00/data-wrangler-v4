@@ -1242,6 +1242,24 @@ def _tab_my_work(engine, dialect, user):
             f"{a['file_count']:,} files · Due {due}",
             expanded=False
         ):
+            # Result of a "Catalog ALL" from the PREVIOUS run. Reported here
+            # because the run that produces it ends in st.rerun(), which
+            # throws away anything drawn before it. A bordered box, not an
+            # expander — this is already inside one.
+            _cat_all = st.session_state.pop(
+                f"mw_cat_all_result_{a['assignment_id']}", None)
+            if _cat_all:
+                with st.container(border=True):
+                    st.success(f"✅ {_cat_all['ok']} cataloged · "
+                               f"{_cat_all['err']} error(s).")
+                    if _cat_all["reasons"]:
+                        st.markdown(f"**⚠ {_cat_all['err']} error(s) — details**")
+                        for _reason, _cnt in _cat_all["reasons"]:
+                            st.write(f"**{_cnt}×** {_reason}")
+                        st.caption("first 10 files:")
+                        for _m in _cat_all["files"]:
+                            st.text(_m)
+
             # Get files for this assignment
             with engine.connect() as conn:
                 file_rows = conn.execute(text(f"""
@@ -1427,20 +1445,20 @@ def _tab_my_work(engine, dialect, user):
                                         f"{row.get('file_name','?')}: {_msg}")
                             prog.empty()
                             st.session_state.pop(f"mw_confirm_all_{aid}", None)
-                            st.success(f"✅ {ok} cataloged · {err} error(s).")
-                            if _err_msgs:
-                                # show the distinct failure reasons so a whole
-                                # format failing the same way is obvious
-                                from collections import Counter
-                                _reasons = Counter(
-                                    m.split(": ", 1)[-1] for m in _err_msgs)
-                                with st.expander(f"⚠ {err} error(s) — details",
-                                                 expanded=True):
-                                    for _reason, _cnt in _reasons.most_common():
-                                        st.write(f"**{_cnt}×** {_reason}")
-                                    st.caption("first 10 files:")
-                                    for _m in _err_msgs[:10]:
-                                        st.text(_m)
+                            # Stashed for the run AFTER the st.rerun()
+                            # below. Reporting here was lost twice over: an
+                            # expander cannot nest inside this assignment's
+                            # expander, and the rerun discards everything
+                            # drawn before it — so neither the success line
+                            # nor the failure detail ever reached the screen.
+                            from collections import Counter
+                            st.session_state[f"mw_cat_all_result_{aid}"] = {
+                                "ok": ok, "err": err,
+                                "reasons": Counter(
+                                    m.split(": ", 1)[-1]
+                                    for m in _err_msgs).most_common(),
+                                "files": _err_msgs[:10],
+                            }
                             st.rerun()
                         if n.button("❌ Cancel", key=f"mw_cat_all_no_{aid}"):
                             st.session_state.pop(f"mw_confirm_all_{aid}", None)
@@ -1643,7 +1661,11 @@ def _tab_progress(engine, dialect, user, role):
                         "group_file_id","inventory_id","file_name",
                         "file_ext","catalog_status","file_path"
                     ])
-                    with st.expander("👁 Browse & view files"):
+                    # Inline in a bordered box, not an expander: this runs
+                    # inside the cataloger expander above and Streamlit
+                    # forbids nesting. That outer expander is the disclosure.
+                    with st.container(border=True):
+                        st.markdown("**👁 Browse & view files**")
                         _aid = row["assignment_id"]
 
                         # ── Multi-select actions: View · Export · Copy to vault

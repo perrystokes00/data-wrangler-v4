@@ -4882,8 +4882,22 @@ def _seismic_coverage(engine):
                 _cand, key="wb_segy_peek_file",
                 format_func=lambda p: str(p).split("\\")[-1].split("/")[-1])
             if st.button("🔍 Show text header", key="wb_segy_peek"):
+                # ONLY the read is inside the try. Rendering used to be in
+                # here too, so any exception raised while DRAWING was
+                # reported as "Could not read header" — blaming the SEG-Y
+                # file for a bug in this function. That is precisely what
+                # happened: the nested st.expander("Full header") that used
+                # to sit below raised StreamlitAPIException ("Expanders may
+                # not be nested inside other expanders"), and all the user
+                # was ever told was that their file could not be read.
+                _lines, _pe = None, None
                 try:
                     _lines = _seis_text_header(_pickf)
+                except Exception as _e:
+                    _pe = _e
+                if _pe is not None:
+                    st.error(f"Could not read header: {str(_pe)[:160]}")
+                else:
                     _hits = [ln for ln in _lines
                              if any(w in ln.upper() for w in _CRS_HINT_WORDS)]
                     if _hits:
@@ -4894,11 +4908,16 @@ def _seismic_coverage(engine):
                                    "header — the CRS will have to come from the "
                                    "survey report, a companion P190/shapefile, "
                                    "or the data provider.")
-                    with st.expander("Full header", expanded=False):
-                        st.code("\n".join(_lines), language=None)
+                    # Inline, not an expander: this block runs inside the
+                    # "📡 Seismic coverage" expander and Streamlit forbids
+                    # nesting. A toggle cannot stand in for it either — the
+                    # body renders only on the run where the button was
+                    # pressed, and the rerun a toggle triggers would lose
+                    # it. st.code scrolls on its own, so dropping the second
+                    # disclosure hides nothing.
+                    st.markdown("**Full header**")
+                    st.code("\n".join(_lines), language=None)
                     st.caption(str(_pickf))
-                except Exception as _pe:
-                    st.error(f"Could not read header: {str(_pe)[:160]}")
 
         st.divider()
         st.markdown("**② Arm the CRS** for files whose header declares none")
@@ -6198,7 +6217,11 @@ def _pipeline_stages(engine, dialect):
                 data=st.session_state["pl_sc_html"].encode("utf-8"),
                 file_name=f"scorecard_{st.session_state.get('pl_sc_label','')}.html",
                 mime="text/html", key="pl_sc_dl")
-            with st.expander("Plain-text version", expanded=False):
+            # A toggle, not an expander: this runs inside the ⑥ expander and
+            # Streamlit forbids nesting. A toggle works here because the text
+            # lives in session_state, so the rerun it triggers redraws it —
+            # the same pattern as ⑦ Triage & Review below.
+            if st.toggle("Show plain-text version", key="pl_sc_txt_open"):
                 st.code(st.session_state["pl_sc_text"])
 
     # ── ⑦ Triage & Review ──────────────────────────────────────────────────

@@ -1148,6 +1148,68 @@ def tier_units(res, verbose=False):
     check("every tools/ script that imports dataview can find it",
           _tools_can_import_the_repo)
 
+    # 20. NO st.expander INSIDE ANOTHER ONE. Streamlit raises
+    #     StreamlitAPIException ("Expanders may not be nested inside other
+    #     expanders"), and an expander's body executes whether or not it is
+    #     open — so the crash needs no click, only the code path. That is
+    #     Streamlit scar #4 in CLAUDE.md, and its second clause is the fix:
+    #     a block inside one needs no second disclosure. Render it inline,
+    #     in st.container(border=True), or behind a toggle.
+    #
+    #     Five were live when this was written, two of them in page_workbench
+    #     for months. The worst sat inside a try/except that reported the
+    #     layout error as "Could not read header: …" — so a Streamlit bug was
+    #     shown to the user as a corrupt SEG-Y file, and anyone debugging it
+    #     went looking at the file. A rule that is only written down gets
+    #     broken; this one is now checked.
+    #
+    #     LIMIT worth knowing: this is LEXICAL. It cannot see an expander
+    #     reached through a CALL — page_file_manager opens one and then calls
+    #     inv_workbench.render_file_workbench(), which draws its own. A clean
+    #     run here does not prove no nesting at runtime.
+    def _no_nested_expanders():
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent
+
+        def _is_expander(node):
+            for item in node.items:
+                c = item.context_expr
+                if (isinstance(c, ast.Call)
+                        and isinstance(c.func, ast.Attribute)
+                        and c.func.attr == "expander"):
+                    return True
+            return False
+
+        def _walk(node, depth, fname, out):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                fname = node.name
+            if isinstance(node, (ast.With, ast.AsyncWith)) and _is_expander(node):
+                if depth:
+                    out.append((fname, node.lineno))
+                depth += 1
+            for ch in ast.iter_child_nodes(node):
+                _walk(ch, depth, fname, out)
+
+        files = sorted(root.glob("*.py")) + sorted(
+            p for p in (root / "dataview").rglob("*.py")
+            if "_attic" not in p.parts and "_quarantine" not in p.parts)
+        bad = []
+        for py in files:
+            src = py.read_text(encoding="utf-8", errors="replace")
+            if "st.expander" not in src:
+                continue
+            out = []
+            _walk(ast.parse(src), 0, "<module>", out)
+            bad += [f"{py.name}:{ln} in {fn}()" for fn, ln in out]
+        assert not bad, (
+            "st.expander nested inside another expander — Streamlit raises "
+            "on this, and the body runs whether or not it is open: "
+            + "; ".join(bad) +
+            " · render it inline, in st.container(border=True), or behind "
+            "a toggle (CLAUDE.md Streamlit scar #4)")
+    check("streamlit: no expander nested inside another",
+          _no_nested_expanders)
+
     return res
 
 
