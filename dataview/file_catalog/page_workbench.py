@@ -3952,15 +3952,39 @@ def _tab_status(engine, dialect):
     #    dropped, its catalog row RETIRED as SKIPPED rather than deleted so the
     #    history stays attributable. dv_* is never touched — un-promoting rows
     #    that already landed is a separate decision, not a side effect.
-    _confirm = a3.text_input(
-        "Type REJECT to enable", key=f"sb_reject_confirm_{_nonce}",
-        placeholder="REJECT",
-        help="Blocklists the selected files, drops the rows they staged, and "
+    # TWO CLICKS, NOT A TYPED WORD. The gate is a DECISION and keeps its
+    # confirmation; what it does not need is transcription. Typing REJECT
+    # proves nothing a deliberate second click does not, and it taxes the
+    # common case — Perry rejects files routinely.
+    #
+    # The arm is bound to the EXACT SELECTION, not to a boolean. Arming on a
+    # flag would let someone arm on three files, tick a fourth, and confirm a
+    # set they never looked at — the same staleness that let Apply write a
+    # superseded plan. Change the selection and the arm drops.
+    _help = ("Blocklists the selected files, drops the rows they staged, and "
              "retires their catalog rows as SKIPPED. Rows already promoted "
              "into dv_* are left alone.")
-    if a3.button(f"🚫 Reject {len(_picked)} file(s)", key="sb_reject",
-                 use_container_width=True,
-                 disabled=(_picked.empty or _confirm.strip().upper() != "REJECT")):
+    _pick_ids = (tuple(sorted(str(x) for x in _picked["inventory_id"]))
+                 if not _picked.empty else ())
+    _armed = st.session_state.get("sb_reject_armed") == _pick_ids and bool(_pick_ids)
+
+    if not _armed:
+        if a3.button(f"🚫 Reject {len(_picked)} file(s)…", key="sb_reject_arm",
+                     use_container_width=True, disabled=_picked.empty,
+                     help=_help):
+            st.session_state["sb_reject_armed"] = _pick_ids
+            st.rerun()
+        a3.caption("Asks once more before anything is written.")
+    else:
+        a3.warning(f"Reject **{len(_picked)}** file(s)? Their staged rows are "
+                   f"dropped and the catalog rows retired as SKIPPED.")
+        if a3.button("✗ Cancel", key="sb_reject_cancel",
+                     use_container_width=True):
+            st.session_state.pop("sb_reject_armed", None)
+            st.rerun()
+    if _armed and a3.button(f"✓ Yes — reject {len(_picked)} file(s)",
+                            key="sb_reject", type="primary",
+                            use_container_width=True, help=_help):
         # RE-ASSERT THE GATE INSIDE THE HANDLER. `disabled=` is a UI affordance,
         # not a guarantee: it stops a human clicking, and it stops nothing else.
         # A harness, a replayed widget state, or any future refactor that moves
@@ -3968,9 +3992,11 @@ def _tab_status(engine, dialect):
         # cost 8 files and 160 staged rows on 19 Aug during testing — the button
         # rendered "Reject 0 file(s)" and disabled, and the rows went anyway.
         # A destructive action re-checks its own precondition.
-        if _picked.empty or _confirm.strip().upper() != "REJECT":
-            st.error("Reject blocked — tick the files and type REJECT. "
-                     "Nothing was changed.")
+        if (_picked.empty
+                or st.session_state.get("sb_reject_armed") != _pick_ids):
+            st.error("Reject blocked — the confirmation does not match the "
+                     "files currently ticked. Nothing was changed.")
+            st.session_state.pop("sb_reject_armed", None)
             st.stop()
         _reason = f"rejected from Status & Backlog"
         _tot, _rows = 0, 0
@@ -3986,6 +4012,10 @@ def _tab_status(engine, dialect):
         st.success(f"Rejected {_tot} file(s); dropped {_rows:,} staged row(s).")
         if _fail:
             st.error("Some rejects failed:\n" + "\n".join(_fail))
+        # DISARM. The selection is about to change underneath us (these files
+        # leave the view), and a live arm keyed to ids that are no longer
+        # ticked is a confirmation nobody gave.
+        st.session_state.pop("sb_reject_armed", None)
         _status_run(engine)
         st.session_state["sb_nonce"] = _nonce + 1
         st.rerun()
