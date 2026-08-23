@@ -3634,15 +3634,36 @@ def _tab_status(engine, dialect):
     # The backlog empties three ways and only three: supply a UWI, supply a
     # location, or reject the file. Everything below is one of those, followed
     # by promote. Nothing waives a gate.
-    _heldv = view[view["state"] == _cs.ST_HELD]
+    # HELD, PLUS ANYTHING THAT SIMPLY HAS NO IDENTITY YET.
+    #
+    # This panel was keyed on HELD alone, and a hold is DERIVED FROM cat_* rows
+    # — so a file that could not stage anything BECAUSE it has no UWI is
+    # exactly the file this panel exists for and exactly the file it could not
+    # see. Measured 23 Aug: 0 HELD, 30 EXTRACTED, 17 of those needing a UWI.
+    # The grid was empty, so Preview stayed disabled, so "Apply these fixes"
+    # could never activate — reported as the button not working, when the
+    # button was right and its input was missing.
+    #
+    # Safe for un-staged files: apply_fix writes MATCHED_UWI/UWI14 on the
+    # catalog row and CLEARS CAPTURED_HASH so capture re-runs and stages the
+    # rows — which is precisely the remedy these files need. Its mirror
+    # updates touch 0 rows when nothing is staged, and header-minting is
+    # already guarded on detail rows actually existing.
+    _no_id = ((view["uwi"].fillna("").astype(str).str.strip() == "")
+              & view["state"].isin([_cs.ST_EXTRACTED, _cs.ST_INVENTORIED]))
+    _heldv = view[(view["state"] == _cs.ST_HELD) | _no_id]
     if not _heldv.empty:
         st.divider()
         st.markdown("##### ① Supply what is missing")
         st.caption(
-            "Type a UWI and/or a surface location for the held files. A UWI is "
-            "written to the catalog **and to the rows already staged** — the "
-            "step plain assignment skips. A location fills a coordless header, "
-            "or creates one when detail rows name a well that has none."
+            "Type a UWI and/or a surface location. Listed here: files **held** "
+            "at a gate, and files that staged **nothing** because they have no "
+            "UWI to key rows to — the second kind never appears in the hold "
+            "counts above, since a hold is counted from staged rows. A UWI is "
+            "written to the catalog **and to any rows already staged** — the "
+            "step plain assignment skips — and clears the capture stamp so the "
+            "next capture picks the file up. A location fills a coordless "
+            "header, or creates one when detail rows name a well that has none."
         )
 
         # SUGGEST, DON'T ASSERT. The filename usually carries the UWI in this
@@ -3672,6 +3693,12 @@ def _tab_status(engine, dialect):
             _src.append(_s or "")
 
         _fix = _heldv[["file", "reason", "uwi"]].copy()
+        # A file that never staged has NO hold reason, because reasons come
+        # from cat_* rows it does not have. Say why it is in this list instead
+        # of showing an empty cell, which reads as a missing value rather than
+        # as the actual answer.
+        _fix["reason"] = _fix["reason"].fillna("").replace(
+            "", "nothing staged — no UWI to key rows to")
         _fix.insert(0, "inventory_id", _heldv["inventory_id"])
         _fix["set_uwi"] = _sug
         _fix["from"] = _src
@@ -3766,10 +3793,36 @@ def _tab_status(engine, dialect):
             if not st.session_state.get("sb_plan_ok"):
                 st.warning("Fix the flagged rows, then preview again. "
                            "Nothing has been written.")
+        elif _edits:
+            # The two-step is deliberate, but an un-explained disabled button
+            # reads as a broken one. Say which step is outstanding.
+            st.caption(f"**{len(_edits)} edit(s) ready.** Press **Preview** to "
+                       f"see exactly what would be written — *Apply* stays "
+                       f"disabled until you have looked at it.")
 
+        # THE PREVIEW MUST DESCRIBE WHAT WILL ACTUALLY BE WRITTEN. Apply writes
+        # sb_plan_edits — the values as they were WHEN PREVIEWED — so changing a
+        # cell afterwards and pressing Apply wrote the old values while the
+        # screen showed the new ones. That is the precise failure "sample before
+        # apply" exists to prevent, reintroduced one step later. If the edits
+        # have moved since the preview, the plan is stale and Apply closes.
+        if (st.session_state.get("sb_plan_ok")
+                and _edits != st.session_state.get("sb_plan_edits")):
+            st.session_state["sb_plan_ok"] = False
+            st.session_state["sb_plan"] = None
+            st.info("Edits changed since the preview — preview again so the "
+                    "plan matches what you are about to write.")
+
+        # SAY WHY IT IS GREYED OUT. Disabled with no explanation reads as
+        # broken; Perry reported this button as "not activating" when it was
+        # correctly waiting for a preview that had never been run.
+        _ready = bool(st.session_state.get("sb_plan_ok"))
         if p2.button("✅ Apply these fixes", key="sb_apply", type="primary",
-                     use_container_width=True,
-                     disabled=not st.session_state.get("sb_plan_ok")):
+                     use_container_width=True, disabled=not _ready,
+                     help=None if _ready else
+                     ("Press Preview first. Nothing is written until the exact "
+                      "list of writes has been shown — and if the preview found "
+                      "a problem, fix the flagged rows and preview again.")):
             from dataview.file_catalog import catalog_status as _cs2
             _tot = {"uwi_rows": 0, "coord_rows": 0, "headers": 0}
             _fail = []
