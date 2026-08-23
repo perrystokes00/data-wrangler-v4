@@ -386,13 +386,22 @@ it's actually the correct default. **Open: make batched the default.**
   is ever wanted again, `build_installer.ps1` / `make_dist.py` still produce
   one — but re-introducing an installed copy re-introduces the drift, so pin a
   version check to the build if it comes back.
-- **Three reset paths, three different protection lists.** `demo_reset`
+- **~~Three~~ TWO reset paths, two different protection lists.** `demo_reset`
   (v4) preserves `dv_column_map` / `dv_column_synonym` / `dv_target_attribute`;
-  `clear_catalog.PROTECTED` preserves those *plus* `dv_global_file_catalog`;
-  and `data_wrangler_v3/modules/demo_reset.py` preserves **none** of them while
-  pointing at the same `DataView_Demo`. The v3 reset would silently destroy
-  2,604 rows of learned mappings that cannot be regenerated. `demo_reset.py`'s
-  own comment already says the paths must protect the same names — they do not.
+  `clear_catalog.PROTECTED` preserves those *plus* `dv_global_file_catalog`.
+  The two still disagree, and `demo_reset.py`'s own comment says they should
+  not — that half is still open.
+
+  **The dangerous third is gone (23 Aug).** `data_wrangler_v3/modules/
+  demo_reset.py` protected **none** of those three while pointing at the same
+  `DataView_Demo`, and `full=True` was its DEFAULT — so a Reset click in a
+  retired app destroyed ~2,604 rows of learned mappings belonging to the app
+  that replaced it. Deleted in v3 commit `fa15c0e`; recoverable from there if
+  v3 is ever revived, at which point it needs v4's protection list rather than
+  a straight restore. Safe to delete outright because both call sites
+  (`app_v3.py`, `page_run.py`) import it lazily inside the button handler and
+  already catch the failure, so the button now reports "Reset failed: …"
+  instead of crashing or silently doing nothing.
 - Compound-key FKs are silently unchecked (`if len(ccols) != 1: continue`)
 - Entity-parent resolution (name → surrogate id) has no UI
 - A retarget doesn't update the fingerprint memory; a skip does
