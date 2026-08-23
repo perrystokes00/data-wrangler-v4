@@ -321,10 +321,17 @@ PROVENANCE_COLS = {
 def _value_raw(col, ctx, rng):
     n = col["name"]
     key = n.lower()
-    if key in ctx:                      # parent keys and decided values
-        return ctx[key]
+    # PROVENANCE IS CHECKED BEFORE ctx, and the order is the point. ctx is
+    # built per-row and copied into children with dict(w), so the day anyone
+    # sets ctx["inventory_id"] — to thread a real load's id through, say —
+    # this guard goes inert with nothing to show for it: no error, just
+    # fabricated lineage back in the output. A generator has no honest value
+    # for these columns no matter what ctx was told, so nothing upstream is
+    # allowed to overrule it.
     if key in PROVENANCE_COLS:          # no honest synthetic value — see above
         return None
+    if key in ctx:                      # parent keys and decided values
+        return ctx[key]
     role = _role(n)
     t = col["type"]
     chars = col["chars"] or 40

@@ -778,6 +778,50 @@ def tier_units(res, verbose=False):
             "the BAD_FILE clause must be probed for, not assumed"
     check("a rejected file neither promotes nor draws", _rejected_stays_rejected)
 
+    # 12. A GENERATOR HAS NO HONEST PROVENANCE. The synthetic rows never came
+    #     from a file, were never catalogued, and have no lineage — so
+    #     INVENTORY_ID, FILE_PATH and friends must come out NULL. The type
+    #     fallback used to invent them ("INVENTORY_ID-426"), and INVENTORY_ID
+    #     is the key every lineage report joins on, so a fabricated one is a
+    #     key that matches nothing while LOOKING like real provenance.
+    #
+    #     This is the invariant "no dv_well row cites a missing catalog entry"
+    #     made checkable without a database. 50 such rows were loaded 19 Aug
+    #     from CSVs generated BEFORE the 16 Aug guard — the guard was right and
+    #     the artifact on disk was stale, which is precisely why the CODE side
+    #     needs pinning: nothing else would notice it regressing.
+    def _synth_provenance():
+        import random
+        from dataview.migration.synth_data import _value, PROVENANCE_COLS
+        rng = random.Random(42)
+        assert "inventory_id" in PROVENANCE_COLS, \
+            "inventory_id left PROVENANCE_COLS — synthetic rows would carry a " \
+            "fabricated catalog key and orphan every lineage join"
+        base = {"uwi": "15001209150000", "source": "SYNTH"}
+        # the column name is whatever the DDL says, so BOTH cases must be caught
+        for name in ("INVENTORY_ID", "inventory_id", "catalog_id",
+                     "FILE_PATH", "file_path", "file_hash", "root_path"):
+            got = _value({"name": name, "type": "varchar", "chars": 40},
+                         dict(base), rng)
+            assert got is None, f"{name} -> {got!r}, expected None"
+        # AND ctx MUST NOT BE ABLE TO OVERRULE IT. ctx is copied into child
+        # rows with dict(w); if the provenance test ever falls after the ctx
+        # lookup again, this is the assertion that fails instead of a silent
+        # return to fabricated lineage.
+        poisoned = dict(base, inventory_id="D7E2B1D3DEADBEEF", file_path=r"C:\x\y")
+        for name in ("INVENTORY_ID", "FILE_PATH"):
+            got = _value({"name": name, "type": "varchar", "chars": 40},
+                         dict(poisoned), rng)
+            assert got is None, \
+                f"ctx overruled the provenance guard: {name} -> {got!r}"
+        # and ordinary columns must still be generated, ctx still consulted
+        assert _value({"name": "uwi", "type": "varchar", "chars": 14},
+                      dict(base), rng) == "15001209150000"
+        assert _value({"name": "well_name", "type": "varchar", "chars": 40},
+                      dict(base), rng) is not None
+    check("synth: no fabricated provenance, and ctx cannot overrule it",
+          _synth_provenance)
+
     return res
 
 
