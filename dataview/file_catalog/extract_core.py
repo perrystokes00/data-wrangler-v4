@@ -82,6 +82,47 @@ def _clean_survey_name(raw: str) -> str:
     return cleaned or s          # never return empty — fall back to full string
 
 
+# The SEG-Y rev-0 textual header is a fixed CARD IMAGE: 40 lines of printed
+# LABELS a processor is meant to type values between. When nobody typed
+# anything, line C 2 still reads
+#
+#     C 2 LINE            AREA                        MAP ID
+#
+# and the survey-name regex dutifully captures "AREA MAP ID" — five Teapot 2D
+# lines all carrying the same name that is not a name. It is worse than blank:
+# NULL is caught by the _HOLD_SEIS_UNNAMED gate, whereas this is non-null, so
+# it passes every check and promote_seismic groups all five files into one
+# dv_seis_set called AREA MAP ID. The same shape as the placeholder problem
+# find_placeholders.sql exists for — a wrong value defeating every repair
+# keyed on "missing".
+#
+# The test is structural, not a blocklist: what survived is nothing but the
+# template's own printed labels with no operator text between them. Real names
+# ("NAVAL PETROLEUM RESERVE #3 (TEAPOT DOME)", "CENTRAL EROMANGA BASIN 80")
+# carry words that are not on the card.
+_TEMPLATE_WORDS = {
+    "LINE", "AREA", "MAP", "ID", "CLIENT", "COMPANY", "CREW", "NO", "REEL",
+    "DAY", "START", "OF", "YEAR", "OBSERVER", "INSTRUMENT", "MFG", "MODEL",
+    "SERIAL", "SURVEY", "PROJECT", "NAME", "NUMBER", "TYPE", "AND", "THIS",
+}
+
+
+def _is_template_survey_name(name) -> bool:
+    """True when a captured survey name is only SEG-Y card-image labels.
+
+    Requires at least two tokens: a single word like 'LINE' is ambiguous (a
+    survey really can be called that), while 'AREA MAP ID' is the card. Any
+    token that is not a label — a digit, a place, an operator — makes it a
+    real name and this returns False.
+    """
+    if not name:
+        return False
+    toks = [t for t in re.split(r"[^A-Za-z0-9#]+", str(name).upper()) if t]
+    if len(toks) < 2:
+        return False
+    return all(t in _TEMPLATE_WORDS for t in toks)
+
+
 def _normalize_uwi(v):
     """Normalize a UWI to bare digits (no dashes/spaces/dots), the canonical
     form used throughout the system (dv_well, gold, scout-ticket resolution).
@@ -640,7 +681,26 @@ def _extract_fields(fpath: str, fext: str) -> dict:
                             # dv_seis_line. _clean_survey_name is defined at module
                             # top; falls back to the raw name if nothing matches.
                             _clean = _clean_survey_name(_raw_name)
-                            fields["survey_name"] = _clean[:255]
+                            # An UNTYPED card image yields the card's own
+                            # labels ("AREA MAP ID"). Leaving survey_name NULL
+                            # hands the file to the _HOLD_SEIS_UNNAMED gate,
+                            # which says "assign a survey name in Browse &
+                            # View" — the correct instruction. Keeping the
+                            # label would silently merge every untouched file
+                            # in the corpus into one invented survey.
+                            if _is_template_survey_name(_clean):
+                                # 'rejected-template' is what stops enrich
+                                # substituting the FILE NAME for the name we
+                                # just refused — see SEIS_NAME_COLS.
+                                fields["survey_name_source"] = "rejected-template"
+                                _d = fields.get("details") or {}
+                                _d["survey_name_rejected"] = _clean[:120]
+                                _d["survey_name_reason"] = (
+                                    "SEG-Y card-image labels, not a name")
+                                fields["details"] = _d
+                            else:
+                                fields["survey_name"] = _clean[:255]
+                                fields["survey_name_source"] = "header"
                             # If the header carried a sample interval in-text and
                             # we didn't already get one from the binary header,
                             # capture it from the stripped tail.
@@ -875,12 +935,47 @@ def _extract_fields(fpath: str, fext: str) -> dict:
                         # is worse than a footprint.
                         _wkt = (_ls(_nav["lines"][_key]) if _key
                                 else _nav.get("hull"))
+                        _pts = (_nav["lines"][_key] if _key
+                                else [p for v in _nav["lines"].values()
+                                      for p in v])
+
+                        # THE HULL IS THE LAST RESORT, NOT THE SECOND CHOICE.
+                        # A 3D volume filed beside a 2D survey matches no nav
+                        # LINE, and the hull of those lines is a different
+                        # survey's footprint — right basin, wrong shape, and
+                        # confidently drawn. Teapot's filt_mig.sgy is exactly
+                        # that: it STATES its own four corners (see
+                        # crs_from_segy.survey_corners) and lacked only a CRS
+                        # to place them. The nav file states the CRS. Its
+                        # corners, in the nav's CRS, are this file's own
+                        # answer; the hull never was.
+                        if not _key and _survey_corners is not None \
+                                and _nav.get("epsg"):
+                            try:
+                                _c3 = _survey_corners(txt)
+                            except Exception:
+                                _c3 = None
+                            if _c3 and len(_c3) >= 3:
+                                try:
+                                    from pyproj import Transformer as _TF
+                                    _t3 = _TF.from_crs(f"EPSG:{_nav['epsg']}",
+                                                       "EPSG:4326",
+                                                       always_xy=True)
+                                    _r3 = [_t3.transform(_x, _y) for _x, _y in _c3]
+                                    if all(-180 <= p[0] <= 180 and
+                                           -90 <= p[1] <= 90 for p in _r3):
+                                        _ring = _r3 + [_r3[0]]
+                                        _wkt = ("POLYGON ((" + ", ".join(
+                                            f"{_lo:.7f} {_la:.7f}"
+                                            for _lo, _la in _ring) + "))")
+                                        _pts = _r3
+                                        _key = "(stated corners)"
+                                except Exception:
+                                    pass
+
                         if _wkt:
                             fields["survey_outline"] = _wkt
                             fields["epsg_code"] = 4326
-                            _pts = (_nav["lines"][_key] if _key
-                                    else [p for v in _nav["lines"].values()
-                                          for p in v])
                             _lo = [p[0] for p in _pts]; _la = [p[1] for p in _pts]
                             fields["bbox_min_lon"] = min(_lo)
                             fields["bbox_max_lon"] = max(_lo)
@@ -2069,12 +2164,71 @@ _SQL_WELL_MERGE = """
 """
 
 
+# ── survey-name provenance ──────────────────────────────────────────────────
+# Modelled on FILE_WELL_HEADER.IDENTITY_SOURCE, including its convention that a
+# value derived from a PATH is a candidate rather than a fact (triage_inventory
+# reads `IDENTITY_SOURCE NOT LIKE 'path%'` for exactly that reason).
+#
+#   'header'            the SEG-Y textual header named the survey
+#   'rejected-template' the header held only card-image labels; NO name was
+#                       taken, and enrich must not substitute a filename guess
+#   'path-filename'     enrich_file_headers guessed from the file name
+#   'manual'            a person typed it. Outranks everything.
+#
+# WHY THIS EXISTS: on 23 Aug the extractor correctly refused Teapot's
+# "AREA MAP ID" (the printed labels of an untyped rev-0 card image), left
+# SURVEY_NAME NULL — and enrich promptly filled the blank from each file name,
+# turning ONE wrong survey into FIVE (lineA…lineE). Rejecting a bad value only
+# helps if the next stage can tell "refused" from "never looked".
+SEIS_NAME_COLS = (("SURVEY_NAME_SOURCE", "varchar(30) NULL"),)
+_SEIS_COLS_READY = False
+
+
+def ensure_seis_columns(con):
+    """Add the provenance column if this database predates it. One metadata
+    query per process; ALTER only when genuinely missing."""
+    global _SEIS_COLS_READY
+    if _SEIS_COLS_READY:
+        return
+    from sqlalchemy import text as _t
+    try:
+        have = {r[0].upper() for r in con.execute(_t(
+            "SELECT name FROM sys.columns WHERE object_id = "
+            "OBJECT_ID('file_catalog.FILE_SEIS_HEADER')")).fetchall()}
+        for col, typ in SEIS_NAME_COLS:
+            if col.upper() not in have:
+                con.execute(_t("ALTER TABLE file_catalog.FILE_SEIS_HEADER "
+                               f"ADD [{col}] {typ}"))
+        _SEIS_COLS_READY = True
+    except Exception:
+        pass          # non-fatal: the MERGE below degrades, it does not fail
+
+
+# ONE WRITER. This constant is imported by worker_core (the multicore path,
+# which is the default) and page_workbench rather than copied — a second
+# spelling of this MERGE is how the escapechar bug came back through a fourth
+# writer, and this table had four of them until 23 Aug.
 _SQL_SEIS_MERGE = """
     MERGE file_catalog.FILE_SEIS_HEADER AS tgt
     USING (SELECT :hid AS SEIS_HEADER_ID) src
     ON tgt.SEIS_HEADER_ID = src.SEIS_HEADER_ID
     WHEN MATCHED THEN UPDATE SET
-        SURVEY_NAME=:sn, LINE_NAME=:ln,
+        -- A NAME IS NEVER ERASED BY A RE-EXTRACT. "I could not read one" must
+        -- not mean "delete the one you have": before this, re-extracting a
+        -- file whose header names no survey blanked the column, and enrich
+        -- then refilled it from the file name — so a survey a person had
+        -- named came back as 'lineA' with nothing recording the loss.
+        SURVEY_NAME = CASE
+            WHEN ISNULL(tgt.SURVEY_NAME_SOURCE,'') = 'manual'
+                THEN tgt.SURVEY_NAME
+            ELSE COALESCE(:sn, tgt.SURVEY_NAME) END,
+        SURVEY_NAME_SOURCE = CASE
+            WHEN ISNULL(tgt.SURVEY_NAME_SOURCE,'') = 'manual'
+                THEN tgt.SURVEY_NAME_SOURCE
+            WHEN :sn IS NOT NULL          THEN :snsrc
+            WHEN tgt.SURVEY_NAME IS NOT NULL THEN tgt.SURVEY_NAME_SOURCE
+            ELSE :snsrc END,
+        LINE_NAME=:ln,
         SEIS_SET_TYPE=:stype, SURVEY_DATE=:sd,
         CONTRACTOR=:contr,
         BBOX_MIN_LAT=:bmin_lat, BBOX_MAX_LAT=:bmax_lat,
@@ -2087,7 +2241,7 @@ _SQL_SEIS_MERGE = """
         EXTRACTED_DATE=GETUTCDATE()
     WHEN NOT MATCHED THEN INSERT (
         SEIS_HEADER_ID,INVENTORY_ID,
-        SURVEY_NAME,LINE_NAME,SEIS_SET_TYPE,SURVEY_DATE,
+        SURVEY_NAME,SURVEY_NAME_SOURCE,LINE_NAME,SEIS_SET_TYPE,SURVEY_DATE,
         CONTRACTOR,BBOX_MIN_LAT,BBOX_MAX_LAT,
         BBOX_MIN_LON,BBOX_MAX_LON,EPSG_CODE,
         SAMPLE_INTERVAL,TRACE_COUNT,SHOT_FIRST,SHOT_LAST,
@@ -2095,7 +2249,7 @@ _SQL_SEIS_MERGE = """
         EXTRACTED_DATE,EXTRACTED_BY
     ) VALUES (
         :hid,:inv_id,
-        :sn,:ln,:stype,:sd,
+        :sn,:snsrc,:ln,:stype,:sd,
         :contr,:bmin_lat,:bmax_lat,
         :bmin_lon,:bmax_lon,:epsg,
         :si,:tc,:sf,:sl,
@@ -2170,6 +2324,9 @@ def _seis_params(inv_id, fields):
         "hid":      uuid.uuid5(uuid.NAMESPACE_URL, inv_id + "_s").hex.upper(),
         "inv_id":   inv_id,
         "sn":       _trunc(fields.get("survey_name"), 255),
+        # None when nothing was read AND nothing was rejected — the
+        # MERGE keeps whatever provenance the row already had.
+        "snsrc":    _trunc(fields.get("survey_name_source"), 30),
         "ln":       _trunc(fields.get("line_name"), 255),
         "stype":    _trunc(fields.get("seis_set_type"), 40),
         "sd":       _valid_date(fields.get("survey_date")),
@@ -2202,6 +2359,7 @@ def _write_enrichment_on(con, inv_id: str, fields: dict):
     if category == "WELL":
         con.execute(_t(_SQL_WELL_MERGE), _well_params(inv_id, fields))
     elif category == "SEIS":
+        ensure_seis_columns(con)
         con.execute(_t(_SQL_SEIS_MERGE), _seis_params(inv_id, fields))
 
 
@@ -2257,6 +2415,8 @@ def _write_enrichment_batch(con, items):
     # loses before trying it again.
     for _w in _clamp_well(well):
         con.execute(_t(_SQL_WELL_MERGE), _w)
+    if seis:
+        ensure_seis_columns(con)
     for _sp in seis:
         con.execute(_t(_SQL_SEIS_MERGE), _sp)
 

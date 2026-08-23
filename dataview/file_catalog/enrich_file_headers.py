@@ -436,7 +436,21 @@ def enrich(conn, a, log=print, progress=None):
                 "WHERE LAST_ENRICHED_AT IS NULL AND UWI14 IS NOT NULL")
 
     # ── SEIS pass: survey name from the file name (also server-side) ─────────
+    # A FILENAME IS A CANDIDATE, NOT A NAME — the rule IDENTITY_SOURCE already
+    # encodes for wells, where triage reads `NOT LIKE 'path%'` before trusting
+    # a path-derived value. Two rows must be left alone, and until 23 Aug
+    # neither was:
+    #   'rejected-template' the extractor READ a name and refused it (Teapot's
+    #                       'AREA MAP ID' is the printed labels of an untyped
+    #                       rev-0 card image). Filling that blank from the file
+    #                       name turned ONE wrong survey into FIVE — lineA..E,
+    #                       one per file, none of them a survey.
+    #   'manual'            a person typed it. Nothing automatic outranks that.
     if not a.no_seis and "SURVEY_NAME" in shc:
+        _has_src = "SURVEY_NAME_SOURCE" in shc
+        _keep = ("AND ISNULL(sh.SURVEY_NAME_SOURCE,'') "
+                 "NOT IN ('rejected-template','manual') ") if _has_src else ""
+        _stamp = ", sh.SURVEY_NAME_SOURCE = 'path-filename'" if _has_src else ""
         set_col = "SEIS_SET_TYPE" if "SEIS_SET_TYPE" in shc else None
         pn   = "REPLACE(g.FILE_PATH,'/','\\')"
         base = f"RIGHT({pn}, CHARINDEX('\\', REVERSE({pn}) + '\\') - 1)"
@@ -454,7 +468,7 @@ def enrich(conn, a, log=print, progress=None):
             SELECT sh.SEIS_HEADER_ID, sh.INVENTORY_ID, {survey} AS survey, {dim} AS dim
             FROM file_catalog.FILE_SEIS_HEADER sh
             JOIN file_catalog.GLOBAL_FILE_CATALOG g ON g.INVENTORY_ID = sh.INVENTORY_ID
-            WHERE {blank('sh.SURVEY_NAME')} AND {survey} IS NOT NULL""")
+            WHERE {blank('sh.SURVEY_NAME')} {_keep} AND {survey} IS NOT NULL""")
         ns = 0
         for sid, inv, sv_v, dim_v in cur.fetchall():
             ns += 1
@@ -465,10 +479,10 @@ def enrich(conn, a, log=print, progress=None):
             setty = (f", sh.SEIS_SET_TYPE = CASE WHEN {blank('sh.SEIS_SET_TYPE')} "
                      f"AND {dim} IS NOT NULL THEN {dim} ELSE sh.SEIS_SET_TYPE END") if set_col else ""
             cur.execute(f"""
-                UPDATE sh SET sh.SURVEY_NAME = {survey}{setty}
+                UPDATE sh SET sh.SURVEY_NAME = {survey}{_stamp}{setty}
                 FROM file_catalog.FILE_SEIS_HEADER sh
                 JOIN file_catalog.GLOBAL_FILE_CATALOG g ON g.INVENTORY_ID = sh.INVENTORY_ID
-                WHERE {blank('sh.SURVEY_NAME')} AND {survey} IS NOT NULL""")
+                WHERE {blank('sh.SURVEY_NAME')} {_keep} AND {survey} IS NOT NULL""")
             say(f"[SEIS  ] applied {ns:,}")
 
     # ── audit + summary ──────────────────────────────────────────────────────

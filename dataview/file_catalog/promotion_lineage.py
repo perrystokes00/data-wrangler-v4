@@ -183,8 +183,44 @@ PENDING_ANY = (
     "AND NOT EXISTS (SELECT 1 FROM file_catalog.cat_well w "
     "WHERE w.INVENTORY_ID = {a}INVENTORY_ID) ) )")
 
+# WHICH ROWS A FORCED RUN PUTS BACK IN THE QUEUE.
+#
+# THIS IS A RESET SCOPE, NOT A CLAIM PREDICATE, and the difference is the whole
+# design. The obvious implementation of --force is "claim on a predicate that
+# ignores HEADER_EXTRACTED" — and it never terminates: extract claims in
+# chunks and re-queries between them, so a file that has just been processed
+# is still in the set. Measured on the first cut: the same 14 files parsed
+# over and over, ok 14 -> 28 -> 42, with no way to stop.
+#
+# So force does what a human does by hand: clear the done-flag ONCE for the
+# files in scope, then run the ordinary pending path, which shrinks as work
+# completes and stops when it is empty. One claim predicate, not two, and
+# _unprocessed_count stays correct without knowing force exists.
+#
+# Forcing means "redo work that was already done" — it does not mean "ignore
+# every other reason a file is out of scope", so two exclusions survive it,
+# for the reasons _already_done_filter gives for the capture side:
+#
+#   'S' SKIPPED  is an INSTRUCTION, not a result. Leave-it-alone is the
+#                operator's decision and a force does not overrule it.
+#   'M' MOVED    the file is not where the catalog says it is, so re-reading it
+#                cannot work. Forcing a re-read of a path that is not there
+#                just re-fails it every run — the exact loop 'M' was
+#                introduced to stop. Re-scan where the file now lives instead.
+#
+# 'E' (extractor error) IS re-claimed, deliberately: a code fix is the usual
+# reason to force, and those are precisely the files that should get another go.
+# DUPLICATE_GROUP stays excluded — a duplicate has no work of its own.
+# Only rows that HAVE been through extract are reset — a row already NULL
+# or 'N' is pending anyway, and rewriting it would inflate the reset count
+# into a number that does not mean what it says.
+EXTRACT_FORCE_RESET = (
+    "ISNULL({a}HEADER_EXTRACTED,'') IN ('Y','E') "
+    "AND {a}DUPLICATE_GROUP IS NULL")
+
 PENDING_PREDICATES = {
     "extract": EXTRACT_PENDING,
+    "extract-force-reset": EXTRACT_FORCE_RESET,
     "capture": CAPTURE_PENDING,
     "any": PENDING_ANY,
 }

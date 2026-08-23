@@ -967,7 +967,32 @@ def promote_seismic(cur, apply, log):
     if not object_exists(cur, DV_SCHEMA, "dv_seis_set"):
         return ("dv_seis_set", None, None, None, "no dv target")
 
-    _NAMED = "NULLIF(LTRIM(RTRIM(s.SURVEY_NAME)), '') IS NOT NULL"
+    # A REJECTED FILE MUST NOT PROMOTE. Marking a file bad removes its cat_*
+    # rows and sets CATALOG_READINESS='SKIPPED', and for documents that is the
+    # whole story — the mirrors are where their data lived. Seismic never
+    # stages in cat_*, so the cascade has nothing to delete and promote lifted
+    # a rejected file's survey straight back into dv_seis_set on the next run.
+    # Deleting the dv_ rows by hand does not help: the next promote rebuilds
+    # them, because FILE_SEIS_HEADER still carries a name and an outline and
+    # both gates pass.
+    #
+    # Found 23 Aug rejecting Teapot's filt_mig.sgy, whose trace data is
+    # unreadable. Its header and stated corners are fine, so nothing about the
+    # row LOOKS wrong — which is exactly why the blocklist has to be honoured
+    # here rather than left to the operator to remember.
+    _NOT_REJECTED = "1=1"
+    if object_exists(cur, "file_catalog", "GLOBAL_FILE_CATALOG"):
+        _NOT_REJECTED = (
+            "NOT EXISTS (SELECT 1 FROM file_catalog.GLOBAL_FILE_CATALOG gg "
+            "WHERE gg.INVENTORY_ID = s.INVENTORY_ID "
+            "AND ISNULL(gg.CATALOG_READINESS,'') = 'SKIPPED')")
+    if object_exists(cur, "file_catalog", "BAD_FILE"):
+        _NOT_REJECTED += (
+            " AND NOT EXISTS (SELECT 1 FROM file_catalog.BAD_FILE bf "
+            "WHERE bf.INVENTORY_ID = s.INVENTORY_ID)")
+
+    _NAMED = ("NULLIF(LTRIM(RTRIM(s.SURVEY_NAME)), '') IS NOT NULL "
+              f"AND ({_NOT_REJECTED})")
     _MAPPABLE = (
         "(NULLIF(LTRIM(RTRIM(s.SURVEY_OUTLINE)), '') IS NOT NULL "
         "OR (s.BBOX_MIN_LAT IS NOT NULL AND s.BBOX_MAX_LAT IS NOT NULL "

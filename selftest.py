@@ -52,6 +52,28 @@ import sys
 import time
 import traceback
 
+# A SELF-TEST MUST NOT DIE WHILE REPORTING. The default Windows console is
+# cp1252, which has '·' and '…' but NOT '✗' (U+2717) or '⚠' (U+26A0) — the
+# two glyphs this file prints only when it has something to say. So
+# `python selftest.py --tier lints` raised UnicodeEncodeError out of the
+# print itself, and a failing check would have killed the summary the same
+# way: the tool worked when everything passed and crashed when anything was
+# wrong. Exactly inverted.
+#
+# errors='replace' rather than an ASCII rewrite of the markers: the glyphs
+# are worth keeping wherever the console can show them (Windows Terminal,
+# VS Code, a redirect to a file), and a '?' in their place still prints the
+# line. Belt and braces — reconfigure preferred, errors='replace' as the
+# floor if the stream refuses UTF-8.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        try:
+            _s.reconfigure(errors="replace")
+        except Exception:
+            pass
+
 # Streamlit logs a warning per @st.cache_data decorator when imported
 # outside a running server. Importing 40 page modules therefore buries the
 # result under 40 identical warnings. Silenced here, not suppressed
@@ -447,7 +469,8 @@ def tier_units(res, verbose=False):
     def _pending():
         from dataview.file_catalog.promotion_lineage import (
             pending_sql, PENDING_PREDICATES)
-        assert set(PENDING_PREDICATES) == {"extract", "capture", "any"}, \
+        assert set(PENDING_PREDICATES) == {"extract", "extract-force-reset",
+                                          "capture", "any"}, \
             "a pending question was added or renamed without updating selftest"
         for which in PENDING_PREDICATES:
             bare = pending_sql(which)
@@ -495,6 +518,265 @@ def tier_units(res, verbose=False):
         assert len(labels) == len(set(labels)), \
             "duplicate LINEAGE label — the report column would be ambiguous"
     check("LINEAGE: the fourth list names every promoted table", _lineage)
+
+    # ── seismic geometry: the four gaps that held Teapot ─────────────────
+    # Six SEG-Y files sat at "no outline or bbox" while the machinery to
+    # position them was already built. Each check below is one of the reasons
+    # it could not fire.
+
+    # 1. The nav file stated "SPCS27 - Wyoming East Central, NAD 1927,
+    #    U.S. Survey Feet" — a complete answer — and crs_from_text had no
+    #    State Plane branch, so read_nav returned epsg=None and extract_core
+    #    discarded a perfectly parsed 532-point navigation.
+    def _spcs():
+        from dataview.file_catalog.crs_from_segy import crs_from_text
+        teapot = ("Coordinate System: SPCS27 - Wyoming East Central  "
+                  "Datum: NAD 1927\nData Coordinate System Units: "
+                  "U.S. Survey Feet")
+        assert crs_from_text(teapot)[0] == 32056, crs_from_text(teapot)
+        # the zone name must not over-reach: East is not East Central
+        assert crs_from_text("STATE PLANE WYOMING EAST NAD 1927")[0] == 32055
+        # EPSG spells NAD27 California zones in Roman and NAD83 in Arabic;
+        # a processor writes whichever they please and both must resolve
+        for spelling in ("CALIFORNIA ZONE III", "CALIFORNIA ZONE 3"):
+            got = crs_from_text(f"STATE PLANE {spelling} NAD 1927")[0]
+            assert got == 26743, f"{spelling} -> {got}"
+        # UNITS ARE PART OF THE ANSWER. Every NAD83 zone exists in metres and
+        # in ftUS; choosing wrong scales every coordinate by 3.28, so an
+        # unstated unit must REFUSE rather than pick.
+        both = crs_from_text("STATE PLANE TEXAS SOUTH CENTRAL NAD 1983")
+        assert both[0] is None, f"guessed units: {both}"
+        assert "units" in both[2], both[2]
+        assert crs_from_text(
+            "SPCS83 TEXAS SOUTH CENTRAL, US SURVEY FEET")[0] == 2278
+        # and the pre-existing branches must be untouched
+        assert crs_from_text("UTM ZONE 13 WGS84")[0] == 32613
+        assert crs_from_text("Projection: [EPSG:28992]")[0] == 28992
+    check("crs_from_text: State Plane is read, units are not guessed", _spcs)
+
+    # 2. filt_mig states THREE corners indexed by inline/crossline. Ring-
+    #    ordering three points draws a triangle over half the survey; the
+    #    fourth closes by parallelogram because the indices say which three.
+    def _corners3():
+        from dataview.file_catalog.crs_from_segy import survey_corners
+        hdr = ("C 7 INLINE 1, XLINE 1:   X COORDINATE: 788937  Y COORDINATE: 938846\n"
+               "C 8 INLINE 1, XLINE 188: X COORDINATE: 809502  Y COORDINATE: 939334\n"
+               "C 9 INLINE 345, XLINE 1: X COORDINATE: 788039  Y COORDINATE: 976675\n")
+        got = survey_corners(hdr)
+        assert got and len(got) == 4, f"expected 4 corners, got {got}"
+        # the derived corner is the value teapot_3d_load.doc states
+        assert (808604.0, 977163.0) in [(round(x, 1), round(y, 1)) for x, y in got], \
+            f"parallelogram closure wrong: {got}"
+        # the older layouts must still parse
+        assert len(survey_corners(
+            "C06 Corner 1: X: 78401.95 Y: 447374.73 IL: 2500 XL: 3139\n"
+            "C07 Corner 2: X: 78401.95 Y: 450000.00 IL: 2500 XL: 3200\n"
+            "C08 Corner 3: X: 80000.00 Y: 450000.00 IL: 2600 XL: 3200\n") or []) >= 3
+    check("survey_corners: 3 stated corners close to 4, not a triangle", _corners3)
+
+    # 3. The standard puts CDP X/Y at bytes 181-188. filt_mig puts INLINE
+    #    there and says so in its own textual header. Reading the declaration
+    #    is what stops IL_MIN=-2123710427 reaching the catalog.
+    def _tracemap():
+        from dataview.file_catalog.segy_header import (
+            declared_trace_map, STD_OFFSETS)
+        hdr = ("C23 BYTES  13- 16: CROSSLINE NUMBER (TRACE)\n"
+               "C24 BYTES  17- 20: INLINE NUMBER (LINE)\n"
+               "C25 BYTES  81- 84: CDP_X COORD\n"
+               "C26 BYTES  85- 88: CDP_Y COORD\n"
+               "C27 BYTES 181-184: INLINE NUMBER (LINE)\n"
+               "C29 BYTES 189-192: CDP_X COORD\n")
+        m = declared_trace_map(hdr)
+        assert m.get("crossline") == 12, m       # bytes 13-16, 0-based
+        assert m.get("inline") == 16, m          # first declaration wins
+        assert m.get("cdp_x") == 80, m
+        assert m.get("cdp_y") == 84, m
+        # 'CROSSLINE' must never be classified as 'INLINE'
+        assert declared_trace_map(
+            "BYTES 13-16: CROSSLINE NUMBER").get("inline") is None
+        # a header that declares nothing leaves the standard in force
+        assert declared_trace_map("C 1 CLIENT: SOMEBODY") == {}
+        assert STD_OFFSETS["cdp_x"] == 180
+    check("declared_trace_map: the file's own byte map is read", _tracemap)
+
+    # 4. An untyped SEG-Y card image yields the card's printed LABELS. NULL is
+    #    caught by the unnamed gate; "AREA MAP ID" is not, so five Teapot 2D
+    #    lines would promote into one invented survey.
+    def _template_name():
+        from dataview.file_catalog.extract_core import _is_template_survey_name
+        assert _is_template_survey_name("AREA MAP ID")
+        assert _is_template_survey_name("CLIENT COMPANY CREW NO")
+        # real names must survive — including ones that CONTAIN a label word
+        for good in ("NAVAL PETROLEUM RESERVE #3 (TEAPOT DOME)",
+                     "CENTRAL EROMANGA BASIN 80",
+                     "COOPER SURVEY 1994", "NPR-3"):
+            assert not _is_template_survey_name(good), good
+        # a single label word is ambiguous — a survey really can be called it
+        assert not _is_template_survey_name("AREA")
+        assert not _is_template_survey_name(None)
+    check("survey name: card-image labels are not a name", _template_name)
+
+    # 5. A nav row carrying elevation fell through to the branch that treats an
+    #    unmatched line as header PROSE — three of Teapot's 535 shotpoints
+    #    vanished silently, and a vendor who writes elevation on EVERY row
+    #    loses the file with "not a nav file".
+    def _nav_row():
+        from dataview.file_catalog.seis_nav import _ROW
+        assert _ROW.match(" A   235   797319  964035")
+        assert _ROW.match(" A   235   797319  964035 5153"), \
+            "a trailing elevation column must not disqualify a nav row"
+        assert _ROW.match(" A   235   797319  964035 5153 12.5")
+        # extra columns must still be NUMERIC — prose is not data
+        assert not _ROW.match("H Line   SP #   X   Y")
+        assert not _ROW.match(" A   235   797319  964035 SPARE")
+    check("seis_nav: a nav row may carry extra columns", _nav_row)
+
+    # 6. ONE WRITER for FILE_SEIS_HEADER. It had four — extract_core, a verbatim
+    #    duplicate in worker_core (the multicore path, which is the DEFAULT), and
+    #    two more inside page_workbench — so a fix to the canonical one silently
+    #    missed the path that actually runs. Exactly how the escapechar bug came
+    #    back through a fourth writer.
+    def _one_seis_writer():
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent
+        offenders = []
+        for py in (root / "dataview").rglob("*.py"):
+            if "_attic" in py.parts or "_quarantine" in py.parts:
+                continue
+            src = py.read_text(encoding="utf-8", errors="replace")
+            n = src.count("MERGE file_catalog.FILE_SEIS_HEADER")
+            if not n:
+                continue
+            # extract_core owns the full upsert; page_workbench owns the
+            # manual-name writer (_SQL_SURVEY_SEIS, a different statement).
+            allowed = {"extract_core.py": 1, "page_workbench.py": 1}
+            if allowed.get(py.name, 0) != n:
+                offenders.append(f"{py.name}:{n}")
+        assert not offenders, (
+            "FILE_SEIS_HEADER MERGE is spelled out in " + ", ".join(offenders) +
+            " — import extract_core._SQL_SEIS_MERGE instead of copying it")
+    check("FILE_SEIS_HEADER: one writer, imported not copied", _one_seis_writer)
+
+    # 7. A re-extract must never ERASE a survey name it simply could not read,
+    #    and must never overwrite one a person typed.
+    def _name_not_erased():
+        from dataview.file_catalog.extract_core import _SQL_SEIS_MERGE
+        sql = " ".join(_SQL_SEIS_MERGE.split())
+        assert "SURVEY_NAME=:sn," not in sql, \
+            "the MERGE assigns SURVEY_NAME unconditionally again — a re-extract " \
+            "of a file whose header names no survey would blank the column"
+        assert "COALESCE(:sn, tgt.SURVEY_NAME)" in sql, \
+            "SURVEY_NAME must fall back to the stored value"
+        assert "'manual'" in sql, \
+            "the MERGE no longer protects a manually-set survey name"
+        # provenance travels with the value, or the gate downstream is blind
+        from dataview.file_catalog.extract_core import _seis_params
+        p = _seis_params("INV1", {"survey_name": "NPR-3 2D",
+                                  "survey_name_source": "manual"})
+        assert p["sn"] == "NPR-3 2D" and p["snsrc"] == "manual", p
+        assert _seis_params("INV1", {})["snsrc"] is None
+    check("seis MERGE: a name is never erased or overwritten", _name_not_erased)
+
+    # 8. --force must TERMINATE. The obvious implementation — claim on a
+    #    predicate that ignores HEADER_EXTRACTED — loops forever, because
+    #    extract re-queries between chunks and a just-processed file is still
+    #    in the set (observed: ok 14 -> 28 -> 42, no exit). force is a one-time
+    #    RESET of the done-flag, after which the ordinary pending path drains.
+    def _force_terminates():
+        import inspect
+        from dataview.import_data import pipeline_run as pr
+        from dataview.file_catalog.promotion_lineage import PENDING_PREDICATES
+
+        src = inspect.getsource(pr._stage_extract)
+        assert 'pending_sql("extract")' in src, \
+            "_stage_extract no longer claims on the plain extract predicate"
+        for bad in ("extract-forced", "force else", "if force"):
+            assert bad not in src, (
+                f"_stage_extract branches on force ({bad!r}) — a forced claim "
+                f"predicate never empties and the chunk loop cannot terminate")
+
+        # the reset scope must EXCLUDE the states a force does not overrule,
+        # and must only touch rows that have actually been extracted
+        rst = PENDING_PREDICATES["extract-force-reset"].format(a="")
+        # A WHITELIST, so SKIPPED/MOVED are excluded by construction — and
+        # that is the property to assert, not the presence of their letters.
+        assert "IN ('Y','E')" in rst, (
+            "the reset must NAME the states it re-queues; anything broader "
+            "re-queues SKIPPED ('S') or MOVED ('M'), which a force does "
+            "not overrule")
+        for _st in ("'S'", "'M'", "'N'"):
+            assert f"IN ({_st}" not in rst and f", {_st}" not in rst, \
+                f"the force reset must not include state {_st}"
+        assert "DUPLICATE_GROUP IS NULL" in rst
+
+        # reset once, and the batch driver must say so or every batch re-queues
+        bsrc = inspect.getsource(pr.run_pipeline_batched)
+        assert "_force_reset_extract" in bsrc and "force_reset_done" in bsrc, \
+            "run_pipeline_batched must reset once and tell the batches"
+        assert "force_reset_done" in inspect.signature(pr.run_pipeline).parameters
+        # and the gauge must stay ignorant of force — it counts the same
+        # pending set the batches claim, which is the point of the reset
+        assert "force" not in inspect.signature(pr._unprocessed_count).parameters
+    check("--force terminates: reset once, one claim predicate", _force_terminates)
+
+    # 9. A new pipeline toggle reaches run_pipeline ONLY if the detached
+    #    multicore runner names it — that path is the DEFAULT, and it is how
+    #    the recognise flag sat complete-but-unused.
+    def _force_reaches_runner():
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parent / "dataview" /
+               "import_data" / "pipeline_proc_runner.py").read_text(
+                   encoding="utf-8", errors="replace")
+        assert "force=bool(cfg.get(\"force\"" in src.replace("'", '"'), \
+            "pipeline_proc_runner does not forward force — the CLI flag would " \
+            "do nothing on the multicore path, which is the default"
+    check("force reaches the multicore runner", _force_reaches_runner)
+
+    # 10. The IBM-float decoder became load-bearing when the viewer gained a
+    #     fallback for files segyio refuses. Format code 1 is base-SIXTEEN
+    #     exponent, excess-64 — read as IEEE it yields numbers that are wrong
+    #     rather than obviously broken, which is the worst kind here.
+    def _ibm_float():
+        import numpy as np
+        from dataview.file_catalog.segy_header import _ibm_to_ieee
+        got = _ibm_to_ieee(np.array(
+            [0x42640000, 0xC2760000, 0x41100000, 0x00000000], dtype=np.uint32))
+        for g, want in zip(got, (100.0, -118.0, 1.0, 0.0)):
+            assert abs(float(g) - want) < 1e-4, f"{float(g)} != {want}"
+        # verified against segyio on the Teapot 2D lines: identical samples
+        # (np.allclose, 1e-5) for the files segyio will open.
+    check("IBM float decode: base-16 exponent, not IEEE", _ibm_float)
+
+    # 11. REJECTING A FILE MUST STICK. _mark_bad deletes the file's cat_* rows
+    #     and stamps SKIPPED, which is the whole story for documents — their
+    #     data lived in the mirrors. Seismic never stages in cat_*, so the
+    #     cascade deletes nothing and BOTH remaining paths read straight past
+    #     the rejection: promote lifted the survey back into dv_seis_set on the
+    #     next run, and the map's 3D layer reads FILE_SEIS_HEADER directly, so
+    #     the rectangle drew even with the promoted rows deleted.
+    def _rejected_stays_rejected():
+        import inspect
+        from dataview.file_catalog import promote_catalog as pc
+        src = inspect.getsource(pc.promote_seismic)
+        assert "BAD_FILE" in src and "SKIPPED" in src, \
+            "promote_seismic no longer excludes rejected files — a file marked " \
+            "bad promotes again on the next run, and deleting its dv_seis_* " \
+            "rows by hand does not help because promote rebuilds them"
+        import pathlib
+        mp = (pathlib.Path(__file__).resolve().parent / "dataview" / "mapping" /
+              "page_well_map.py").read_text(encoding="utf-8", errors="replace")
+        i = mp.find("def _qry_seismic_3d")
+        assert i > 0, "_qry_seismic_3d has moved or been renamed"
+        body = mp[i:i + 4000]
+        assert "BAD_FILE" in body and "SKIPPED" in body, \
+            "the 3D seismic layer reads FILE_SEIS_HEADER directly, so a " \
+            "rejected file draws unless this query excludes it"
+        # ...and the BAD_FILE reference must stay conditional: the table is
+        # created on first use, and this query swallows exceptions, so naming
+        # it unconditionally would hide every 3D survey on a clean database.
+        assert "OBJECT_ID('file_catalog.BAD_FILE')" in body, \
+            "the BAD_FILE clause must be probed for, not assumed"
+    check("a rejected file neither promotes nor draws", _rejected_stays_rejected)
 
     return res
 

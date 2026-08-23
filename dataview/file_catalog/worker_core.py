@@ -43,6 +43,14 @@ import os
 import re
 from dataclasses import dataclass, field
 
+# The seismic header MERGE is IMPORTED, never copied. It was a verbatim
+# duplicate of extract_core._SQL_SEIS_MERGE until 23 Aug, so the multicore
+# path — which is the DEFAULT — silently kept the old behaviour every time
+# the canonical one was fixed. This table had four writers; the escapechar
+# bug came back through exactly that kind of fourth writer.
+from dataview.file_catalog.extract_core import (
+    _SQL_SEIS_MERGE, ensure_seis_columns)
+
 
 # ── result contract ──────────────────────────────────────────────────────────
 @dataclass
@@ -1165,6 +1173,7 @@ def _do_segy(engine, fpath, inv, say) -> FileResult:
         "hid":      _uuid.uuid5(_uuid.NAMESPACE_URL, inv_id + "_s").hex.upper(),
         "inv_id":   inv,
         "sn":       _trunc(fields.get("survey_name"), 255),
+        "snsrc":    _trunc(fields.get("survey_name_source"), 30),
         "ln":       _trunc(fields.get("line_name"), 255),
         "stype":    _trunc(fields.get("seis_set_type"), 40),
         "sd":       _trunc(fields.get("survey_date"), 20),
@@ -1186,6 +1195,7 @@ def _do_segy(engine, fpath, inv, say) -> FileResult:
     }
     try:
         with engine.begin() as con:
+            ensure_seis_columns(con)
             con.execute(_t(_SQL_SEIS_MERGE), params)
         res.rows_written = 1
         res.detail["FILE_SEIS_HEADER"] = 1
@@ -1193,44 +1203,6 @@ def _do_segy(engine, fpath, inv, say) -> FileResult:
         return FileResult("error", rt="SEISMIC",
                           error=f"seis header write: {str(e)[:300]}")
     return res
-
-
-# Seismic header MERGE (verbatim from page_workbench, streamlit-free). Writes
-# file_catalog.FILE_SEIS_HEADER; promote lifts it into dataview.dv_seis_set.
-_SQL_SEIS_MERGE = """
-    MERGE file_catalog.FILE_SEIS_HEADER AS tgt
-    USING (SELECT :hid AS SEIS_HEADER_ID) src
-    ON tgt.SEIS_HEADER_ID = src.SEIS_HEADER_ID
-    WHEN MATCHED THEN UPDATE SET
-        SURVEY_NAME=:sn, LINE_NAME=:ln,
-        SEIS_SET_TYPE=:stype, SURVEY_DATE=:sd,
-        CONTRACTOR=:contr,
-        BBOX_MIN_LAT=:bmin_lat, BBOX_MAX_LAT=:bmax_lat,
-        BBOX_MIN_LON=:bmin_lon, BBOX_MAX_LON=:bmax_lon,
-        EPSG_CODE=:epsg, SAMPLE_INTERVAL=:si,
-        TRACE_COUNT=:tc, SHOT_FIRST=:sf, SHOT_LAST=:sl,
-        IL_MIN=:il_min, IL_MAX=:il_max,
-        XL_MIN=:xl_min, XL_MAX=:xl_max,
-        SURVEY_OUTLINE=:outline,
-        EXTRACTED_DATE=GETUTCDATE()
-    WHEN NOT MATCHED THEN INSERT (
-        SEIS_HEADER_ID,INVENTORY_ID,
-        SURVEY_NAME,LINE_NAME,SEIS_SET_TYPE,SURVEY_DATE,
-        CONTRACTOR,BBOX_MIN_LAT,BBOX_MAX_LAT,
-        BBOX_MIN_LON,BBOX_MAX_LON,EPSG_CODE,
-        SAMPLE_INTERVAL,TRACE_COUNT,SHOT_FIRST,SHOT_LAST,
-        IL_MIN,IL_MAX,XL_MIN,XL_MAX,SURVEY_OUTLINE,
-        EXTRACTED_DATE,EXTRACTED_BY
-    ) VALUES (
-        :hid,:inv_id,
-        :sn,:ln,:stype,:sd,
-        :contr,:bmin_lat,:bmax_lat,
-        :bmin_lon,:bmax_lon,:epsg,
-        :si,:tc,:sf,:sl,
-        :il_min,:il_max,:xl_min,:xl_max,:outline,
-        GETUTCDATE(),'DataWrangler'
-    );
-"""
 
 
 # Well header MERGE (verbatim from page_workbench's _SQL_WELL_MERGE, streamlit-

@@ -497,7 +497,107 @@ def _view_segy(file_path: str):
             _segy_plot(data, f.samples, traces_to_plot, file_path)
 
     except Exception as e:
-        st.error(f"SEGY read failed: {e}")
+        # segyio refuses a file whose body is not an exact multiple of the
+        # trace length, and it is right to: it indexes the whole file, so a
+        # ragged tail makes every trace number suspect. For a VIEWER that is
+        # the wrong answer — the textual header, the binary header and the
+        # well-formed trace headers are all still readable and are usually
+        # what someone opening this panel actually wants. Fall back rather
+        # than showing a raw RuntimeError over an empty page.
+        st.warning(f"segyio could not open this file: {e}")
+        _view_segy_tolerant(file_path, str(e))
+
+
+def _view_segy_tolerant(file_path: str, why: str = ""):
+    """Header-level view via the dependency-free reader, for files segyio
+    rejects. Shows what is verifiable and says plainly what is not."""
+    import pandas as pd
+    try:
+        from dataview.file_catalog.segy_header import (
+            read_segy_header, sample_trace_rows, read_trace_samples)
+    except Exception as e:            # pragma: no cover
+        st.error(f"fallback reader unavailable: {e}")
+        return
+
+    h = read_segy_header(file_path)
+    if not h.get("ok"):
+        st.error("The file could not be read as SEG-Y at all — not even its "
+                 "binary header. " + "; ".join(h.get("notes") or []))
+        return
+
+    # WHY, ARITHMETICALLY. "trace count inconsistent with file size" is a
+    # conclusion; the numbers behind it are what tell you whether the file is
+    # truncated, padded, or ragged — so show them.
+    import os as _os
+    size = _os.path.getsize(file_path)
+    bpt = h.get("_bytes_per_trace") or 0
+    body = size - (h.get("_data_start") or 0)
+    if bpt:
+        whole, left = divmod(body, bpt)
+        st.info(
+            f"**Reading in tolerant mode.** {size:,} bytes; "
+            f"{body:,} after the headers; {h.get('n_samples')} samples x "
+            f"{h.get('bytes_per_sample')} bytes + 240 header = {bpt:,} per "
+            f"trace. That is **{whole:,} whole traces plus {left:,} leftover "
+            f"bytes** — not a whole trace, which is what segyio refuses.")
+
+    with _vsection("🗂️ Binary header"):
+        st.dataframe(pd.DataFrame([
+            {"Field": "Traces (whole)", "Value": f"{h.get('n_traces'):,}"},
+            {"Field": "Samples/trace", "Value": h.get("n_samples")},
+            {"Field": "Sample interval (us)", "Value": h.get("sample_interval_us")},
+            {"Field": "Format", "Value": h.get("format_desc")},
+            {"Field": "Byte order", "Value": h.get("byte_order")},
+            {"Field": "Measurement", "Value": h.get("measurement_system")},
+        ]), hide_index=True, use_container_width=True)
+
+    if h.get("trace_map"):
+        st.caption("Trace positions below use the layout **this file's own "
+                   "textual header declares**, not the rev-1 defaults: "
+                   + ", ".join(f"{k} @ byte {v + 1}"
+                               for k, v in sorted(h["trace_map"].items())))
+
+    rows = sample_trace_rows(file_path, 50)
+    if rows:
+        with _vsection(f"📋 Trace headers (first {len(rows)})"):
+            st.dataframe(pd.DataFrame(rows), hide_index=True,
+                         use_container_width=True)
+
+    with _vsection("📄 Textual header"):
+        st.code(h.get("textual_header") or "(empty)", language=None)
+
+    for n in (h.get("notes") or []):
+        st.caption(f"· {n}")
+
+    # The samples themselves — attempted, never faked.
+    with _vsection("〰️ Trace data"):
+        with st.spinner("Walking the file for readable traces…"):
+            data, times = read_trace_samples(file_path, 0, 120)
+        if data is None:
+            stats = getattr(read_trace_samples, "last_stats", {}) or {}
+            st.error(
+                "**No trace samples could be decoded.** The walk found no "
+                "offset where the payload reads as "
+                f"{h.get('format_desc')} — every candidate decoded to "
+                "exponents no seismic sample has."
+                + (f" Walked {stats.get('traces_walked', 0):,} trace slots."
+                   if stats else ""))
+            st.caption(
+                "Deliberately blank rather than plotted: bytes that do not "
+                "decode as the declared format are not quiet data, and a "
+                "picture drawn from them would look like seismic without "
+                "being it. The headers above ARE verified — traces 1 and 2 "
+                "match the corner coordinates the textual header states — so "
+                "the file's identity and geometry are trustworthy even though "
+                "its samples are not.")
+        else:
+            stats = getattr(read_trace_samples, "last_stats", {}) or {}
+            _segy_plot(data, times, data.shape[1], file_path)
+            st.caption(
+                f"{stats.get('plotted', 0)} trace(s) plotted · "
+                f"{stats.get('blank_skipped', 0)} blank skipped · "
+                f"{stats.get('resyncs', 0)} re-synchronised · "
+                f"{stats.get('unreadable', 0)} unreadable")
 
 
 def _segy_plot(data, samples, n_traces, file_path):

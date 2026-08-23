@@ -61,11 +61,22 @@ NAV_NAME_HINTS = ("nav", "navigation", "shotpoint", "shot_point", "sp_",
 
 # A data row: line id, point number, X, Y — with the line id optional, because
 # a single-line file often omits it. Both integer and decimal coordinates.
+#
+# TRAILING COLUMNS ARE ALLOWED, and must be. Anchoring straight after Y meant a
+# row carrying an elevation —
+#     A   235   797319  964035 5153
+# — failed to match and fell through to the branch that treats an unmatched
+# line as header PROSE. Three of Teapot's 535 shotpoints vanished that way,
+# silently. A vendor who writes elevation on every row loses the whole file,
+# and it fails as "not a nav file", which reads as if the file were absent
+# rather than misparsed. Extra columns must still be NUMERIC, so a line of
+# words cannot slip in as data.
 _ROW = re.compile(
     r"^\s*(?:([A-Za-z0-9][\w\-]{0,19})\s+)?"      # line id (optional)
     r"(\d{1,7})\s+"                                # shot / CDP number
     r"(-?\d{1,9}(?:\.\d+)?)\s+"                    # X / easting
-    r"(-?\d{1,9}(?:\.\d+)?)\s*$")                  # Y / northing
+    r"(-?\d{1,9}(?:\.\d+)?)"                       # Y / northing
+    r"(?:\s+-?\d{1,9}(?:\.\d+)?)*\s*$")            # elevation, depth, fold...
 
 _MIN_POINTS = 4          # fewer than this is not a survey line
 

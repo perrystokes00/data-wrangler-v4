@@ -2220,6 +2220,11 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
                  max_files=None, inventory_only=False, stall_timeout=180,
                  per_type_cap=None, parse_mode="thread", single_pass=False,
                  should_abort=None, scope="path",
+                 # Set by run_pipeline_batched, which resets ONCE before its
+                 # loop. Without it every batch would re-queue the files the
+                 # previous batch just did, and the loop would never end —
+                 # the same non-termination the reset design exists to avoid.
+                 force_reset_done=False,
                  # gold, not WELL_MASTER: every real caller (the workbench's
                  # _wb_ref(), pipeline_proc_runner, enrich_file_headers's own
                  # DEFAULT_REF) resolves against the gold master, and this
@@ -2352,6 +2357,17 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
     # be silently ignored whenever single-pass happened to be on.
     _merged = bool(single_pass and parse_mode == "process" and do_capture
                    and not recognise)
+    # FORCE: clear the done-flag once, then the ordinary pending path runs.
+    # Placed here — after _scope_root is resolved, before the first stage
+    # that claims on it — so the reset is bounded by exactly the scope the
+    # run itself uses.
+    if _go() and force and not force_reset_done:
+        try:
+            _force_reset_extract(engine, log, exts, _scope_root)
+        except Exception as e:
+            s["errors"]["force_reset"] = str(e)
+            log(f"[force] re-queue FAILED: {e}")
+
     if _go():
         if _merged:
             with _timed("extract+capture"):
@@ -2653,6 +2669,46 @@ def _engine_spec(engine):
     return {"server": server, "database": database, "driver": driver}
 
 
+def _force_reset_extract(engine, log, exts=None, root=None):
+    r"""Put already-extracted files back in the extract queue. Returns the count.
+
+    THIS IS WHAT --force IS. Not a second claim predicate: extract claims in
+    chunks and re-queries between them, so a predicate that ignores
+    HEADER_EXTRACTED never empties and the stage loops forever on the same
+    files (measured: ok 14 -> 28 -> 42, no exit). Clearing the flag ONCE puts
+    the files into the ordinary pending set, which drains as work completes.
+
+    Everything downstream — the claim query, _unprocessed_count, the batch
+    loop's termination test — then needs no knowledge of force at all, which is
+    the point: one definition of extract-pending, still.
+
+    SCOPED by root and exts exactly like the run itself, because dropping the
+    done-flag catalog-wide would queue every tree ever scanned. 'S' (SKIPPED)
+    and 'M' (MOVED) are left alone; see promotion_lineage.EXTRACT_FORCE_RESET.
+    """
+    from sqlalchemy import text as _t
+    from dataview.file_catalog.promotion_lineage import pending_sql
+    where = [pending_sql("extract-force-reset")]
+    params = {}
+    if root:
+        where.append(_root_predicate(root, ""))
+    if exts:
+        ph = []
+        for i, e in enumerate(sorted(exts)):
+            k = f"e{i}"
+            ph.append(f":{k}")
+            params[k] = e if e.startswith(".") else "." + e
+        where.append(f"LOWER(FILE_EXT) IN ({', '.join(ph)})")
+    sql = ("UPDATE file_catalog.GLOBAL_FILE_CATALOG SET HEADER_EXTRACTED = NULL "
+           "WHERE " + " AND ".join(where))
+    with engine.begin() as con:
+        n = con.execute(_t(sql), params).rowcount or 0
+    log(f"[force] re-queued {n:,} already-extracted file(s) "
+        f"{'under ' + str(root) if root else 'across the whole catalog'} "
+        f"(SKIPPED / MOVED / duplicates left alone)")
+    return n
+
+
 def _unprocessed_count(engine, exts=None, root=None):
     """Files still awaiting extract — the same predicate _stage_extract selects
     on (pending, not skipped, not a duplicate). Drives batch-loop termination.
@@ -2710,6 +2766,17 @@ def run_pipeline_batched(engine, root, *, batch_size=1000, max_batches=None,
     # reporting files "stuck". Same canonicalisation run_pipeline applies.
     from dataview.core.path_identity import canon_root as _canon
     _batch_root = _canon(root) if kw.get("scope", "path") == "path" else None
+
+    # FORCE, ONCE, BEFORE THE LOOP. Every batch calls run_pipeline, so a
+    # per-batch reset would re-queue the files the previous batch just
+    # finished and the loop could never drain. Reset here, then tell the
+    # batches it is done. Uses _batch_root so the reset is bounded by the
+    # SAME scope the gauge and the batches use — a reset that reached wider
+    # would queue work no batch will claim, and the no-progress guard would
+    # call the finished run stuck.
+    if kw.get("force"):
+        _force_reset_extract(engine, log, exts, _batch_root)
+        kw["force_reset_done"] = True
 
     if scan_first:
         log(f"[batch] inventory pass — scanning {root}")
@@ -2815,6 +2882,8 @@ def main():
     ap.add_argument("--per-type-cap", type=int, default=None,
                     help="TIMING TEST: process at most N pending files per "
                          "FILE_EXT in one sampling pass (e.g. 5 = 5 of each type)")
+    ap.add_argument("--force", action="store_true",
+                    help="re-do files already extracted/captured. SKIPPED ('S'), MOVED ('M') and duplicates are still left alone. Scoped to --root unless --scope queue.")
     ap.add_argument("--scope", choices=["path", "queue"], default="path",
                     help="path (default): process only files under ROOT. "
                          "queue: process the whole pending inventory, wherever "
@@ -2865,7 +2934,7 @@ def main():
     eng = _engine(a.server, a.database)
     _common = dict(
         workers=a.workers, schema=a.schema, parse_mode=a.parse_mode,
-        single_pass=a.single_pass, scope=a.scope,
+        single_pass=a.single_pass, scope=a.scope, force=a.force,
         do_enrich=not a.no_enrich, do_capture=not a.no_capture,
         recognise=a.recognise, pack=a.pack,
         do_vault=not a.no_vault, vault_root=a.vault_root,

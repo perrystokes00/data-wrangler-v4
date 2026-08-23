@@ -1591,7 +1591,17 @@ def _qry_seismic_3d(_engine) -> pd.DataFrame:
     """
     try:
         with _engine.connect() as con:
-            return pd.read_sql(text("""
+            # BAD_FILE is created on first use, so a database that has
+            # never rejected a file does not have it. Naming it
+            # unconditionally makes the whole statement fail to compile —
+            # and this function returns an empty frame on any exception,
+            # so every 3D survey would quietly stop drawing. Probe, then
+            # compose.
+            _has_bad = con.execute(text(
+                "SELECT OBJECT_ID('file_catalog.BAD_FILE')")).scalar() is not None
+            _bad = ("AND NOT EXISTS (SELECT 1 FROM file_catalog.BAD_FILE bf"
+                    " WHERE bf.INVENTORY_ID = sh.INVENTORY_ID)") if _has_bad else ""
+            return pd.read_sql(text(f"""
                 SELECT
                     sh.SEIS_HEADER_ID                AS id,
                     sh.SURVEY_NAME                   AS survey_name,
@@ -1610,6 +1620,15 @@ def _qry_seismic_3d(_engine) -> pd.DataFrame:
                 LEFT JOIN file_catalog.GLOBAL_FILE_CATALOG fc
                     ON fc.INVENTORY_ID = sh.INVENTORY_ID
                 WHERE sh.SEIS_SET_TYPE = '3D'
+                  -- A REJECTED FILE MUST NOT DRAW. This layer is the one
+                  -- seismic path that reads the CATALOG directly rather than
+                  -- dv_seis_*, so deleting a bad file's promoted rows leaves
+                  -- its rectangle on the map regardless. Both tests are here
+                  -- because they are set independently: _mark_bad writes
+                  -- BAD_FILE and stamps SKIPPED, but a file can be skipped
+                  -- without ever being fingerprinted bad.
+                  AND ISNULL(fc.CATALOG_READINESS,'') <> 'SKIPPED'
+                  {_bad}
                   AND sh.BBOX_MIN_LAT IS NOT NULL
                   AND sh.BBOX_MAX_LAT IS NOT NULL
                   AND sh.BBOX_MIN_LON IS NOT NULL

@@ -1554,7 +1554,9 @@ def _seis_survey_grid(engine):
         else:
             with engine.begin() as con:
                 for up in ups:
-                    con.execute(_t("UPDATE file_catalog.FILE_SEIS_HEADER "
-                                   "SET SURVEY_NAME=:v WHERE SEIS_HEADER_ID=:id"), up)
+                    con.execute(_t(
+                        "UPDATE file_catalog.FILE_SEIS_HEADER "
+                        "SET SURVEY_NAME=:v, SURVEY_NAME_SOURCE='manual' "
+                        "WHERE SEIS_HEADER_ID=:id"), up)
             st.success(f"Wrote {len(ups)} survey name(s).")
             st.rerun()

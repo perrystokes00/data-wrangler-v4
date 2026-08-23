@@ -61,7 +61,7 @@ from dataview.file_catalog.extract_core import (
     _safe_sample_interval, _safe_trace_count, _safe_epsg,
     _valid_date, _score, _issues, _clamp_well,
     _SQL_GFC_UPDATE, _SQL_WELL_MERGE, _SQL_SEIS_MERGE,
-    _gfc_params, _well_params, _seis_params,
+    _gfc_params, _well_params, _seis_params, ensure_seis_columns,
     _write_enrichment_on, _write_enrichment_batch,
     _set_readiness_cataloged, _load_rows_to_catalog,
     _do_extract as _ec_do_extract,
@@ -1019,29 +1019,9 @@ def _enrich_chunk(engine, dialect):
                     "conf":    _safe_num(fields.get("confidence")),
                 })
             elif category == "SEIS":
-                seis_params.append({
-                    "hid":      uuid.uuid5(uuid.NAMESPACE_URL, inv_id+"_s").hex.upper(),
-                    "inv_id":   inv_id,
-                    "sn":       _trunc(fields.get("survey_name"),255),
-                    "ln":       _trunc(fields.get("line_name"),255),
-                    "stype":    _trunc(fields.get("seis_set_type"),40),
-                    "sd":       _trunc(fields.get("survey_date"),20),
-                    "contr":    _trunc(fields.get("contractor"),255),
-                    "bmin_lat": _safe_coord(fields.get("bbox_min_lat")),
-                    "bmax_lat": _safe_coord(fields.get("bbox_max_lat")),
-                    "bmin_lon": _safe_coord(fields.get("bbox_min_lon")),
-                    "bmax_lon": _safe_coord(fields.get("bbox_max_lon")),
-                    "epsg":     _safe_epsg(fields.get("epsg_code")),
-                    "si":       _safe_sample_interval(fields.get("sample_interval")),
-                    "tc":       _safe_trace_count(fields.get("trace_count")),
-                    "sf":       _trunc(fields.get("shot_first"),20),
-                    "sl":       _trunc(fields.get("shot_last"),20),
-                    "il_min":   fields.get("il_min"),
-                    "il_max":   fields.get("il_max"),
-                    "xl_min":   fields.get("xl_min"),
-                    "xl_max":   fields.get("xl_max"),
-                    "outline":  fields.get("survey_outline"),
-                })
+                # _seis_params, not a sixth hand-written copy — it is
+                # what carries SURVEY_NAME_SOURCE into the MERGE.
+                seis_params.append(_seis_params(inv_id, fields))
             done += 1
         elif outcome == "skip" and inv_id is not None:
             # Size-gate or other deliberate skip — write 'S' so the file
@@ -1099,40 +1079,8 @@ def _enrich_chunk(engine, dialect):
                     );
                 """), well_params)
             if seis_params:
-                con.execute(_t("""
-                    MERGE file_catalog.FILE_SEIS_HEADER AS tgt
-                    USING (SELECT :hid AS SEIS_HEADER_ID) src
-                    ON tgt.SEIS_HEADER_ID = src.SEIS_HEADER_ID
-                    WHEN MATCHED THEN UPDATE SET
-                        SURVEY_NAME=:sn, LINE_NAME=:ln,
-                        SEIS_SET_TYPE=:stype, SURVEY_DATE=:sd,
-                        CONTRACTOR=:contr,
-                        BBOX_MIN_LAT=:bmin_lat, BBOX_MAX_LAT=:bmax_lat,
-                        BBOX_MIN_LON=:bmin_lon, BBOX_MAX_LON=:bmax_lon,
-                        EPSG_CODE=:epsg, SAMPLE_INTERVAL=:si,
-                        TRACE_COUNT=:tc, SHOT_FIRST=:sf, SHOT_LAST=:sl,
-                        IL_MIN=:il_min, IL_MAX=:il_max,
-                        XL_MIN=:xl_min, XL_MAX=:xl_max,
-                        SURVEY_OUTLINE=:outline,
-                        EXTRACTED_DATE=GETUTCDATE()
-                    WHEN NOT MATCHED THEN INSERT (
-                        SEIS_HEADER_ID,INVENTORY_ID,
-                        SURVEY_NAME,LINE_NAME,SEIS_SET_TYPE,SURVEY_DATE,
-                        CONTRACTOR,BBOX_MIN_LAT,BBOX_MAX_LAT,
-                        BBOX_MIN_LON,BBOX_MAX_LON,EPSG_CODE,
-                        SAMPLE_INTERVAL,TRACE_COUNT,SHOT_FIRST,SHOT_LAST,
-                        IL_MIN,IL_MAX,XL_MIN,XL_MAX,SURVEY_OUTLINE,
-                        EXTRACTED_DATE,EXTRACTED_BY
-                    ) VALUES (
-                        :hid,:inv_id,
-                        :sn,:ln,:stype,:sd,
-                        :contr,:bmin_lat,:bmax_lat,
-                        :bmin_lon,:bmax_lon,:epsg,
-                        :si,:tc,:sf,:sl,
-                        :il_min,:il_max,:xl_min,:xl_max,:outline,
-                        GETUTCDATE(),'DataWrangler'
-                    );
-                """), seis_params)
+                ensure_seis_columns(con)
+                con.execute(_t(_SQL_SEIS_MERGE), seis_params)
             if error_params:
                 con.execute(_t("""
                     UPDATE file_catalog.GLOBAL_FILE_CATALOG
@@ -1464,12 +1412,13 @@ _SQL_SURVEY_SEIS = """
     USING (SELECT :hid AS SEIS_HEADER_ID) src
     ON tgt.SEIS_HEADER_ID = src.SEIS_HEADER_ID
     WHEN MATCHED THEN UPDATE SET
-        SURVEY_NAME=:sn, EXTRACTED_DATE=GETUTCDATE()
+        SURVEY_NAME=:sn, SURVEY_NAME_SOURCE='manual',
+        EXTRACTED_DATE=GETUTCDATE()
     WHEN NOT MATCHED THEN INSERT (
-        SEIS_HEADER_ID, INVENTORY_ID, SURVEY_NAME,
+        SEIS_HEADER_ID, INVENTORY_ID, SURVEY_NAME, SURVEY_NAME_SOURCE,
         EXTRACTED_DATE, EXTRACTED_BY
     ) VALUES (
-        :hid, :iid, :sn, GETUTCDATE(), 'DataWrangler'
+        :hid, :iid, :sn, 'manual', GETUTCDATE(), 'DataWrangler'
     );
 """
 
@@ -6663,7 +6612,9 @@ def _seis_survey_grid(engine):
         else:
             with engine.begin() as con:
                 for up in ups:
-                    con.execute(_t("UPDATE file_catalog.FILE_SEIS_HEADER "
-                                   "SET SURVEY_NAME=:v WHERE SEIS_HEADER_ID=:id"), up)
+                    con.execute(_t(
+                        "UPDATE file_catalog.FILE_SEIS_HEADER "
+                        "SET SURVEY_NAME=:v, SURVEY_NAME_SOURCE='manual' "
+                        "WHERE SEIS_HEADER_ID=:id"), up)
             st.success(f"Wrote {len(ups)} survey name(s).")
             st.rerun()
