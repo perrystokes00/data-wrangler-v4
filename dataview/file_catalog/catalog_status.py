@@ -115,6 +115,21 @@ _HOLD_NO_COORDS = "no coords"
 # holding a well "for no coords" when the coords were never the reason.
 _HOLD_NO_WELL_UWI = "no UWI on detail row"
 _HOLD_WELL_HELD = "well header held"
+
+# "Clear the header's reason" is true and useless if the report will not say
+# WHICH reason. Measured 23 Aug: three files each showed
+# {'no coords': 1, 'well header held': 30} — the blocker was the OTHER reason
+# on the same row, and the remedy still sent the operator looking. So the
+# label names it, and the four states stay honest: this is still ONE hold,
+# just one that says what it is waiting for.
+_HOLD_WELL_HELD_NOCOORD = _HOLD_WELL_HELD + " (no coords)"
+
+# ONE definition of "this header has no usable location", formatted for
+# whichever alias the caller is using. It is the header's own gate AND the
+# thing a detail row is waiting on, and two spellings would let the report say
+# a header is held for no coords while telling its detail rows something else.
+_COORD_MISSING = ("({a}.[surface_latitude] IS NULL "
+                  "OR {a}.[surface_longitude] IS NULL)")
 _HOLD_WELL_MISSING = "well header never staged"
 _HOLD_SEIS_UNNAMED = "no survey name"
 _HOLD_SEIS_UNMAPPABLE = "no outline or bbox"
@@ -141,7 +156,13 @@ CLEAR_ROUTE = {
     _HOLD_NO_WELL_UWI: ("These rows carry no UWI, so they are waiting on nothing. "
                         "Assign the file a UWI and re-capture, or reject it."),
     _HOLD_WELL_HELD: ("The well's own header is staged and held. Clear the "
-                      "header's reason; these rows lift with it."),
+                      "header's reason -- it is usually the OTHER reason "
+                      "listed against this same file; these rows lift with it."),
+    _HOLD_WELL_HELD_NOCOORD: (
+        "The well's own header is held for NO COORDS -- that is the only thing "
+        "standing between these rows and dv_. Run coord enrich; if the well is "
+        "not in the gold master, read the surface location off the document "
+        "(\"Open a file\" below) -- the gate is not waived."),
     _HOLD_WELL_MISSING: ("The well is in neither dv_well nor cat_well -- no "
                          "header has ever been captured for it. Catalog the "
                          "document that carries the header, or reject these."),
@@ -290,8 +311,35 @@ def _mirror_holds(con, cat: str, dv: str, notes: list):
                 _in_cat = (
                     f"EXISTS (SELECT 1 FROM {CAT_SCHEMA}.cat_well h "
                     f"WHERE h.PROMOTED = 0 AND {_norm('h.UWI')} = {_norm('m.UWI')})")
-                _add(_HOLD_WELL_HELD,
-                     f"(NOT {_blank} AND NOT {_in_dv} AND {_in_cat})")
+                # NAME WHAT THE PARENT IS WAITING FOR. Coordinates are the
+                # overwhelmingly common blocker, and the one whose remedy
+                # differs most (enrich from gold, or read it off the document
+                # -- the gate is not waived either way), so it gets its own
+                # label instead of hiding inside a generic "held".
+                _hdr_cols = _table_cols(con, CAT_SCHEMA, "cat_well")
+                _split = ("surface_latitude" in _hdr_cols
+                          and "surface_longitude" in _hdr_cols)
+                if _split:
+                    _in_cat_nc = (
+                        f"EXISTS (SELECT 1 FROM {CAT_SCHEMA}.cat_well h "
+                        f"WHERE h.PROMOTED = 0 "
+                        f"AND {_norm('h.UWI')} = {_norm('m.UWI')} "
+                        f"AND {_COORD_MISSING.format(a='h')})")
+                    # MUTUALLY EXCLUSIVE BY CONSTRUCTION. One UWI can match
+                    # several staged headers -- one coordless, one not -- so
+                    # the generic case is "held AND NOT held-for-coords"
+                    # rather than a second EXISTS that could both be true.
+                    # The two still sum to exactly {_in_cat}, which is what
+                    # keeps this gate's total equal to the rows promote
+                    # refuses.
+                    _add(_HOLD_WELL_HELD_NOCOORD,
+                         f"(NOT {_blank} AND NOT {_in_dv} AND {_in_cat_nc})")
+                    _add(_HOLD_WELL_HELD,
+                         f"(NOT {_blank} AND NOT {_in_dv} AND {_in_cat} "
+                         f"AND NOT {_in_cat_nc})")
+                else:
+                    _add(_HOLD_WELL_HELD,
+                         f"(NOT {_blank} AND NOT {_in_dv} AND {_in_cat})")
                 _add(_HOLD_WELL_MISSING,
                      f"(NOT {_blank} AND NOT {_in_dv} AND NOT {_in_cat})")
             else:
@@ -314,8 +362,7 @@ def _mirror_holds(con, cat: str, dv: str, notes: list):
             # what makes the two agree.
             _add(_HOLD_NO_COORDS,
                  "(NULLIF(LTRIM(RTRIM(m.UWI)),'') IS NOT NULL "
-                 "AND (m.[surface_latitude] IS NULL "
-                 "OR m.[surface_longitude] IS NULL))")
+                 "AND " + _COORD_MISSING.format(a="m") + ")")
 
     # --- gate 3: unresolved reference vocabulary ---------------------------- #
     # Guarded only where the column exists on BOTH sides, which is promote's
