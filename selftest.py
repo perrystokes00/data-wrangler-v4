@@ -1014,6 +1014,39 @@ def tier_units(res, verbose=False):
     check("status: files with a header but no UWI are surfaced, not silent",
           _status_surfaces_no_uwi)
 
+    # 17. TWO MODULES OWN HALVES OF CATALOG_READINESS AND MUST AGREE.
+    #     catalog_readiness owns the catalog/promote axis and preserves
+    #     'SKIPPED' by name; triage owns the identity axis and preserved it
+    #     only via FLAG_DELETE. Marking a file bad sets CATALOG_READINESS but
+    #     NOT that flag, so a triage run un-rejected everything rejected
+    #     through the UI — measured 23 Aug, all 8 SKIPPED files had
+    #     FLAG_DELETE NULL and would have gone back to READY/REVIEW.
+    def _rejection_survives_triage():
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent / "dataview" / "file_catalog"
+        tri = (root / "triage_inventory.py").read_text(encoding="utf-8",
+                                                       errors="replace")
+        rdy = (root / "catalog_readiness.py").read_text(encoding="utf-8",
+                                                        errors="replace")
+        for src, who in ((tri, "triage_inventory"), (rdy, "catalog_readiness")):
+            assert "CATALOG_READINESS = 'SKIPPED' THEN 'SKIPPED'" in src, (
+                f"{who} no longer preserves SKIPPED BY NAME — a file rejected "
+                f"in the UI sets CATALOG_READINESS without FLAG_DELETE, so it "
+                f"would be un-rejected and re-enter the pipeline")
+        # ...and the .las READY shortcut must stay conditioned on the thing its
+        # own comment gives as the justification: that no header row exists yet.
+        # Unconditional, it stamps READY on a LAS whose captured header has no
+        # UWI — a confident wrong value that stages nothing, promotes nothing,
+        # and cannot be reported because holds come from cat_* rows.
+        i = tri.find("LOWER(g.FILE_EXT) = '.las'")
+        assert i > 0, "the .las triage branch has moved or been renamed"
+        assert "h.INVENTORY_ID IS NULL" in tri[i:i + 120], (
+            "the .las READY shortcut is unconditional again — it overrules a "
+            "captured header that has no UWI, and those files then sit at "
+            "READY with nothing staged and no reason anywhere")
+    check("a rejected file stays rejected through a re-triage",
+          _rejection_survives_triage)
+
     return res
 
 

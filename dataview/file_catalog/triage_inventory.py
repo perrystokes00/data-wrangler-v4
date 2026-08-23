@@ -435,12 +435,36 @@ TIER_SQL = f"""
             ELSE 'LOW' END,
         CATALOG_READINESS = CASE
             WHEN g.FLAG_DELETE = 1 THEN 'SKIPPED'
+            -- A REJECTION MUST SURVIVE A RE-TRIAGE. Marking a file bad stamps
+            -- CATALOG_READINESS='SKIPPED' and does NOT set FLAG_DELETE, so
+            -- preserving only the flag un-rejected everything rejected through
+            -- the UI. MEASURED 23 Aug: all 8 SKIPPED files had FLAG_DELETE
+            -- NULL, and this CASE would have returned every one of them to
+            -- READY/REVIEW and back into the pipeline -- including files
+            -- rejected minutes earlier for being unreadable.
+            -- catalog_readiness._CASE already preserves SKIPPED by name; two
+            -- modules owning adjacent halves of one column must agree, and
+            -- they did not.
+            WHEN g.CATALOG_READINESS = 'SKIPPED' THEN 'SKIPPED'
             WHEN g.CATALOG_READINESS IN ('CATALOGED','PROMOTED')
                  THEN g.CATALOG_READINESS
             -- .las carries its own UWI in the header; _stage_extract skips .las
             -- (capture writes FILE_WELL_HEADER), so there's no header row at triage
             -- time. Mark READY — the UWI resolves at capture. (LAS carries its own UWI.)
-            WHEN LOWER(g.FILE_EXT) = '.las' THEN 'READY' 
+            --
+            -- ONLY WHILE THAT IS STILL TRUE, and the condition now says so.
+            -- The justification is "there is no header row YET"; once capture
+            -- has written one, the answer is in front of us and a shortcut
+            -- must not overrule it. Six .las files sat at READY with
+            -- FILE_WELL_HEADER.UWI and UWI14 both NULL, which is a confident
+            -- wrong value: nothing stages, nothing promotes, and no gate can
+            -- name a reason because holds are derived from cat_* rows that
+            -- were never written. Triple-invisible -- READY says fine, the
+            -- backlog says nothing, and the file never moves.
+            -- They fall through to REVIEW now, which is exactly what the
+            -- IDENTITY_CONFIDENCE arm beside this one already says about a
+            -- well name with no confident UWI.
+            WHEN LOWER(g.FILE_EXT) = '.las' AND h.INVENTORY_ID IS NULL THEN 'READY'
             WHEN (NULLIF(h.UWI14,'') IS NOT NULL
                   OR NULLIF(LTRIM(RTRIM(h.UWI)),'') IS NOT NULL)
                  AND ISNULL(h.IDENTITY_SOURCE,'') NOT LIKE 'path%' THEN 'READY'
