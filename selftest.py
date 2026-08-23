@@ -938,23 +938,31 @@ def tier_units(res, verbose=False):
             "the manual survey-name UPDATE is spelled out in " +
             ", ".join(sorted(writers)) +
             " — import seis_survey_assign.seis_survey_grid instead of copying it")
-        # and the panel must keep the group path, which is the whole point:
-        # 2D lines arrive as a set and typing one name per file is how five
-        # lines of one survey become five surveys
+        # THE GROUP IS THE UNIT. 2D lines arrive as a set; one survey spans
+        # all of them. The panel must let a name be typed ONCE and written to
+        # a chosen group — not once per file, which is transcription, and
+        # transcription is how one survey becomes five.
         from dataview.file_catalog import seis_survey_assign as _ssa
         s = (root / "dataview" / "file_catalog" /
              "seis_survey_assign.py").read_text(encoding="utf-8", errors="replace")
-        assert "Apply to all" in s, "the group-assign control is gone"
+        assert "st.multiselect" in s, \
+            "the group selection is gone — a name can no longer be applied to " \
+            "a chosen set of lines, only file by file"
+        assert "default=_all_ids" in s, \
+            "the group no longer defaults to every held file; the common case " \
+            "(all these lines are one survey) stops being the zero-click path"
         assert "'manual'" in s or '"manual"' in s, \
             "a typed survey name must be stamped SURVEY_NAME_SOURCE='manual', " \
             "or enrich refills it from the file name and a re-extract blanks it"
-        # Streamlit scar #6: the bulk fill must go through a REQUEST consumed
-        # before the widgets are drawn, never a post-instantiation assignment
-        assert "_BULK_REQ" in s and "st.session_state.pop(_BULK_REQ" in s, \
-            "the group assign no longer uses a request flag consumed before " \
-            "the per-file widgets are created — assigning a widget's own key " \
-            "after instantiation raises on a LATER run, on whatever page " \
-            "draws next"
+        # THIS PANEL RENDERS INSIDE AN EXPANDER (Status & Backlog), and
+        # Streamlit forbids nesting them — so the per-file section must stay a
+        # toggle. An expander here raises only on the page that embeds it,
+        # which is exactly the kind of delayed, misattributed crash scar #6
+        # describes.
+        assert "st.expander" not in s, \
+            "seis_survey_assign uses an expander, but it is rendered INSIDE " \
+            "one on Status & Backlog — Streamlit refuses nested expanders. " \
+            "Use a checkbox/toggle or st.container(border=True)."
         assert callable(_ssa.seis_survey_grid)
     check("seismic: one survey-assign panel, with the group path intact",
           _one_survey_assign_ui)

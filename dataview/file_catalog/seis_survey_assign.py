@@ -1,13 +1,12 @@
 """
 seis_survey_assign.py — name the surveys the extractor refused to guess.
 
-ONE IMPLEMENTATION, imported by both pages that offer it. page_workbench and
-page_file_catalog each carried their own `_seis_survey_grid`, and they had
-already DRIFTED: the workbench's was a paged text_input grid, the file
-catalog's an older `data_editor` version querying different columns with a
-LEFT JOIN. Two spellings of one feature is how the escapechar bug came back
-through a fourth writer, and it is why FILE_SEIS_HEADER's MERGE now lives in
-exactly one place. This is the same move for the UI that writes it.
+ONE IMPLEMENTATION, imported by every page that offers it. page_workbench and
+page_file_catalog each carried their own `_seis_survey_grid` and they had
+already DRIFTED: a paged text_input grid in one, an older `data_editor`
+version querying different columns with a LEFT JOIN in the other. Two
+spellings of one feature is how the escapechar bug came back through a fourth
+writer, and why FILE_SEIS_HEADER's MERGE now lives in exactly one place.
 
 WHY A HUMAN HAS TO DO THIS AT ALL
 ---------------------------------
@@ -21,16 +20,26 @@ and a survey-name regex captures "AREA MAP ID". The extractor refuses that
 files as one invented survey, and leaves SURVEY_NAME NULL with
 SURVEY_NAME_SOURCE='rejected-template'. promote_seismic then HOLDS them.
 
-So the name is a DECISION, not a step, and the design law says automation may
-skip ceremony but never a decision. This panel is where the decision gets made.
+The name is a DECISION, not a step. Automation may skip ceremony, never a
+decision — so this panel is where the decision gets made.
 
-THE GROUP CASE IS THE COMMON ONE
---------------------------------
-2D lines arrive as a set: lineA..lineE are five files of ONE survey. Typing the
-same name five times is not review, it is transcription — and transcription is
-where typos become two surveys that should have been one. So "apply to all
-shown" fills the boxes and Save still writes them, keeping the confirm step
-that makes it a decision rather than a bulk overwrite.
+THE GROUP IS THE UNIT, NOT THE FILE
+-----------------------------------
+2D lines arrive as a SET: lineA..lineE are five files of ONE survey. The first
+cut of this panel rendered a text box per file and the operator typed the same
+name five times, which is transcription, not review — and transcription is
+where a typo becomes two surveys that should have been one. The per-file
+"guess from path" made it worse by offering LINEA, LINEB, LINEC… — a different
+name for every line, as the path of least resistance.
+
+The second cut added "apply to all", which still left five boxes to save and
+could not express "these three, not those two".
+
+So the group is the primary object here: ONE name, a selection of the lines it
+covers (all of them by default, because that is the common case), one write.
+Per-file editing is still available behind a toggle for the genuinely mixed
+case — a toggle rather than an expander, because this panel renders INSIDE an
+expander on Status & Backlog and Streamlit forbids nesting them.
 """
 from __future__ import annotations
 
@@ -38,7 +47,32 @@ import streamlit as st
 
 REVIEW_PAGE = 200      # cap rows rendered at once (text_inputs are cheap, not free)
 
-_BULK_REQ = "pl_seis_bulk_req"
+_SQL_UNNAMED = """
+    SELECT sh.SEIS_HEADER_ID AS id, sh.INVENTORY_ID AS inv,
+           g.FILE_NAME AS fname, g.FILE_PATH AS path,
+           sh.SEIS_SET_TYPE AS stype, sh.SURVEY_NAME AS survey
+    FROM file_catalog.FILE_SEIS_HEADER sh
+    JOIN file_catalog.GLOBAL_FILE_CATALOG g
+           ON g.INVENTORY_ID = sh.INVENTORY_ID
+    WHERE sh.SURVEY_NAME IS NULL OR LTRIM(RTRIM(sh.SURVEY_NAME)) = ''
+    ORDER BY g.FILE_NAME"""
+
+# SURVEY_NAME_SOURCE='manual' is what makes a typed name STICK: it stops
+# enrich_file_headers substituting a filename guess, and extract_core's
+# _SQL_SEIS_MERGE treats 'manual' as outranking everything automatic, so a
+# re-extract cannot blank it. Writing the name without the source is how a
+# survey a person named comes back as 'lineA' with nothing recording the loss.
+_SQL_SET_NAME = ("UPDATE file_catalog.FILE_SEIS_HEADER "
+                 "SET SURVEY_NAME=:v, SURVEY_NAME_SOURCE='manual' "
+                 "WHERE SEIS_HEADER_ID=:id")
+
+
+def _write(engine, pairs, _t):
+    """pairs = [{'id': header_id, 'v': survey_name}] — one transaction."""
+    with engine.begin() as con:
+        for up in pairs:
+            con.execute(_t(_SQL_SET_NAME), up)
+    return len(pairs)
 
 
 def seis_survey_grid(engine):
@@ -46,23 +80,8 @@ def seis_survey_grid(engine):
     from sqlalchemy import text as _t
     from dataview.core import path_identity as _pi
 
-    # CONSUME THE BULK REQUEST BEFORE ANY WIDGET IS DRAWN. Streamlit scar #6:
-    # a widget's own key must never be assigned after instantiation — it raises
-    # on a LATER run, on whatever page draws next, so the crash appears far
-    # from its cause. The button below therefore only records a REQUEST and
-    # reruns; this is where it is honoured, ahead of the text_inputs.
-    bulk = st.session_state.pop(_BULK_REQ, None)
-
     with engine.connect() as con:
-        rows = con.execute(_t("""
-            SELECT sh.SEIS_HEADER_ID AS id, sh.INVENTORY_ID AS inv,
-                   g.FILE_NAME AS fname, g.FILE_PATH AS path,
-                   sh.SURVEY_NAME AS survey
-            FROM file_catalog.FILE_SEIS_HEADER sh
-            JOIN file_catalog.GLOBAL_FILE_CATALOG g
-                   ON g.INVENTORY_ID = sh.INVENTORY_ID
-            WHERE sh.SURVEY_NAME IS NULL OR LTRIM(RTRIM(sh.SURVEY_NAME)) = ''
-            ORDER BY g.FILE_NAME""")).fetchall()
+        rows = con.execute(_t(_SQL_UNNAMED)).fetchall()
 
     if not rows:
         st.success("Every seismic header already has a survey name.")
@@ -72,79 +91,88 @@ def seis_survey_grid(engine):
     rows = rows[:REVIEW_PAGE]
     if total > REVIEW_PAGE:
         st.caption(f"{total} files need a survey name — showing the first "
-                   f"{REVIEW_PAGE}. Save these, then the next batch appears.")
-    else:
-        st.caption(f"{total} file(s) need a survey name. Edit the value, then Save.")
+                   f"{REVIEW_PAGE}.")
 
-    # ── group assign ────────────────────────────────────────────────────────
-    # 2D lines come as a set; one survey spans all of them. Filling the boxes
-    # rather than writing straight through keeps Save as the confirm step.
-    with st.container(border=True):
-        st.caption("**Same survey for all of these?** Fill every box below in "
-                   "one go, then review and Save. Typing one name per file is "
-                   "how five lines of one survey become five surveys.")
-        _b1, _b2 = st.columns([3, 1])
-        _bulk_val = _b1.text_input(
-            "survey name for all shown", key="pl_seis_bulk",
-            label_visibility="collapsed",
-            placeholder="e.g. NPR-3 2D — applies to all files listed below")
-        if _b2.button("Apply to all", key="pl_seis_bulk_apply",
-                      use_container_width=True):
-            _v = str(_bulk_val or "").strip()
-            if not _v:
-                st.warning("Type a survey name first.")
-            else:
-                # request only — honoured at the top of the NEXT run, before
-                # the per-file widgets exist. See the note above.
-                st.session_state[_BULK_REQ] = _v
-                st.rerun()
+    def _label(r):
+        t = (r.stype or "").strip()
+        return f"{r.fname or _pi._basename(r.path or '') or r.inv}" + (f"  ({t})" if t else "")
 
+    _by_id = {r.id: r for r in rows}
+    _labels = {r.id: _label(r) for r in rows}
+    _all_ids = list(_by_id)
+
+    # ── the group path: one name, one selection, one write ──────────────────
+    st.markdown("**Name one survey**")
+    st.caption(f"{total} file(s) need a survey name. 2D lines usually belong to "
+               f"ONE survey — name it once here. Everything is selected by "
+               f"default; deselect anything that belongs to a different survey.")
+
+    name = st.text_input(
+        "Survey name", key="seis_grp_name",
+        placeholder="e.g. NPR-3 2D",
+        help="Stored with SURVEY_NAME_SOURCE='manual', which stops enrich "
+             "and re-extract overwriting it. It does NOT survive a database "
+             "reset.")
+
+    # default=all — the common case is that every held line is one survey, so
+    # the zero-click path is: type the name, press the button.
+    picked = st.multiselect(
+        "Files in this survey", options=_all_ids, default=_all_ids,
+        format_func=lambda i: _labels.get(i, str(i)),
+        key="seis_grp_pick")
+
+    _n = len(picked)
+    if st.button(f"💾 Assign this survey to {_n} file(s)", type="primary",
+                 key="seis_grp_save", disabled=not _n):
+        _v = str(name or "").strip()
+        if not _v:
+            st.warning("Type a survey name first.")
+        else:
+            n = _write(engine, [{"id": i, "v": _v} for i in picked], _t)
+            st.success(f"Named {n} file(s) “{_v}”. Re-run promote to lift them "
+                       f"into dv_seis_set.")
+            st.rerun()
+
+    # ── the mixed case, behind a toggle ─────────────────────────────────────
+    # A TOGGLE, NOT AN EXPANDER. This panel is rendered inside an expander on
+    # Status & Backlog, and Streamlit forbids nesting them — the same reason
+    # _pipeline_stages reveals Triage & Review with a toggle instead.
+    if not st.checkbox("These are different surveys — let me name them one by one",
+                       key="seis_grp_per_file"):
+        return
+
+    st.caption("The **Guess (from path)** column is a filename, not a survey: "
+               "it offers a different name for every line, which is exactly how "
+               "one survey becomes five. Use it only when the files really are "
+               "unrelated.")
     h1, h2, h3, h4 = st.columns([3, 2, 2, 2])
     h1.markdown("**File**")
     h2.markdown("**Current**")
     h3.markdown("**Guess (from path)**")
     h4.markdown("**Assign survey**")
 
-    inputs = []  # (header_id, widget_key)
+    inputs = []
     for r in rows:
         g = _pi.survey_from_path(r.path or "") or ""
         key = f"pl_seis_{r.id}"
-        if bulk is not None:
-            st.session_state[key] = bulk        # before the widget is created
-        elif key not in st.session_state:
+        if key not in st.session_state:
             st.session_state[key] = g
         c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
-        c1.write(r.fname or _pi._basename(r.path or "") or f"(inventory {r.inv})")
+        c1.write(_labels[r.id])
         c2.write(r.survey or "—")
         c3.write(g or "—")
         c4.text_input("assign survey", key=key, label_visibility="collapsed",
                       placeholder="survey name")
         inputs.append((r.id, key))
 
-    if bulk is not None:
-        st.info(f"Filled {len(inputs)} box(es) with **{bulk}**. "
-                "Review them, then Save.")
-
-    if st.button("💾 Save survey names", type="primary", key="pl_seis_save"):
-        ups = []
-        for rid, key in inputs:
-            v = str(st.session_state.get(key, "") or "").strip()
-            if v:
-                ups.append({"id": rid, "v": v})
+    if st.button("💾 Save per-file names", key="pl_seis_save"):
+        ups = [{"id": rid, "v": str(st.session_state.get(k, "") or "").strip()}
+               for rid, k in inputs]
+        ups = [u for u in ups if u["v"]]
         if not ups:
             st.warning("No survey names to write.")
         else:
-            with engine.begin() as con:
-                for up in ups:
-                    # SURVEY_NAME_SOURCE='manual' is what stops enrich
-                    # substituting a filename guess later, and what stops a
-                    # re-extract blanking the column — see extract_core's
-                    # _SQL_SEIS_MERGE, which treats 'manual' as outranking
-                    # everything automatic.
-                    con.execute(_t(
-                        "UPDATE file_catalog.FILE_SEIS_HEADER "
-                        "SET SURVEY_NAME=:v, SURVEY_NAME_SOURCE='manual' "
-                        "WHERE SEIS_HEADER_ID=:id"), up)
-            st.success(f"Wrote {len(ups)} survey name(s). Re-run promote to "
-                       f"lift them into dv_seis_set.")
+            n = _write(engine, ups, _t)
+            st.success(f"Wrote {n} survey name(s). Re-run promote to lift them "
+                       f"into dv_seis_set.")
             st.rerun()

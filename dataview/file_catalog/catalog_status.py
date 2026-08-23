@@ -148,10 +148,10 @@ CLEAR_ROUTE = {
     # The panel is on THIS page now -- "Name a survey", just above the
     # filters -- so the route is a scroll, not a navigation. Also in
     # Run Pipeline -> (4) Key Wells & Surveys for anyone already there.
-    _HOLD_SEIS_UNNAMED: ("Open \"Name a survey\" above. 2D lines usually share "
-                         "ONE survey -- type it once and use \"Apply to all\" "
-                         "rather than accepting the per-file path guess, which "
-                         "offers a different name for every line."),
+    _HOLD_SEIS_UNNAMED: ("Open \"Name a survey\" above: type the name ONCE and "
+                         "press Assign. 2D lines usually all belong to one "
+                         "survey, so every held file is selected by default -- "
+                         "deselect any that belong to a different one."),
     _HOLD_SEIS_UNMAPPABLE: ("Arm a CRS and re-extract so the file gets a survey "
                             "outline or a complete bbox."),
 }
