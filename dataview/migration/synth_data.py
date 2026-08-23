@@ -317,18 +317,41 @@ PROVENANCE_COLS = {
     "vaulted_at", "scan_date", "root_path", "_batch_loaded_at",
 }
 
+# Columns DERIVED from the row rather than carried with it. h3_r4..h3_r7 are a
+# function of surface_latitude/longitude and of nothing else, computed by
+# h3_refresh. A generator filling them is not merely wrong, it is
+# SELF-PROTECTING: backfill_h3's default keys on `h3_r5 IS NULL`, so a junk
+# value makes the repair skip exactly the rows that need it. h3_refresh.py
+# exists because of these very placeholders — its docstring names 'h3_r4-869'
+# — and had to widen "missing" to mean "not a real H3 index" to get past them.
+#
+# Found 23 Aug: a reload put 'h3_r4-784' … 'h3_r7-718' into all 50 dv_well rows
+# and tripped the "h3 cells are real indexes" invariant. h3_refresh cleared and
+# rebuilt them, but the generator would have written them again on the next
+# load, so the honest fix is to stop inventing them.
+#
+# A PREFIX, not a list: the resolutions in use have already grown r4 -> r7, and
+# a hardcoded set would silently start fabricating r8 the day it is added.
+# geog and h3_coord_hash need no entry — _SKIP already drops them.
+DERIVED_PREFIXES = ("h3_r",)
+
+
+def _is_derived(key: str) -> bool:
+    """True for a column the database computes from other columns."""
+    return key.startswith(DERIVED_PREFIXES)
+
 
 def _value_raw(col, ctx, rng):
     n = col["name"]
     key = n.lower()
-    # PROVENANCE IS CHECKED BEFORE ctx, and the order is the point. ctx is
-    # built per-row and copied into children with dict(w), so the day anyone
-    # sets ctx["inventory_id"] — to thread a real load's id through, say —
-    # this guard goes inert with nothing to show for it: no error, just
-    # fabricated lineage back in the output. A generator has no honest value
-    # for these columns no matter what ctx was told, so nothing upstream is
-    # allowed to overrule it.
-    if key in PROVENANCE_COLS:          # no honest synthetic value — see above
+    # PROVENANCE AND DERIVED COLUMNS ARE CHECKED BEFORE ctx, and the order is
+    # the point. ctx is built per-row and copied into children with dict(w),
+    # so the day anyone sets ctx["inventory_id"] — to thread a real load's id
+    # through, say — this guard goes inert with nothing to show for it: no
+    # error, just fabricated lineage back in the output. A generator has no
+    # honest value for these columns no matter what ctx was told, so nothing
+    # upstream is allowed to overrule it.
+    if key in PROVENANCE_COLS or _is_derived(key):   # see both notes above
         return None
     if key in ctx:                      # parent keys and decided values
         return ctx[key]

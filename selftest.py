@@ -814,13 +814,32 @@ def tier_units(res, verbose=False):
                          dict(poisoned), rng)
             assert got is None, \
                 f"ctx overruled the provenance guard: {name} -> {got!r}"
+        # DERIVED COLUMNS, same rule and a worse failure. h3_r4..h3_r7 are a
+        # function of the coordinates; a fabricated 'h3_r5-108' is
+        # SELF-PROTECTING, because backfill_h3 keys on `h3_r5 IS NULL` and so
+        # skips exactly the rows that need repairing. A reload put these in all
+        # 50 dv_well rows on 23 Aug.
+        for name in ("h3_r4", "h3_r5", "h3_r6", "h3_r7", "H3_R5"):
+            got = _value({"name": name, "type": "varchar", "chars": 20},
+                         dict(base), rng)
+            assert got is None, f"{name} -> {got!r}, expected None"
+        # A PREFIX, NOT A LIST — the resolutions have already grown r4 -> r7,
+        # and the next one must not start life as a placeholder.
+        assert _value({"name": "h3_r8", "type": "varchar", "chars": 20},
+                      dict(base), rng) is None, \
+            "h3 columns are matched by an exact list again — a new resolution " \
+            "would be fabricated the day it is added"
+        # ctx must not resurrect a derived value either
+        assert _value({"name": "h3_r5", "type": "varchar", "chars": 20},
+                      dict(base, h3_r5="h3_r5-108"), rng) is None, \
+            "ctx overruled the derived-column guard"
         # and ordinary columns must still be generated, ctx still consulted
         assert _value({"name": "uwi", "type": "varchar", "chars": 14},
                       dict(base), rng) == "15001209150000"
         assert _value({"name": "well_name", "type": "varchar", "chars": 40},
                       dict(base), rng) is not None
-    check("synth: no fabricated provenance, and ctx cannot overrule it",
-          _synth_provenance)
+    check("synth: no fabricated provenance or derived cells, ctx cannot "
+          "overrule either", _synth_provenance)
 
     # 13. A LOAD THAT CANNOT REGISTER ITS FILE MUST SAY SO. The promote stamps
     #     every inserted row with the file's INVENTORY_ID before registration
