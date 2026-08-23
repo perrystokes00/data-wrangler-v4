@@ -3405,6 +3405,49 @@ def _tab_status(engine, dialect):
                 seis_survey_grid as _seis_assign)
             _seis_assign(engine)
 
+    # ── files with no UWI: NOT a hold, and that is why they were invisible ───
+    # These have an extracted header but NO staged rows, so no cat_ mirror gate
+    # can fire and nothing above can report them. In the four states they are
+    # nearer "Nothing" than "Held" — and a file that produced a header and then
+    # stopped is exactly what this page exists to surface.
+    #
+    # Found 23 Aug tracing 15007205750000_2.las: READY, header extracted
+    # (WELL_NAME 'WEST 1-3'), UWI and UWI14 both NULL, no cat_ rows, and no
+    # reason anywhere — because the reason lives in a mirror it never reached.
+    # 17 files were in that state, the filename carrying a perfectly good UWI
+    # for most of them.
+    #
+    # Counted directly rather than from res.holds, since by construction these
+    # are NOT holds. The count is one indexed read of a small table and gates
+    # the expander, whose body would otherwise run its own query on every
+    # render of this tab.
+    _nouwi_n = 0
+    try:
+        with engine.connect() as _c:
+            if _c.execute(_t(
+                    "SELECT 1 FROM sys.columns WHERE name='UWI14' AND "
+                    "object_id=OBJECT_ID('file_catalog.FILE_WELL_HEADER')")).fetchone():
+                _nouwi_n = _c.execute(_t(
+                    "SELECT COUNT(*) FROM file_catalog.FILE_WELL_HEADER "
+                    "WHERE UWI14 IS NULL OR UWI14 = '00000000000000'")).scalar() or 0
+    except Exception as _ue:
+        # Say so rather than showing nothing: a swallowed count here would look
+        # exactly like "no files need a UWI".
+        st.caption(f"(could not count files needing a UWI: {type(_ue).__name__})")
+    if _nouwi_n:
+        with st.expander(
+                f"🔑 Key a well — {_nouwi_n} file(s) have a header but no UWI, "
+                f"so nothing is staged and no gate can name a reason.",
+                expanded=False):
+            st.caption(
+                "A UWI is per-well, so there is no group shortcut here — but "
+                "the UWI is usually IN THE FILENAME and is already filled in "
+                "below as a guess. Check them and Save. **Match against "
+                "reference** looks each row up in the well master, "
+                "corroborated by total depth, spud date and operator, so a "
+                "shared well name alone never fills the wrong UWI.")
+            _well_key_grid(engine)
+
     # ── Filters ──────────────────────────────────────────────────────────────
     st.divider()
     _states = [_SB_ANY] + sorted(df["state"].unique().tolist())

@@ -979,6 +979,41 @@ def tier_units(res, verbose=False):
     check("seismic: one survey-assign panel, with the group path intact",
           _one_survey_assign_ui)
 
+    # 16. A FILE WITH NO UWI IS INVISIBLE TO A HOLDS-ONLY REPORT. Holds are
+    #     derived from cat_* rows; a header with no UWI stages nothing, so no
+    #     gate fires and Status & Backlog could not name a reason — which is
+    #     exactly what it looked like from the outside: "extracted, held, no
+    #     reason". 17 files were in that state on 23 Aug, the filename carrying
+    #     a usable UWI for 9 of them.
+    #
+    #     So the panel must be gated on its OWN count, never on res.holds, or
+    #     it disappears again for the files that need it most.
+    def _status_surfaces_no_uwi():
+        import inspect
+        from dataview.file_catalog import page_workbench as _pw
+        src = inspect.getsource(_pw._tab_status)
+        assert "_well_key_grid(engine)" in src, \
+            "Status & Backlog no longer offers the well-keying grid — files " \
+            "with a header but no UWI have no route on the page that is " \
+            "supposed to show what is stuck"
+        assert "_nouwi_n" in src, "the no-UWI panel lost its gate"
+        i = src.find("_nouwi_n = ")
+        j = src.find("_well_key_grid(engine)")
+        assert i > 0 and i < j
+        window = src[i:j]
+        assert "res.holds" not in window, \
+            "the no-UWI panel is gated on res.holds — but these files have NO " \
+            "holds by construction (nothing is staged), so it would never show"
+        assert "FILE_WELL_HEADER" in window and "UWI14" in window, \
+            "the gate no longer counts headers lacking a UWI14"
+        # the grid renders INSIDE this expander, so it must not open one itself
+        gsrc = inspect.getsource(_pw._well_key_grid)
+        assert "st.expander" not in gsrc, \
+            "_well_key_grid opens an expander, but Status & Backlog now renders " \
+            "it inside one — Streamlit refuses nested expanders"
+    check("status: files with a header but no UWI are surfaced, not silent",
+          _status_surfaces_no_uwi)
+
     return res
 
 
