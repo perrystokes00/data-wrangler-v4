@@ -2007,7 +2007,17 @@ def _load_rows_to_catalog(engine, dialect, fpath, fext, uwi, rows):
                 # Shared log identity for this LAS — both the log header
                 # (cat_well_log) and its curves (cat_well_log_curve) key on it,
                 # so curves resolve their FK to dv_well_log.log_id on promote.
-                _logid = _wv("LOG_ID", "LOGID") or f"{uwi}-LAS"
+                # NOT f"{uwi}-LAS" when there is no uwi: that renders the
+                # literal string "None-LAS" — a placeholder of exactly the
+                # shape find_placeholders.sql exists to catch, and one that
+                # would COLLIDE across every unkeyed LAS in the corpus, so two
+                # unrelated files' curves would claim one log. Fall back to
+                # something the FILE owns instead: unique per file, stable
+                # across re-runs, and still shared by the header and its curves
+                # because both read this one variable. LOG_ID is varchar(80).
+                _logid = (_wv("LOG_ID", "LOGID")
+                          or (f"{uwi}-LAS" if uwi
+                              else f"{os.path.basename(fpath or '')}-LAS"[:80]))
 
                 # 2) per-curve metadata → cat_well_log_curve (one row per curve,
                 # linked to the log run via log_id). PPDM well_log_curve grain:
@@ -2047,7 +2057,30 @@ def _load_rows_to_catalog(engine, dialect, fpath, fext, uwi, rows):
                 # 3) log-file header → cat_well_log (one row per LAS). Reuses the
                 # depth frame / uom already computed for the curves and the same
                 # _logid the curves carry, so header and curves share one key.
-                if uwi:
+                #
+                # STAGED WHENEVER THE CURVES ARE, WITH OR WITHOUT A UWI. This
+                # was gated on `if uwi:` while the curves above are gated only
+                # on there BEING curves — so a LAS with no UWI staged the
+                # CHILD and skipped the PARENT, which is the one combination
+                # that cannot work. dv_well_log_curve carries
+                # fk_log_curve_log (uwi, log_id) -> dv_well_log, so those
+                # curves can never promote; and because a compound FK is not
+                # covered by _reference_fk_predicates, nothing HELD them
+                # either. Promote attempted the insert and 547'd, failing the
+                # whole mirror.
+                #
+                # MEASURED 23 Aug: cat_well_log empty, cat_well_log_curve 153
+                # unpromoted, every one naming LOG_15007205750000_1 and
+                # friends with no parent. "Promote table failed."
+                #
+                # A NULL uwi on the header is fine and is the same bargain the
+                # curves already take: catalog_status.apply_fix fills uwi on
+                # EVERY staged mirror row that lacks one when the file is
+                # keyed, so parent and child are completed together and
+                # promote in the same pass. Staging neither would also be
+                # consistent, but it throws away header data the file gave us
+                # and leaves nothing for the UWI to attach to.
+                if curve_rows or uwi:
                     try:
                         _logdt = _wv("DATE", "LOGDATE", "DATE_LOG")
                         # Service company arrives as a raw name (e.g. HALLIBURTON)

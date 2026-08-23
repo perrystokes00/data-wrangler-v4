@@ -1047,6 +1047,37 @@ def tier_units(res, verbose=False):
     check("a rejected file stays rejected through a re-triage",
           _rejection_survives_triage)
 
+    # 18. NEVER STAGE A CHILD WITHOUT ITS PARENT. LAS capture staged
+    #     cat_well_log_curve unconditionally but gated cat_well_log on `if
+    #     uwi:` — so a LAS with no UWI produced curves whose parent log did
+    #     not exist. dv_well_log_curve carries fk_log_curve_log (uwi, log_id),
+    #     a COMPOUND key, which _reference_fk_predicates does not cover, so
+    #     nothing held them either: promote attempted the insert, hit 547, and
+    #     failed the whole mirror. Measured 23 Aug: cat_well_log empty,
+    #     cat_well_log_curve 153 unpromoted, "Promote table failed."
+    def _las_stages_parent_with_child():
+        import inspect
+        from dataview.file_catalog import extract_core as _ec
+        src = inspect.getsource(_ec)
+        i = src.find('"cat_well_log_curve", curve_rows')
+        j = src.find('"cat_well_log", [_wlrow]')
+        assert i > 0 and j > i, \
+            "the LAS curve/header capture blocks have moved — re-check that " \
+            "the header is still staged whenever the curves are"
+        # the header's guard must not be stricter than the curves' guard
+        window = src[i:j]
+        assert "if curve_rows or uwi:" in window, (
+            "the cat_well_log header is gated more tightly than its curves "
+            "again — a LAS with no UWI would stage the CHILD and skip the "
+            "PARENT, and those curves can never promote")
+        # and the shared log id must not become the string 'None-LAS'
+        assert 'f"{uwi}-LAS" if uwi' in src, (
+            "the log_id falls back to f'{uwi}-LAS' with no uwi again — that "
+            "is the literal 'None-LAS', which collides across every unkeyed "
+            "LAS so two files' curves claim one log")
+    check("LAS: the log header is staged whenever its curves are",
+          _las_stages_parent_with_child)
+
     return res
 
 

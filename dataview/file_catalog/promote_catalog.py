@@ -1517,9 +1517,24 @@ def _safe_promote(cur, fn, log, *args):
                 cur.execute(f"ROLLBACK TRANSACTION {_sp}")
             except Exception:
                 pass
-        msg = str(ex).splitlines()[0][:120]
-        log(f"{name:30} {'':>9} {'':>8} {'':>9}  FAILED: {msg}")
-        return (name, None, 0, 0, "FAILED")
+        # NAME THE MIRROR, NOT THE FUNCTION. `name` is "promote_table" for
+        # every one of the eighteen generic mirrors, so the FAILED line said
+        # nothing about WHICH table failed — while _label, already computed
+        # above for the timing, holds exactly that.
+        #
+        # AND DO NOT TRUNCATE THE ONE LINE THAT EXPLAINS IT. A SQL Server FK
+        # error puts the constraint name and the parent table past the 120th
+        # character:
+        #   ...conflicted with the FOREIGN KEY constraint "fk_log_curve_log".
+        #   The conflict occurred in database "DataView_Demo", table
+        #   "dataview.dv_well_log".
+        # Everything after "the FOREIG" was cut, which is everything worth
+        # knowing. A discarded diagnostic is what makes the next failure
+        # undiagnosable — this one cost a full reproduce-and-bisect to recover
+        # a message the process already had in its hands.
+        msg = " ".join(str(ex).split())[:600]
+        log(f"{_label:30} {'':>9} {'':>8} {'':>9}  FAILED: {msg}")
+        return (_label, None, 0, 0, "FAILED")
     finally:
         _STEP_TIMES[_label] = _STEP_TIMES.get(_label, 0.0) + (_time.monotonic() - _t0)
 
