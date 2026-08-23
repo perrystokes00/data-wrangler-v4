@@ -822,6 +822,49 @@ def tier_units(res, verbose=False):
     check("synth: no fabricated provenance, and ctx cannot overrule it",
           _synth_provenance)
 
+    # 13. A LOAD THAT CANNOT REGISTER ITS FILE MUST SAY SO. The promote stamps
+    #     every inserted row with the file's INVENTORY_ID before registration
+    #     is attempted, so a failed register_file leaves those rows citing a
+    #     source nothing resolves — and the load still reports success.
+    #
+    #     The 50 orphaned dv_well rows are that, and the reason they cannot be
+    #     diagnosed now is that the only report went to a Streamlit progress
+    #     pane and the caller wrapped the whole thing in `except Exception:
+    #     pass`. reconcile_orphans can no longer identify the file.
+    def _load_reports_provenance():
+        import inspect
+        from dataview.import_data import load_ledger as _ll
+        src = inspect.getsource(_ll.record_load)
+        assert 'out["problems"]' in src and "registered" in src, \
+            "record_load no longer returns a report — the caller cannot tell " \
+            "a registered load from an orphaning one"
+        assert "register_file(engine, path" in src, \
+            "record_load no longer calls register_file"
+        # the RESULT of registering must be captured, not discarded
+        assert 'out["registered"] = register_file' in src, \
+            "register_file's return is dropped again — its failure becomes " \
+            "invisible and the rows are orphaned silently"
+
+        from dataview.import_data import page_load_assistant as _la
+        lsrc = inspect.getsource(_la.load_single_file)
+        i = lsrc.find("record_load(")
+        assert i > 0, "load_single_file no longer records loads"
+        # THE BARE SWALLOW, scoped to THIS call. The function has other
+        # `except Exception: pass` handlers and they are a separate argument;
+        # what must never come back is discarding the outcome of the call
+        # that registers the file, because the rows are already stamped by
+        # then. That exact shape is what made 19 Aug unreadable.
+        tail = lsrc[i:i + 1200]
+        assert "except Exception:\n        pass" not in tail, \
+            "the bare `except Exception: pass` is back around record_load — a " \
+            "registration failure would again leave rows citing an " \
+            "unresolvable source with no diagnostic anywhere"
+        assert '"problems"' in lsrc, \
+            "load_single_file must carry the provenance problems out in its " \
+            "result; a message only in the progress pane dies with the session"
+    check("a load that cannot register its file reports it",
+          _load_reports_provenance)
+
     return res
 
 

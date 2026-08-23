@@ -795,21 +795,36 @@ def load_single_file(engine, schema, path, table, cmap, progress=None,
     # load that failed half way is not a fact about the database. Best
     # effort: record_load swallows its own errors so bookkeeping can never
     # fail a load that already succeeded.
+    _problems = []
     try:
         from dataview.import_data.load_ledger import record_load
         # Registers the file in file_catalog.GLOBAL_FILE_CATALOG (identity,
         # via file_gate — the same path a LAS takes) AND records the result
         # in dataview.dv_global_file_catalog (staged/promoted/held), both
         # keyed by the id already stamped on the rows.
-        record_load(engine, path, target=table.upper(),
-                    staged=int(n_staged or 0), promoted=int(after - before),
-                    held=sum(int(n) for _p, n in held) if held else 0,
-                    fingerprint=None, register=True, log=_say)
-    except Exception:
-        pass
+        _rec = record_load(engine, path, target=table.upper(),
+                           staged=int(n_staged or 0), promoted=int(after - before),
+                           held=sum(int(n) for _p, n in held) if held else 0,
+                           fingerprint=None, register=True, log=_say)
+        _problems = list((_rec or {}).get("problems") or [])
+    except Exception as e:
+        # NOT `pass`. This used to be a bare swallow, and it sat around the
+        # only call that puts the file in GLOBAL_FILE_CATALOG — while the
+        # promote above had already stamped _inv onto every inserted row.
+        # So a registration that failed produced rows citing a source
+        # nothing could resolve, and said nothing at all. The load is still
+        # not failed here (the rows ARE in), but silence is no longer an
+        # option: a discarded diagnostic is what made 19 Aug unreadable.
+        _problems.append(f"provenance bookkeeping failed: {type(e).__name__}: {e}")
+        _say(f"  ** provenance bookkeeping failed: {type(e).__name__}: {e}")
+    if _problems:
+        # Loud in the log, and carried out in the RESULT so the page can say
+        # it too — a message only in a progress pane dies with the session,
+        # which is exactly what happened last time.
+        _say("  ** this load's provenance is incomplete — see above")
     return {"staged": int(n_staged or 0), "inserted": int(after - before),
             "present": int(after), "held": held, "stg": stg,
-            "inventory_id": _inv, "timings": _t}
+            "inventory_id": _inv, "timings": _t, "problems": _problems}
 
 
 # ─────────────────────── deterministic verification ────────────────────────
@@ -2579,6 +2594,18 @@ def render(ss, server, database, schema="dataview", directory=None):
                         st.warning(f"⏸ {n:,} held — no match in {parent}; "
                                    f"they load on a re-run once {parent} "
                                    f"has those rows.")
+                    # THE ROWS WENT IN; THEIR PROVENANCE MAY NOT HAVE. Shown
+                    # beside the success rather than instead of it, because
+                    # both are true and the operator needs the second one.
+                    for _p in (res.get("problems") or []):
+                        st.warning(f"⚠ {_p}")
+                    if res.get("problems"):
+                        st.caption(
+                            "The rows are loaded. What is missing is the link "
+                            "back to the file they came from, so lineage "
+                            "reports will not resolve them. "
+                            "`python tools/reconcile_orphans.py --scan <folder>` "
+                            "finds the file and restores the entry.")
                     if res["inserted"] == 0 and not res["held"]:
                         st.info("0 inserted, nothing held = every row "
                                 "already existed (clean re-run).")
@@ -2669,6 +2696,17 @@ def render(ss, server, database, schema="dataview", directory=None):
                 st.warning(f"⏸ {n:,} row(s) held — no match in {parent}; "
                            f"they load automatically on a re-run once "
                            f"{parent} has those rows.")
+            # THE ROWS WENT IN; THEIR PROVENANCE MAY NOT HAVE. See the twin
+            # of this block on the direct-load path above.
+            for _p in (res.get("problems") or []):
+                st.warning(f"⚠ {_p}")
+            if res.get("problems"):
+                st.caption(
+                    "The rows are loaded. What is missing is the link back to "
+                    "the file they came from, so lineage reports will not "
+                    "resolve them. "
+                    "`python tools/reconcile_orphans.py --scan <folder>` finds "
+                    "the file and restores the entry.")
             if res["inserted"] == 0 and not res["held"]:
                 st.info("0 inserted with nothing held = every row already "
                         "existed (a clean re-run).")

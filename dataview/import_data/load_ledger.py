@@ -219,12 +219,46 @@ def record_load(engine, path, target=None, staged=None, promoted=None,
                 root=None, register=True, log=None):
     """Register the file and record what the load did.
 
-    Best effort by design, in both halves: bookkeeping must never fail a
-    load that already succeeded.
+    Returns {"inventory_id", "registered", "ledger", "problems"} — a REPORT,
+    not just an id, because the two halves fail differently and one of them
+    matters far more than the other.
+
+    Best effort in both halves: bookkeeping must never fail a load that
+    already succeeded. But "must not fail the load" was read as "need not be
+    mentioned", and those are not the same thing:
+
+      * the LEDGER half is genuinely cosmetic — dv_global_file_catalog
+        records staged/promoted/held counts, and losing them costs a report.
+      * REGISTRATION is not. The promote has ALREADY stamped every inserted
+        row with this file's INVENTORY_ID by the time we get here, so if the
+        GLOBAL_FILE_CATALOG entry does not appear, those rows cite a source
+        nothing can resolve — and the load still reports success.
+
+    That is how 50 dv_well rows came to name D7E2B1D3… on 19 Aug with no
+    catalog entry anywhere. The failure WAS logged, to a Streamlit progress
+    pane that died with the session, and nothing downstream looked at the
+    return value — so by the time the invariant caught it there was nothing
+    left to say what had gone wrong. reconcile_orphans can no longer identify
+    the file at all.
+
+    So the outcome is returned rather than dropped. The caller decides what
+    to do with it; what it may not do is not know.
     """
     from sqlalchemy import text
+    out = {"inventory_id": None, "registered": None,
+           "ledger": False, "problems": []}
     if register:
-        register_file(engine, path, root=root, log=log)
+        out["registered"] = register_file(engine, path, root=root, log=log)
+        if not out["registered"]:
+            # LOUD, and named as provenance rather than as bookkeeping. The
+            # rows are already stamped; this is the half that leaves them
+            # orphaned.
+            out["problems"].append(
+                "PROVENANCE NOT REGISTERED: " + os.path.basename(str(path))
+                + " is not in file_catalog.GLOBAL_FILE_CATALOG, so rows "
+                  "promoted from it cite a source nothing can resolve")
+            if log:
+                log("  ** " + out["problems"][-1])
     try:
         ensure_columns(engine, log=log)
         row = build_row(path, target, staged, promoted, held, fingerprint,
@@ -234,11 +268,13 @@ def record_load(engine, path, target=None, staged=None, promoted=None,
         if log:
             log(f"  ledger: {row['file_name']} -> {target} "
                 f"({promoted or 0:,} promoted) as {row['inventory_id'][:8]}…")
-        return row["inventory_id"]
+        out["inventory_id"] = row["inventory_id"]
+        out["ledger"] = True
     except Exception as e:                       # never break a good load
         if log:
             log(f"  ledger skipped: {type(e).__name__}: {e}")
-        return None
+        out["problems"].append(f"ledger not written: {type(e).__name__}: {e}")
+    return out
 
 
 # ═════════════════════════════════════════════════════════════════════════ #

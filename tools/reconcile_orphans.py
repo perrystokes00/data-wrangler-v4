@@ -35,6 +35,17 @@ import argparse
 import os
 import sys
 
+# THE REPO ROOT, NOT tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/reconcile_orphans.py` from the repo root —
+# exactly what the usage above says — died with ModuleNotFoundError: No
+# module named 'dataview'. The tool that diagnoses orphaned provenance could
+# not be run at all, which is a poor way to find that out.
+#
+# Same family as the check_mirror_registry trap in CLAUDE.md: a tool that
+# cannot import the repo, or imports a DIFFERENT copy of it, reports things
+# about code you are not looking at. app_v4.py does this same insert.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 def orphan_ids(engine) -> list[str]:
     from sqlalchemy import text as _t
