@@ -114,6 +114,9 @@ def _st(w):
 
 
 def _strat(w):
+    _own = w.get("_tops")
+    if _own:
+        return _own
     return STRAT_PERMIAN if _st(w) in ("42", "30") else STRAT_MIDCON
 
 
@@ -1149,11 +1152,12 @@ def production_xlsx(path, w, rng):
         d0 = date.fromisoformat(str(w.get("completion_date"))[:10])
     except Exception:
         d0 = date(2022, 1, 1)
-    q = rng.uniform(200, 900)
-    n = rng.randint(18, 48)
+    q = float(w.get("_qi") or rng.uniform(200, 900))
+    n = int(w.get("_months") or rng.randint(18, 48))
+    _dec = float(w.get("_decline") or 0.03)
     for m in range(n):
         d = d0 + timedelta(days=30*m)
-        oil = q * math.exp(-0.03*m) * rng.uniform(0.85, 1.15)
+        oil = q * math.exp(-_dec*m) * rng.uniform(0.85, 1.15)
         gas = oil * rng.uniform(1.2, 2.6)
         ws.append([_long_uwi(w["uwi"]), w.get("well_name", ""),
                    w.get("operator_name", ""), d.isoformat(), round(oil),
