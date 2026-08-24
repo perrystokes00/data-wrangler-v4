@@ -1659,6 +1659,86 @@ def tier_units(res, verbose=False):
     check("extract: a failed write stops the stage instead of looping",
           _extract_cannot_loop)
 
+    def _segy_2d_coords_survive_crossline_garbage():
+        # A 2D LINE HAS NO CROSSLINE, so the bytes at the standard crossline
+        # offset (193-196) hold whatever the vendor put there. In the Geoscience
+        # Australia headers that is CDP-STAT — statics, routinely negative. The
+        # readability veto used to key on inline/crossline validity and threw
+        # the COORDINATES away with them, so "300 of 300 crossline values
+        # invalid" — the expected reading for 2D — condemned clean CDP-X/Y at
+        # bytes 181-188. Measured 24 Aug: 228 of 232 seismic files reported no
+        # geometry despite carrying good coordinates, which read downstream as
+        # "no CRS" and sent the operator to arm a fallback CRS that was never
+        # missing.
+        #
+        # Built here rather than read from disk: the corpus lives outside the
+        # repo, and a check that needs C:\Bulk passes vacuously anywhere else.
+        import struct
+        import tempfile
+        import os
+        from dataview.file_catalog.segy_header import read_segy_header
+
+        NS = 8                                   # samples per trace
+        TR = 60                                  # traces
+
+        def _segy(x0, y0, dx, dy, xline_val):
+            """A minimal rev-1 SEG-Y: EBCDIC text, 400-byte binary, TR traces."""
+            card = [" " * 80 for _ in range(40)]
+            card[0] = "C01 CLIENT:TEST, VOLUME:STACK".ljust(80)
+            card[1] = "C02 XY COORDINATES:AMG ZONE 54; SURVEY DATUM:GDA2020;".ljust(80)
+            text = "".join(card).encode("cp037")
+            binhdr = bytearray(400)
+            struct.pack_into(">H", binhdr, 20, NS)          # 3221-3222 samples
+            struct.pack_into(">H", binhdr, 24, 5)           # 3225-3226 IEEE
+            out = bytearray(text + bytes(binhdr))
+            for i in range(TR):
+                th = bytearray(240)
+                struct.pack_into(">h", th, 70, 1)           # 71-72  scalar
+                struct.pack_into(">i", th, 180, int(x0 + i * dx))   # 181-184 CDP-X
+                struct.pack_into(">i", th, 184, int(y0 + i * dy))   # 185-188 CDP-Y
+                struct.pack_into(">i", th, 188, 1)                  # 189-192 inline
+                struct.pack_into(">i", th, 192, xline_val)          # 193-196 "crossline"
+                out += th + b"\x00" * (NS * 4)
+            return bytes(out)
+
+        def _read(blob):
+            fd, path = tempfile.mkstemp(suffix=".segy")
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(blob)
+                return read_segy_header(path)
+            finally:
+                os.unlink(path)
+
+        # 1. THE BUG. Good coordinates, negative junk where crossline would be.
+        h = _read(_segy(379547, 7076337, 13, -32, -458751))
+        pts = h.get("cdp_points") or []
+        assert len(pts) >= TR - 1, (
+            f"a 2D line's coordinates were discarded ({len(pts)} points) "
+            f"because the bytes at the standard CROSSLINE offset are not valid "
+            f"indices — which is the expected reading for 2D, not evidence the "
+            f"header is corrupt. Notes: {h.get('notes')}")
+        assert h.get("cdp_x_range") and h.get("cdp_y_range"), \
+            "coordinate ranges were dropped despite usable coordinates"
+
+        # 2. The veto must still fire on coordinates that are not coordinates.
+        #    filt_mig is the real case (headers lose alignment after trace 2);
+        #    here every pair is beyond any CRS's reach.
+        h2 = _read(_segy(9_999_999_00, 9_999_999_00, 1, 1, 1))
+        assert not (h2.get("cdp_points") or []), (
+            "coordinates far outside any coordinate system were published — "
+            "the magnitude bound is not being applied")
+
+        # 3. And a degenerate extent must publish nothing. brecon_3d reads
+        #    11,770,231 over a 79 m span because its header declares 4R (real)
+        #    and this reader takes int32; self-consistent, wrong, and it plots.
+        h3 = _read(_segy(11_770_231, 11_806_031, 1, 1, 1))
+        assert not (h3.get("cdp_points") or []), (
+            "a survey spanning tens of metres across 60 traces was accepted as "
+            "an extent — an outline that plots is worse than no outline")
+    check("SEG-Y 2D: crossline junk does not veto good coordinates",
+          _segy_2d_coords_survive_crossline_garbage)
+
     return res
 
 

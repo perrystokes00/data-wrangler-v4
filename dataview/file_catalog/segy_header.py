@@ -350,11 +350,50 @@ def read_segy_header(path: str, *, max_geom_traces: int = 300) -> dict:
                 # reader should hand on. Publishing nothing here is right and
                 # costs nothing: the navigation file is the geometry source
                 # anyway, and it wins over trace headers by design.
-                if _bad_frac > 0.25:
+                # JUDGE THE COORDINATES ON THE COORDINATES. This veto used
+                # to key on _bad_frac — the share of sampled INLINE / CROSSLINE
+                # words that are not valid indices — and threw the coordinates
+                # away with them. That premise holds only where those fields
+                # ARE indices. A 2D line has no crossline, so bytes 189-196
+                # hold whatever the vendor put there (in the Geoscience
+                # Australia headers, CDP-STAT statics, routinely negative);
+                # "300 of 300 crossline values invalid" is the EXPECTED
+                # reading, and it condemned good CDP-X/Y sitting at 181-188.
+                #
+                # Measured 24 Aug: 228 of 232 seismic files reported no
+                # geometry despite clean coordinates. Downstream that reads as
+                # "no CRS" — extract_core only writes epsg_code inside
+                # `if xs and ys` — so 229 files held as not-georeferenced and
+                # the remedy on offer was to arm a fallback CRS that was never
+                # missing. The CRS had been read correctly all along.
+                #
+                # The corruption signal is real; it was measured on the wrong
+                # field. A trace header is USABLE when its coordinate pair is
+                # non-zero and within a magnitude any CRS can mean. Measured:
+                #
+                #   GA 2D lines, brecon 3D    300/300 usable  -> keep
+                #   filt_mig                   58/301 usable  -> discard
+                #
+                # filt_mig is why the veto exists — its headers lose alignment
+                # after trace 2 and the surviving span was 1,088 x 636 km for a
+                # survey ~10 km across — and it still fails, four-fold.
+                #
+                # ±2e7 is a TYPE bound, not a judgement about survey size:
+                # Earth's circumference is ~4.0e7 m and a UTM northing tops out
+                # at 1e7, so no projected coordinate in metres exceeds it and
+                # every geographic one sits far inside.
+                _COORD_MAX = 2e7
+                _usable = sum(1 for _x, _y in zip(xs, ys)
+                              if _x != 0 and _y != 0
+                              and abs(_x) <= _COORD_MAX
+                              and abs(_y) <= _COORD_MAX)
+                _ok_frac = (_usable / sampled) if sampled else 0.0
+                if _ok_frac < 0.75:
                     out["notes"].append(
-                        f"{_bad_frac:.0%} of sampled trace headers are "
-                        f"unreadable — no geometry is reported from them "
-                        f"(use the survey's navigation file)")
+                        f"only {_ok_frac:.0%} of {sampled} sampled trace "
+                        f"headers carry a usable coordinate pair — no "
+                        f"geometry is reported from them (use the survey's "
+                        f"navigation file)")
                     cxr = cyr = None
                     xs = ys = []
                     # The surviving indices PASSED the type check, but passing
@@ -363,6 +402,42 @@ def read_segy_header(path: str, *, max_geom_traces: int = 300) -> dict:
                     # own header says has 345. Same headers, same verdict.
                     out["inline_range"] = None
                     out["crossline_range"] = None
+
+                # A DEGENERATE EXTENT IS NOT A SURVEY. brecon_3d declares its
+                # own layout as
+                #     C 7 CDP_X          181   4R   CDP_Y          185   4R
+                # — "4R" is a 4-byte REAL. This reader takes int32 there, so
+                # 1177023108 / scalar 100 becomes an easting of 11,770,231 and
+                # 300 traces span 79 m by 114 m. Those numbers are the wrong
+                # TYPE read from the right bytes, and they are self-consistent,
+                # so no per-value magnitude bound rejects them: the old index
+                # veto discarded them only by luck, and dropping that veto let
+                # a 79 m "3D survey" through.
+                #
+                # An outline that plots is worse than no outline, so extent is
+                # checked on its own terms: hundreds of sampled traces confined
+                # to a couple of hundred metres in BOTH axes is not a survey,
+                # whatever the numbers mean. 250 m is comfortably below any real
+                # survey here (the smallest genuine one measures ~10 km) and
+                # comfortably above brecon.
+                #
+                # THE UNDERLYING FIX IS TO HONOUR THE DECLARED FORMAT (4R vs
+                # 4I) rather than assume int32 — declared_trace_map reads byte
+                # POSITIONS today but not the format beside them. Until it
+                # does, brecon reports no trace geometry, which is what it did
+                # before and is honest.
+                if cxr and cyr:
+                    _dx = abs(cxr[1] - cxr[0])
+                    _dy = abs(cyr[1] - cyr[0])
+                    if _dx < 250 and _dy < 250 and sampled >= 20:
+                        out["notes"].append(
+                            f"trace-header coordinates span only {_dx:.0f} x "
+                            f"{_dy:.0f} units over {sampled} traces — too "
+                            f"degenerate to be a survey extent, so no geometry "
+                            f"is reported (the header may declare a coordinate "
+                            f"FORMAT this reader does not honour yet)")
+                        cxr = cyr = None
+                        xs = ys = []
 
                 out["cdp_x_range"] = cxr
                 out["cdp_y_range"] = cyr
