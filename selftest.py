@@ -2613,6 +2613,139 @@ def tier_units(res, verbose=False):
     check("LAS 3.0: a generated multi-section file reads back, values and all",
           _rich_las3_round_trips)
 
+    def _written_segy_reads_back_and_ties():
+        # A SYNTHETIC SEG-Y THAT READS ok=True CAN STILL BE WRONG EVERYWHERE.
+        # The first draft of this writer declared its trace layout as
+        # "CDP X BYTES 181-184, CDP Y BYTES 185-188" -- label before range, both
+        # on one line -- and segy_header._BYTES_DECL, which expects
+        # "BYTES <a>-<b>: <label>", took ", CDP Y BYTES 185-188" as the label
+        # for offset 180. X and Y then came from the SAME four bytes. Every
+        # file reported ok=True, every header field was right, and every line
+        # landed at latitude 3.6 instead of 43.29. So this checks the numbers
+        # that come back, not the status flag.
+        import math
+        import os
+        import random
+        import struct
+        import tempfile
+        import numpy as np
+        from dataview.migration.synth_seismic import Dome, write_line, ibm_encode
+        from dataview.file_catalog.segy_header import (
+            read_segy_header, read_trace_samples, _ibm_to_ieee)
+
+        # IBM floats are not IEEE: base-SIXTEEN exponent, excess-64. A writer
+        # that gets this wrong produces numbers that are wrong rather than
+        # obviously broken -- the failure mode this codebase cares most about.
+        vals = np.array([1.0, -1.0, 0.0, 0.1, 12345.678, -98765.4321, 1e-6])
+        back = _ibm_to_ieee(ibm_encode(vals).astype(np.uint32))
+        nz = vals != 0
+        rel = np.abs(back[nz] - vals[nz]) / np.abs(vals[nz])
+        assert rel.max() < 1e-5, (
+            "IBM encode/decode does not round-trip: worst relative error "
+            + format(float(rel.max()), ".2e"))
+        assert back[~nz][0] == 0.0, "zero did not survive IBM encoding"
+
+        rng = random.Random(5)
+        cx, cy = 400000.0, 4790000.0
+        dome = Dome(cx, cy, relief_ms=140, radius_m=3800,
+                    horizons_ms=[360, 505, 660, 830], rng=rng)
+        tmp = tempfile.mkdtemp(prefix="segy_w_")
+
+        def _line(name, az_deg, n=60, sp=50.0):
+            az = math.radians(az_deg)
+            half = (n - 1) / 2.0
+            xs = [cx + (i - half) * sp * math.cos(az) for i in range(n)]
+            ys = [cy + (i - half) * sp * math.sin(az) for i in range(n)]
+            p = os.path.join(tmp, name + ".segy")
+            write_line(p, xs, ys, dome, random.Random(3), n_samples=400,
+                       survey="CHECK", line_name=name)
+            return p, xs, ys
+
+        try:
+            pa, xs, ys = _line("A", 0.0)
+            h = read_segy_header(pa)
+            assert h["ok"], "the written file does not read as SEG-Y: " \
+                + "; ".join(h.get("notes") or [])
+            assert h["n_traces"] == 60 and h["n_samples"] == 400, (
+                "geometry of the file disagrees with what was written: "
+                + repr((h["n_traces"], h["n_samples"])))
+            assert h["format_code"] == 1, "format code is not 1 (IBM float)"
+
+            # BOTH coordinate fields, at their own offsets. This is the exact
+            # assertion the one-line byte declaration failed.
+            tm = h.get("trace_map") or {}
+            assert tm.get("cdp_x") == 180 and tm.get("cdp_y") == 184, (
+                "the textual header's byte declaration did not map X and Y to "
+                "separate offsets: " + repr(tm) + ". Both reading from one "
+                "offset puts every line in the wrong place while reporting ok.")
+            xr, yr = h.get("cdp_x_range"), h.get("cdp_y_range")
+            assert xr != yr, (
+                "the X and Y ranges are identical -- they are being read from "
+                "the same bytes")
+            assert abs(xr[0] - min(xs)) < 2 and abs(yr[0] - min(ys)) < 2, (
+                "coordinates did not survive the round trip: wrote x "
+                + format(min(xs), ".1f") + " y " + format(min(ys), ".1f")
+                + ", read " + repr((xr[0], yr[0])))
+
+            # THE STRUCTURE IS ONE SURFACE, so two lines crossing at the crest
+            # must see the same reflector at the same time there. This is what
+            # separates a coherent grid from a thousand independent pictures,
+            # and nothing else in the file would reveal it.
+            pb, _bx, _by = _line("B", 90.0)
+            da, _ta = read_trace_samples(pa, 0, 60, skip_blank=False)
+            db, _tb = read_trace_samples(pb, 0, 60, skip_blank=False)
+            assert da is not None and db is not None, "a written line has no readable traces"
+            # CROSS-CORRELATE, DO NOT PEAK-PICK. A single argmax is not
+            # stable under noise, and the reflection coefficients differ per
+            # horizon, so "the strongest event in the first 400 ms" can be
+            # horizon 1 on one trace and horizon 2 on the other -- comparing
+            # those compares nothing. The lag that best aligns two whole traces
+            # is what "same structure here" actually means.
+            def _lag(a, b, maxlag=24):
+                a = np.asarray(a, float) - np.mean(a)
+                b = np.asarray(b, float) - np.mean(b)
+                best, bl = -1e30, 0
+                for L in range(-maxlag, maxlag + 1):
+                    s = (np.dot(a[L:], b[:len(b) - L]) if L >= 0
+                         else np.dot(a[:L], b[-L:]))
+                    if s > best:
+                        best, bl = s, L
+                return bl
+
+            pb, _bx, _by = _line("B", 90.0)
+            da, _ta = read_trace_samples(pa, 0, 60, skip_blank=False)
+            db, _tb = read_trace_samples(pb, 0, 60, skip_blank=False)
+            assert da is not None and db is not None,                 "a written line has no readable traces"
+            mid = da.shape[1] // 2
+            tie = _lag(da[:, mid], db[:, db.shape[1] // 2])
+            assert abs(tie) <= 2, (
+                "two lines crossing at the same ground position align best at "
+                "a lag of " + str(tie) + " samples -- the structure is not one "
+                "surface, so nothing ties")
+
+            # And the crest must actually BE a crest. _lag returns the shift
+            # of the first trace relative to the second, so an event that
+            # arrives EARLIER over the crest than on the flank gives a
+            # NEGATIVE lag. A flat section gives zero.
+            flank = _lag(da[:, mid], da[:, 0])
+            assert flank < 0, (
+                "the crest trace aligns with the flank trace at lag "
+                + str(flank) + "; over a dome the crest must be SHALLOWER, "
+                "so a negative lag is the closure. Zero means the structure "
+                "is flat and nothing ties to anything.")
+        finally:
+            for f in os.listdir(tmp):
+                try:
+                    os.remove(os.path.join(tmp, f))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(tmp)
+            except OSError:
+                pass
+    check("segy: a written 2D line reads back, and crossing lines tie",
+          _written_segy_reads_back_and_ties)
+
     def _loader_key_transforms_agree():
         # TWO FAILURES, ONE ROOT: a key transform applied on one side only.
         #
