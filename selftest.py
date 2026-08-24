@@ -2209,6 +2209,124 @@ def tier_units(res, verbose=False):
     check("map: a Windows path in a popup cannot break the JS template",
           _popup_html_survives_a_windows_path)
 
+    def _seismic_click_resolves_to_the_right_file():
+        # PICKING A LINE OPENS A FILE, so resolving a click to the WRONG file
+        # is the failure that matters: the viewer renders a real section, from
+        # real data, for a line the operator did not pick. Wrong is worse than
+        # missing -- so the resolver matches against the KNOWN SET of
+        # catalogued paths and returns None when nothing matches, rather than
+        # parsing a path out of prose the way the well markers must
+        # (streamlit-folium strips HTML attributes, so a data-* key never
+        # survives the round trip).
+        from dataview.mapping.page_well_map import _seis_pick_from_popup as _pick
+
+        bs = chr(92)
+        root = "C:" + bs + "Bulk" + bs + "Seismic" + bs + "2D_SEGY" + bs
+        lines = [
+            # ORDER MATTERS TO THIS TEST: the SHORTER name is listed first, so
+            # a first-match-wins scan reaches it before the one that is right.
+            {"file": root + "A" + bs + "x.segy", "file_name": "x.segy",
+             "survey": "CENTRAL", "line": "085-ZBF"},
+            {"file": root + "B" + bs + "xx.segy", "file_name": "xx.segy",
+             "survey": "CENTRAL", "line": "085-ZBF-remig"},
+            {"file": "", "file_name": "", "survey": "NOFILE", "line": "L9"},
+        ]
+
+        # A full path in the popup is exact and unambiguous.
+        hit = _pick("CENTRAL 085-ZBF-remig 900 traces " + root + "B" + bs + "xx.segy",
+                    lines)
+        assert hit and hit["line"] == "085-ZBF-remig",             "a full path did not resolve to its own line: " + repr(hit)
+        hit2 = _pick("CENTRAL 085-ZBF 1201 traces " + root + "A" + bs + "x.segy", lines)
+        assert hit2 and hit2["line"] == "085-ZBF",             "the other full path stopped resolving: " + repr(hit2)
+
+        # THE REACHABLE TRAP IS THE NAME FALLBACK. The 3D popup truncates its
+        # path at 260 characters, so a deep tree leaves only the file NAME to
+        # match on -- and one name is routinely a substring of another
+        # ("x.segy" sits inside "xx.segy"). Scanning in list order therefore
+        # hands back x.segy for a click on xx.segy: a real section from the
+        # wrong file, with nothing on screen to say so. Longest name first is
+        # what prevents it, and this is the assertion that holds it in place.
+        nm = _pick("3D survey  File xx.segy  Traces 12", lines)
+        assert nm and nm["name"] == "xx.segy", (
+            "a name-only click on xx.segy resolved to "
+            + repr(nm and nm["name"]) + " -- the shorter name claimed it, "
+            "so the viewer would open the wrong SEG-Y")
+
+        # A NON-SEISMIC CLICK MUST RESOLVE TO NOTHING. A well popup carries
+        # digits and prose; if any of it could match, clicking a well would
+        # silently open somebody's SEG-Y.
+        assert _pick("Smith 1-24  49025103970000  Operator X", lines) is None,             "a well popup resolved to a seismic file"
+
+        # A ROW WITH NO PATH MUST NOT BE PICKED. "" is a substring of every
+        # string, so an unguarded containment test matches the first pathless
+        # row for ANY click -- silently, and always the same wrong file.
+        assert _pick("NOFILE L9 anything at all", lines) is None,             "a row with no file path was matched via the empty string"
+        assert _pick(None, lines) is None and _pick("", lines) is None
+    check("map: a seismic click resolves to the right file, or to none",
+          _seismic_click_resolves_to_the_right_file)
+
+    def _widget_keys_agree_with_the_persist_filter():
+        # THE SWEEP THAT WAS A MANUAL STEP. The sub-page persist loops
+        # self-assign every widget key so it survives a page switch, and
+        # _is_action_key decides what to skip. Getting it wrong fails BOTH
+        # WAYS, and neither way points at the cause:
+        #
+        #   - An UNSETTABLE widget (button, download, uploader, data editor,
+        #     form submitter) that is NOT skipped raises "Values for the widget
+        #     with key ... cannot be set" on a LATER run, on whatever page
+        #     draws next. The try/except around the loop swallows the write, so
+        #     the crash surfaces far from the widget that caused it.
+        #   - A SETTABLE widget that IS skipped never crashes at all. It just
+        #     drops its value on every page switch, so the control keeps coming
+        #     back to its default and nothing says why.
+        #
+        # CLAUDE.md says to re-run this sweep by hand after adding any button.
+        # It was re-run on 24 Aug and found two live ones -- wm_compute_paths
+        # (a button, unskipped) and wm_near_open (a checkbox, skipped because
+        # its name ends in "_open"). A check that must be remembered is a check
+        # that eventually is not, so it runs here now.
+        import ast
+        import inspect
+        from dataview.mapping import page_well_map as _pw
+
+        tree = ast.parse(inspect.getsource(_pw).replace("\r\n", "\n"))
+        CANNOT_SET = {"button", "download_button", "file_uploader",
+                      "form_submit_button", "data_editor"}
+        SETTABLE_PREFIX = ("select", "multi", "text", "number", "slider",
+                           "radio", "checkbox", "toggle")
+        missing, over = [], []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            nm = (fn.attr if isinstance(fn, ast.Attribute)
+                  else getattr(fn, "id", ""))
+            key = None
+            for kw in node.keywords:
+                if kw.arg == "key" and isinstance(kw.value, ast.Constant)                         and isinstance(kw.value.value, str):
+                    key = kw.value.value
+            if key is None:
+                continue
+            # A key built from a file path is dynamic and already covered by
+            # the path rules; only literal keys are checkable here.
+            if nm in CANNOT_SET and not _pw._is_action_key(key):
+                missing.append(f"{nm}(key={key!r})")
+            if nm.startswith(SETTABLE_PREFIX) and _pw._is_action_key(key):
+                over.append(f"{nm}(key={key!r})")
+
+        assert not missing, (
+            "these widgets CANNOT have their value set, but the persist loop "
+            "would try: " + ", ".join(missing)
+            + ". The assignment is swallowed and raises on whatever page draws "
+              "next -- add the key to _ACTION_KEY_EXACT or give it an action "
+              "suffix.")
+        assert not over, (
+            "these widgets CAN be set but the persist loop skips them, so they "
+            "silently reset on every page switch: " + ", ".join(over)
+            + ". Add the key to _ACTION_KEY_NEVER.")
+    check("map: every widget key agrees with the persist filter, both ways",
+          _widget_keys_agree_with_the_persist_filter)
+
     def _loader_key_transforms_agree():
         # TWO FAILURES, ONE ROOT: a key transform applied on one side only.
         #

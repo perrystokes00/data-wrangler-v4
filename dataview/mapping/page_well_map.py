@@ -91,6 +91,14 @@ _ACTION_KEY_SUFFIXES = (
     "_delete", "_refresh", "_reset", "_open", "_close", "_back", "_dl",
     "_download", "_upload", "_submit", "_cancel", "_toggle", "_export",
 )
+# SETTABLE WIDGETS THAT THE SUFFIX RULES CATCH BY ACCIDENT. The suffixes
+# describe what a key usually MEANS, and a checkbox called "near_open" is
+# named for what it opens, not for being an action. Excluding it does not
+# crash -- it silently drops the value on every page switch, so the box
+# keeps coming back unticked and nothing says why. Checked FIRST.
+_ACTION_KEY_NEVER = {
+    "wm_near_open",
+}
 _ACTION_KEY_EXACT = {
     "wm_shp_add", "wm_ai_run", "wm_ai_clear", "wm_reset_page",
     "apply_uwi_filter", "wells_clear_viewport", "wells_reset_view",
@@ -100,12 +108,18 @@ _ACTION_KEY_EXACT = {
     # file against the predicate — the one name the suffix rules
     # missed. Re-run that sweep after adding a button.
     "close_summary",
+    # Found by the automated sweep, not by a crash: a BUTTON whose name
+    # matches no action suffix, so the persist loop self-assigned it and
+    # it would have raised on whatever page drew next, far from here.
+    "wm_compute_paths",
 }
 
 
 def _is_action_key(k):
     """True when k belongs to a widget whose value cannot be set."""
     s = str(k)
+    if s in _ACTION_KEY_NEVER:
+        return False
     return (s in _ACTION_KEY_EXACT
             or s.endswith(_ACTION_KEY_SUFFIXES)
             # dynamic keys built from a file path — the universal viewer's
@@ -1615,7 +1629,8 @@ def _qry_seismic_3d(_engine) -> pd.DataFrame:
                     CAST(sh.BBOX_MAX_LAT AS FLOAT)   AS max_lat,
                     CAST(sh.BBOX_MIN_LON AS FLOAT)   AS min_lon,
                     CAST(sh.BBOX_MAX_LON AS FLOAT)   AS max_lon,
-                    fc.FILE_NAME                     AS file_name
+                    fc.FILE_NAME                     AS file_name,
+                    fc.FILE_PATH                     AS file_path
                 FROM file_catalog.FILE_SEIS_HEADER sh
                 LEFT JOIN file_catalog.GLOBAL_FILE_CATALOG fc
                     ON fc.INVENTORY_ID = sh.INVENTORY_ID
@@ -3922,6 +3937,193 @@ def _popup_safe(s):
             .replace("${", "\\${"))
 
 
+def _seis_candidates(lines, df3d=None):
+    """Every catalogued seismic file that could be opened, one dict each.
+
+    ONE SOURCE FOR BOTH DOORS. The click resolver and the chooser must agree
+    about what exists; building the list twice is how they drift.
+    """
+    out = []
+    for _l in (lines or []):
+        _fp = str(_l.get("file") or "")
+        if _fp:
+            out.append({"path": _fp, "name": _l.get("file_name") or "",
+                        "survey": _l.get("survey") or "", "line": _l.get("line") or "",
+                        "epsg": _l.get("epsg"), "traces": _l.get("traces"),
+                        "kind": "2D line"})
+    try:
+        if df3d is not None and not df3d.empty and "file_path" in df3d.columns:
+            for _r in df3d.to_dict("records"):
+                _fp = str(_r.get("file_path") or "")
+                if _fp:
+                    out.append({"path": _fp, "name": _r.get("file_name") or "",
+                                "survey": _r.get("survey_name") or "",
+                                "line": _r.get("line_name") or "",
+                                "epsg": _r.get("epsg_code"),
+                                "traces": _r.get("trace_count"),
+                                "kind": "3D survey"})
+    except Exception:
+        pass
+    return out
+
+
+def _seis_pick_from_popup(clicked, lines, df3d=None):
+    """Which seismic FILE a map click landed on, or None.
+
+    THE POPUP IS THE ONLY CHANNEL. streamlit-folium strips HTML attributes and
+    returns visible text, so a data-* attribute never survives the round trip
+    -- which is why the well markers have to regex a UWI out of prose, with a
+    ladder of six patterns and a comment apologising for each.
+
+    Seismic does not have to guess. The popup already SHOWS the full path and
+    we hold the authoritative list of paths, so this MATCHES AGAINST A KNOWN
+    SET rather than parsing an unknown string. Nothing is inferred: if no
+    known path appears in the text, the answer is None and the caller says so.
+    """
+    if not clicked:
+        return None
+    txt = str(clicked)
+    cands = _seis_candidates(lines, df3d)
+
+    for _hit in sorted(cands, key=lambda h: -len(h["path"])):
+        if _hit["path"] in txt:
+            return _hit
+
+    # THE 3D POPUP TRUNCATES ITS PATH AT 260 CHARACTERS, so a deep tree leaves
+    # only the file NAME to match on -- and one name routinely sits inside
+    # another ("x.segy" is a substring of "xx.segy"). Longest name first, or a
+    # click on the longer opens the shorter: a real section from the wrong
+    # file, with nothing on screen to say so.
+    for _hit in sorted(cands, key=lambda h: -len(str(h.get("name") or ""))):
+        _nm = str(_hit.get("name") or "")
+        if _nm and _nm in txt:
+            return _hit
+    return None
+
+
+def _seis_label(h):
+    """One line of text identifying a seismic file in the chooser."""
+    _bits = [x for x in (h.get("survey"), h.get("line")) if x]
+    _lbl = " / ".join(_bits) or (h.get("name") or "(unnamed)")
+    _sfx = h.get("name") or ""
+    return f"{_lbl}  -  {_sfx}" if _sfx and _sfx not in _lbl else _lbl
+
+
+def _render_seis_pick(lines=None, df3d=None):
+    """The picked SEG-Y, opened in the shared file viewer.
+
+    THE VIEWER ALREADY EXISTED and the map simply could not reach it.
+    file_viewer.view() renders the textual header, the binary header, the
+    trace headers and the section itself (density + wiggle), with a tolerant
+    reader for the files segyio refuses and an honesty banner counting what it
+    skipped. All that was missing was the route from a line on the map to it.
+
+    It is nest-safe by construction -- _vsection is a bordered container, not
+    an expander -- so it embeds here without tripping Streamlit scar #4.
+    """
+    # -- A DOOR THAT IS NOT THE MAP -------------------------------------
+    # Every map click round-trips through Python: streamlit-folium returns the
+    # click, Streamlit reruns the script, and the whole map is rebuilt and
+    # re-serialised. That is what greys the page out and snaps you away from
+    # where you were -- it is the framework's model, not a bug we can patch
+    # out, and it is the same reason Python can never learn about a pan or a
+    # zoom. So browsing popups and OPENING a section are separated here: read
+    # the popups on the map as much as you like, and when you actually want
+    # the data, pick it from this list. Choosing here never touches the map.
+    _cands = _seis_candidates(lines, df3d)
+    if _cands:
+        _NONE = "-- none --"
+        _labels = [_NONE] + [_seis_label(h) for h in _cands]
+        # Clear asks for the chooser to be released; honour it HERE,
+        # before the selectbox exists. Without this the box still shows
+        # the cleared line, so picking that same line again matches the
+        # last applied value and silently does nothing.
+        if st.session_state.pop("_seis_sel_reset", False):
+            st.session_state["seis_open_sel"] = _NONE
+            st.session_state["_seis_sel_last"] = _NONE
+        _sel = st.selectbox(
+            "Open a seismic section", _labels, key="seis_open_sel",
+            help="Opens the source SEG-Y below: textual header, trace headers "
+                 "and the section itself. The map is left exactly as it is.")
+        # ACT ON CHANGE ONLY. The selectbox keeps its value across reruns, so
+        # re-applying it every pass would overrule a later map click and make
+        # the two doors fight. Comparing against the last APPLIED value lets
+        # whichever was used most recently win.
+        if _sel != st.session_state.get("_seis_sel_last"):
+            st.session_state["_seis_sel_last"] = _sel
+            if _sel == _NONE:
+                st.session_state.pop("_seis_pick", None)
+            else:
+                st.session_state["_seis_pick"] = dict(_cands[_labels.index(_sel) - 1])
+
+    _pick = st.session_state.get("_seis_pick")
+    if not _pick:
+        return
+    _path = str(_pick.get("path") or "")
+    _hdr = " - ".join([x for x in (_pick.get("survey"), _pick.get("line")) if x])
+
+    st.markdown("#### Seismic - " + (_hdr or _pick.get("name") or "picked file"))
+    _c1, _c2 = st.columns([5, 1])
+    with _c1:
+        _bits = [str(_pick.get("kind") or "seismic")]
+        _bits.append(("EPSG " + str(_pick.get("epsg"))) if _pick.get("epsg")
+                     else "EPSG unknown")
+        if _pick.get("traces") not in (None, ""):
+            try:
+                _bits.append(format(int(_pick["traces"]), ",") + " traces")
+            except (TypeError, ValueError):
+                pass
+        st.caption(" - ".join(_bits))
+    with _c2:
+        if st.button("Clear", key="seis_pick_clear", use_container_width=True):
+            st.session_state.pop("_seis_pick", None)
+            st.session_state["_seis_sel_reset"] = True
+            st.rerun()
+
+    if not _path:
+        st.warning("This survey has no file path recorded, so there is "
+                   "nothing to open. Its geometry is still trustworthy.")
+        return
+    if not os.path.exists(_path):
+        # A CATALOGUED FILE THAT HAS MOVED IS HELD AS 'M', NOT DROPPED, so a
+        # path that no longer resolves is an expected state with a known
+        # repair. Say which, rather than showing a bare "file not found".
+        st.error("The catalogue points at a file that is not there now:")
+        st.code(_path, language=None)
+        st.caption("Re-scan the folder it moved to. The catalogue keeps the "
+                   "row and its reason rather than discarding it, so nothing "
+                   "was lost by the file moving.")
+        return
+
+    # DOWNLOAD IS SIZE-GATED. st.download_button needs the whole file in
+    # memory and a 3D volume is routinely gigabytes, so offering the button
+    # unconditionally would hang the app rather than fail.
+    try:
+        _sz = os.path.getsize(_path)
+    except OSError:
+        _sz = 0
+    _CAP = 250 * 1024 * 1024
+    if 0 < _sz <= _CAP:
+        with open(_path, "rb") as _fh:
+            st.download_button(
+                "Download the SEG-Y (" + format(_sz / 1048576, ".1f") + " MB)",
+                data=_fh.read(),
+                file_name=_pick.get("name") or os.path.basename(_path),
+                mime="application/octet-stream",
+                key="seis_pick_dl")
+    elif _sz:
+        st.caption(format(_sz / 1048576, ",.0f") + " MB - too large to serve "
+                   "through the browser, so it is read from disk in place:")
+        st.code(_path, language=None)
+
+    try:
+        from dataview.file_catalog.file_viewer import view as _fview
+        _fview(_path, os.path.splitext(_path)[1].lower())
+    except Exception as _e:
+        st.error("The SEG-Y viewer could not open this file: " + str(_e))
+        st.code(_path, language=None)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _seismic_line_paths(_engine, _v: int = 2):
     """Real 2D seismic line paths from dataview.dv_seis_line.geog.
@@ -4040,6 +4242,8 @@ def _add_seismic_3d(m, df):
                 "EPSG":     str(int(row["epsg_code"]))
                             if pd.notna(row.get("epsg_code")) else "—",
                 "Extent":   f"{max_lat-min_lat:.3f}° × {max_lon-min_lon:.3f}°",
+                "Path":     _popup_safe(str(row.get("file_path") or "")[:260])
+                            or None,
             }),
             max_width=280,
         )
@@ -10244,10 +10448,44 @@ def run(engine=None):
             # driven entirely by the filter/draw query. A marker click just
             # shows its native popup; it is not added to Results.
             _ = _uwi
+        # -- Seismic click -> remember which SEG-Y was picked ------------
+        # A LINE YOU CAN SEE BUT NOT OPEN IS A PICTURE, NOT A CATALOGUE.
+        # The popup already names the source file; this turns that into the
+        # file itself. Both cached, so re-calling them here is a dict lookup.
+        #
+        # DEDUPE ON THE PATH. streamlit-folium returns the same
+        # last_object_clicked_popup on every rerun until something else is
+        # clicked, so without this the panel would re-read the file (and a
+        # 3D volume is gigabytes) on every interaction with the page.
+        if clicked:
+            try:
+                _sh = _seis_pick_from_popup(
+                    clicked, _seismic_line_paths(engine), _qry_seismic_3d(engine))
+            except Exception as _se:
+                _sh = None
+                print(f"[seis_pick] {_se}")
+            if _sh and (st.session_state.get("_seis_pick") or {}).get("path") != _sh["path"]:
+                # NO st.rerun() HERE. st_folium has already triggered this
+                # run by returning the click, and the panel renders below
+                # in this same pass -- so a rerun would only rebuild and
+                # re-serialise the whole map a second time, greying the
+                # page twice for one click.
+                st.session_state["_seis_pick"] = _sh
+
 
         # scout_uwi (set from popups) is no longer auto-collected into a tray.
         if st.session_state.get("scout_uwi"):
             st.session_state.scout_uwi = None
+
+        # -- The picked SEG-Y, opened in the shared file viewer ----------
+        # Only when seismic is in play: the chooser is useless otherwise,
+        # and both queries would run for a user who never asked for it.
+        if "geo_seismic" in active_db or st.session_state.get("_seis_pick"):
+            try:
+                _render_seis_pick(_seismic_line_paths(engine),
+                                  _qry_seismic_3d(engine))
+            except Exception as _spe:
+                print(f"[seis_panel] {_spe}")
 
         # ── Over-cap drill results ──────────────────────────────────────
         # Drills that returned more than _TRAY_AUTO_ADD_CAP wells stash their
