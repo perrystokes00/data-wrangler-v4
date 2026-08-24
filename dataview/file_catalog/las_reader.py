@@ -15,12 +15,32 @@ codebase recognises — a confident wrong value plots, exports and gets quoted,
 while a missing one is visible. So the delimiter is honoured here, before
 lasio sees the data.
 
+LAS 3.0 MULTI-SECTION FILES
+---------------------------
+lasio cannot read one at all — a file with a second data set dies with
+
+    ValueError: Cannot reshape ~A data size (25,) into 2 columns
+
+because it assumes exactly one data block. But 3.0's whole point is that a
+file may carry several, each as a <Name>_Definition / <Name>_Parameter /
+<Name>_Data triple, and the standard names for them are the ones this catalog
+already has tables for: Core, Inclinometry, Tops, Test, Perforation. A 3.0 file
+can hold a directional survey as DATA rather than as a PDF somebody has to
+read.
+
+So split_las3() parses those directly rather than going through lasio: sections,
+typed columns, and the delimiter this module already honours. It does NOT
+replace read_las — an ordinary single-curve LAS of any version still goes to
+lasio, which is well tested and handles wrapping, and split_las3 is for the
+files lasio refuses.
+
 WHAT IT DOES NOT DO
 -------------------
-This is not LAS 3.0 support. 3.0 also allows arbitrary extra sections, ~Data
-blocks other than ~Ascii, and typed/array columns, none of which are handled;
-a 3.0 file using them still parses only as far as lasio manages. What is fixed
-is the one case that silently corrupts ordinary curve data.
+Arrays (a column holding several values per row) and the ~Parameter half of
+each triple are parsed as plain columns and ignored respectively. Vendor
+sections with no _Definition are returned raw rather than typed. This is a
+reader for the shapes the standard describes, not a certification against the
+wild — no real 3.0 file has been through it yet.
 
 ONE WAY IN
 ----------
@@ -104,3 +124,254 @@ def read_las(source, **kw):
     except Exception:
         pass                                     # fall through to plain lasio
     return lasio.read(source, **kw)
+
+
+# ═══════════════════════════════════════════════════════════════════════════ #
+# LAS 3.0 — multi-section files
+# ═══════════════════════════════════════════════════════════════════════════ #
+# A 3.0 section header is `~Name` optionally followed by an association after a
+# pipe: `~Log_Data | Log_Definition`. Everything up to the pipe (or whitespace)
+# is the name; 3.0 allows arbitrary names, so nothing is matched against a list.
+_SECTION_HEAD = re.compile(r"^\s*~\s*([^|\s]+)\s*(?:\|\s*(.*?))?\s*$")
+
+# A header LINE inside a Definition/Parameter/Well section:
+#     MNEM .UNIT   VALUE : DESCRIPTION {F}
+# The format brace is 3.0's type declaration and sits at the end of the
+# description. Unit may be empty; value may be empty.
+# THE UNIT BINDS TIGHT TO THE DOT, with no whitespace allowed between them.
+# That is not cosmetic: `VERS.   3.0 : ...` has NO unit, and a pattern that
+# lets the unit group skip whitespace captures "3.0" as the unit and leaves
+# the value empty — which is how the first cut of this reader decided a 3.0
+# file was not a 3.0 file. In LAS the unit is always immediately after the
+# dot; a space after the dot means there is none.
+_HDR_LINE = re.compile(
+    r"^\s*([^.\s]+)\s*\.([^\s:]*)\s*(.*?)\s*:\s*(.*?)\s*$")
+_FMT_BRACE = re.compile(r"\{\s*([FSE])[^}]*\}\s*$", re.IGNORECASE)
+
+
+class Las3Column:
+    """One column of a 3.0 data set."""
+
+    __slots__ = ("mnemonic", "unit", "descr", "fmt")
+
+    def __init__(self, mnemonic, unit="", descr="", fmt=""):
+        self.mnemonic = mnemonic
+        self.unit = unit
+        self.descr = descr
+        self.fmt = (fmt or "").upper()          # 'F' | 'E' | 'S' | ''
+
+    def __repr__(self):                          # pragma: no cover
+        return f"<Las3Column {self.mnemonic}.{self.unit} {{{self.fmt}}}>"
+
+
+class Las3Set:
+    """One <Name>_Definition + <Name>_Data pair, parsed."""
+
+    __slots__ = ("name", "columns", "rows")
+
+    def __init__(self, name, columns, rows):
+        self.name = name                         # 'Log', 'Core', 'Tops', …
+        self.columns = columns
+        self.rows = rows
+
+    @property
+    def mnemonics(self):
+        return [c.mnemonic for c in self.columns]
+
+    def __len__(self):
+        return len(self.rows)
+
+    def __repr__(self):                          # pragma: no cover
+        return (f"<Las3Set {self.name} "
+                f"{len(self.columns)} cols x {len(self.rows)} rows>")
+
+
+class Las3File:
+    """version / delimiter / well header / named data sets."""
+
+    __slots__ = ("version", "wrap", "delimiter", "well", "sets", "raw_sections")
+
+    def __init__(self, version, wrap, delimiter, well, sets, raw_sections):
+        self.version = version
+        self.wrap = wrap
+        self.delimiter = delimiter
+        self.well = well                         # {MNEMONIC: value}
+        self.sets = sets                         # {'Log': Las3Set, …}
+        self.raw_sections = raw_sections         # {name: [lines]} — everything
+
+    def __repr__(self):                          # pragma: no cover
+        return (f"<Las3File v{self.version} "
+                f"sets={sorted(self.sets)} well={len(self.well)} fields>")
+
+
+def _split_raw(text):
+    """[(name, association, [body lines])] in file order.
+
+    Comment lines (#) are dropped; blank lines are kept because a data row of
+    all-nulls is not the same as no row, and dropping blanks inside a data
+    block would silently renumber it.
+    """
+    out, name, assoc, body = [], None, None, []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        m = _SECTION_HEAD.match(line)
+        if m and line.lstrip().startswith("~"):
+            if name is not None:
+                out.append((name, assoc, body))
+            name, assoc, body = m.group(1), (m.group(2) or "").strip(), []
+            continue
+        if name is not None:
+            body.append(line)
+    if name is not None:
+        out.append((name, assoc, body))
+    return out
+
+
+def _parse_header_lines(body):
+    """[(mnem, unit, value, descr, fmt)] from a ~Well/~*_Definition body."""
+    out = []
+    for line in body:
+        if not line.strip():
+            continue
+        m = _HDR_LINE.match(line)
+        if not m:
+            continue
+        mnem, unit, value, descr = (g.strip() for g in m.groups())
+        fmt = ""
+        fm = _FMT_BRACE.search(descr)
+        if fm:
+            fmt = fm.group(1).upper()
+            descr = _FMT_BRACE.sub("", descr).strip()
+        out.append((mnem, unit, value, descr, fmt))
+    return out
+
+
+def _split_row(line, dlm):
+    """One data row -> list of raw strings, honouring quotes.
+
+    3.0 permits a quoted string containing the delimiter — a core description
+    is exactly where that happens ("shale, silty"). Splitting naively would
+    shift every column after it, which is the kind of wrong that lands in a
+    table looking plausible.
+    """
+    if dlm is None:                       # whitespace-delimited
+        return line.split()
+    out, cur, q = [], [], False
+    for ch in line:
+        if ch == '"':
+            q = not q
+            continue
+        if ch == dlm and not q:
+            out.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    out.append("".join(cur).strip())
+    return out
+
+
+def _coerce(raw, fmt, null_value):
+    """Typed value, or None for the file's NULL.
+
+    An UNTYPED column is tried as a number and kept as text if that fails —
+    the same 'wrong is worse than missing' rule the rest of the codebase uses:
+    a description column must not silently become nan, and a depth must not
+    silently become the string '541.0'.
+    """
+    s = (raw or "").strip()
+    if s == "":
+        return None
+    if fmt == "S":
+        return s
+    try:
+        v = float(s)
+    except ValueError:
+        return s if fmt != "F" else None   # declared numeric but is not
+    if null_value is not None and v == null_value:
+        return None
+    return v
+
+
+def split_las3(source):
+    """Parse a LAS 3.0 file into its named data sets. Returns Las3File.
+
+    Raises ValueError if the file does not declare VERS 3.x — this reader is
+    not a general LAS parser and must not be pointed at a 2.0 file that lasio
+    already handles better.
+    """
+    if hasattr(source, "read"):
+        text = source.read()
+    else:
+        with open(source, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+
+    raw = _split_raw(text)
+    by_name = {n: b for n, _a, b in raw}
+    raw_sections = dict(by_name)
+
+    version = wrap = None
+    dlm = None
+    for n, _a, body in raw:
+        if n.lower().startswith("v"):
+            for mnem, _u, value, _d, _f in _parse_header_lines(body):
+                mu = mnem.upper()
+                if mu == "VERS":
+                    version = value
+                elif mu == "WRAP":
+                    wrap = value.upper().startswith("Y")
+                elif mu == "DLM":
+                    dlm = _DELIMS.get(value.upper())
+            break
+    if not str(version or "").startswith("3"):
+        raise ValueError(
+            f"not a LAS 3.0 file (VERS={version!r}) — read_las handles 1.2/2.0")
+
+    well, null_value = {}, None
+    for n, _a, body in raw:
+        if n.lower() == "well":
+            for mnem, _u, value, _d, _f in _parse_header_lines(body):
+                well[mnem.upper()] = value
+                if mnem.upper() == "NULL":
+                    try:
+                        null_value = float(value)
+                    except ValueError:
+                        null_value = None
+            break
+
+    # Pair every *_Data with its definition. The association after the pipe
+    # wins; otherwise the name with _Data swapped for _Definition. ~Ascii is
+    # 2.0's spelling surviving into 3.0 and pairs with ~Curve/~Log_Definition.
+    sets = {}
+    for name, assoc, body in raw:
+        low = name.lower()
+        if not (low.endswith("_data") or low in ("ascii", "a")):
+            continue
+        if low in ("ascii", "a"):
+            base, defname = "Log", None
+            for cand in ("Log_Definition", "Curve"):
+                if cand in by_name:
+                    defname = cand
+                    break
+        else:
+            base = name[: -len("_Data")]
+            defname = assoc or f"{base}_Definition"
+            if defname not in by_name:
+                defname = next((k for k in by_name
+                                if k.lower() == defname.lower()), None)
+        if not defname:
+            continue
+        cols = [Las3Column(m, u, d, f)
+                for m, u, _v, d, f in _parse_header_lines(by_name[defname])]
+        rows = []
+        for line in body:
+            if not line.strip():
+                continue
+            cells = _split_row(line, dlm)
+            rows.append([_coerce(cells[i] if i < len(cells) else "",
+                                 cols[i].fmt if i < len(cols) else "",
+                                 null_value)
+                         for i in range(len(cols))])
+        sets[base] = Las3Set(base, cols, rows)
+
+    return Las3File(version, bool(wrap), dlm, well, sets, raw_sections)

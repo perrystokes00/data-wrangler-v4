@@ -1291,6 +1291,88 @@ def tier_units(res, verbose=False):
     check("synth LAS: every version/wrap variant reads back correctly",
           _las_roundtrips)
 
+    # 22. LAS 3.0 MULTI-SECTION. lasio assumes one data block, so a 3.0 file
+    #     carrying several either dies ("Cannot reshape ~A data size") or
+    #     returns one set and drops the rest. 3.0's point is that it can hold
+    #     Core, Inclinometry, Tops, Test and Perforation ALONGSIDE the log —
+    #     the same things this catalog has tables for and currently extracts
+    #     from PDFs. split_las3 parses them directly.
+    #
+    #     The fixture is deliberately awkward in the ways the standard allows,
+    #     because those are the ways a naive splitter goes wrong quietly:
+    #     a quoted description containing the delimiter, the file's NULL, a
+    #     string column beside numeric ones, and a comma inside a HEADER value
+    #     that must not be touched.
+    def _las3_sections():
+        import tempfile
+        from dataview.file_catalog.las_reader import split_las3
+        las3 = (
+            "~Version\n"
+            "VERS.   3.0 : CWLS LOG ASCII STANDARD - VERSION 3.0\n"
+            "WRAP.   NO  : ONE LINE PER DEPTH STEP\n"
+            "DLM .   COMMA : DELIMITING CHARACTER\n"
+            "\n~Well\n"
+            "NULL .     -999.25 : NULL VALUE\n"
+            "UWI  .     15041204660000 : UNIQUE WELL IDENTIFIER\n"
+            "WELL .     BAKER, 13-8 : WELL NAME\n"
+            "\n~Log_Definition\n"
+            "DEPT .M    : Depth {F}\n"
+            "GR   .GAPI : Gamma Ray {F}\n"
+            "\n~Log_Data | Log_Definition\n"
+            "540.5,61.2\n"
+            "541.0,-999.25\n"
+            "\n~Core_Definition\n"
+            "CORT .M : Core top {F}\n"
+            "CORD .  : Core description {S}\n"
+            "\n~Core_Data | Core_Definition\n"
+            '541.0,"shale, silty"\n'
+            "\n~Tops_Definition\n"
+            "TOPT .M : Top depth {F}\n"
+            "TOPN .  : Formation {S}\n"
+            "\n~Tops_Data | Tops_Definition\n"
+            "540.8,Cherokee\n")
+        p = os.path.join(tempfile.gettempdir(), "selftest_las3.las")
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(las3)
+            las = split_las3(p)
+            assert las.version.startswith("3"), las.version
+            assert las.delimiter == ",", repr(las.delimiter)
+            assert set(las.sets) == {"Log", "Core", "Tops"}, sorted(las.sets)
+
+            # a comma inside a HEADER value is data, not a delimiter
+            assert las.well["WELL"] == "BAKER, 13-8", las.well["WELL"]
+            assert las.well["UWI"] == "15041204660000"
+
+            # the file's NULL becomes None, not -999.25 masquerading as a
+            # reading — the whole point of declaring one
+            assert las.sets["Log"].rows == [[540.5, 61.2], [541.0, None]], \
+                las.sets["Log"].rows
+
+            # a QUOTED value containing the delimiter stays one cell; splitting
+            # it would shift every column after it and land plausible garbage
+            assert las.sets["Core"].rows == [[541.0, "shale, silty"]], \
+                las.sets["Core"].rows
+
+            # {F} and {S} produce a float and a str, not two strings
+            t = las.sets["Tops"].rows[0]
+            assert isinstance(t[0], float) and t[1] == "Cherokee", t
+
+            # and it must REFUSE a 2.0 file rather than half-parsing one that
+            # lasio already handles properly
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(las3.replace("3.0 : CWLS", "2.0 : CWLS"))
+            try:
+                split_las3(p)
+                raise AssertionError("split_las3 accepted a VERS 2.0 file")
+            except ValueError:
+                pass
+        finally:
+            if os.path.exists(p):
+                os.remove(p)
+    check("LAS 3.0: named data sets parse, with types and quoting",
+          _las3_sections)
+
     return res
 
 
