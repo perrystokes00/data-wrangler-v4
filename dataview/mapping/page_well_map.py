@@ -8336,6 +8336,15 @@ def run(engine=None):
         _is_oneshot_fit_this_render = bool(
             st.session_state.get("_drawn_bounds_oneshot")
         )
+        # KEEP A COPY FOR THE LAYERS BEFORE THE CAMERA EATS IT. These bounds
+        # serve two unrelated purposes: fitting the view once, and telling a
+        # data layer what area to query. The oneshot pop below exists for the
+        # first and destroys the second -- so an AREA change (which is
+        # oneshot) left the reference-well layer unbounded and drawing the
+        # whole master, while a circle drill (which is not) bounded it
+        # correctly. Same layer, opposite behaviour, depending on how the user
+        # arrived. Captured here, read by the layers ~470 lines below.
+        _layer_bounds = st.session_state.get("_drawn_bounds")
         if _is_oneshot_fit_this_render:
             st.session_state.pop("_drawn_bounds", None)
             st.session_state.pop("_drawn_bounds_oneshot", None)
@@ -8820,7 +8829,9 @@ def run(engine=None):
                     try:
                         from dataview.mapping.geography_layers import (
                             add_reference_wells)
-                        _rb = st.session_state.get("_drawn_bounds")
+                        # _layer_bounds, not session state: the camera's
+                        # oneshot pop has already run by now.
+                        _rb = _layer_bounds
                         _rn, _rscope = add_reference_wells(
                             m, engine, bounds=_rb, show=True)
                         _msg.info(

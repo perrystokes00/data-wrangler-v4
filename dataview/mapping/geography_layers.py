@@ -271,22 +271,58 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
     # everything else on the map put together, purely to print an exact total
     # that reads "lots". Over the cap, the honest statement is that it is
     # capped, which needs no count at all.
+    # "TOP n" IS A GEOGRAPHIC SLICE PRETENDING TO BE A SAMPLE, and it bites
+    # whenever the scope holds more wells than the cap -- with no bounds at
+    # all, and equally inside a bbox that is simply large.
+    #
+    # With no ORDER BY the server returns whatever the chosen index reaches
+    # first, and here that is latitude order. Measured: TOP 50000 over the
+    # whole master came back lat 37.7-71.9 out of 24.4-71.9, every well in
+    # Texas, the Gulf and California silently absent; over an 8-state bbox it
+    # came back lat 31.0-31.5, a 30-mile band drawn as if it were the data.
+    # Both render a hard horizontal edge that reads like a coastline. Wrong is
+    # worse than missing, and a map omitting half a continent while looking
+    # complete is exactly that.
+    #
+    # So: try the exact fetch, and if it would cap, re-ask for every k-th well
+    # by a hash of its uwi. The hash spreads geographically where latitude
+    # order does not. Measured over the master, five-degree buckets touched:
+    # slice 37, hash-spread 45, TABLESAMPLE only 31 -- TABLESAMPLE samples
+    # PAGES, and pages are clustered by uwi14, so it clumps.
+    lim = int(limit)
+    sampled = False
     try:
         with engine.connect() as con:
+            # limit+1 tells us "capped" without a COUNT, which measured 5.90s
+            # over a 2M-row bbox for a number that only ever reads "lots".
             rows = con.execute(text(
-                f"SELECT TOP {int(limit)} well_name, surface_latitude, "
+                f"SELECT TOP {lim + 1} well_name, surface_latitude, "
                 f"surface_longitude FROM {REFERENCE_MASTER} WHERE {clause}"),
                 params).fetchall()
+            if len(rows) > lim:
+                est = con.execute(text(
+                    "SELECT SUM(p.rows) FROM WELL_REF.sys.partitions p "
+                    "JOIN WELL_REF.sys.objects o ON o.object_id = p.object_id "
+                    "WHERE o.name = 'well_master_gold' AND p.index_id IN (0,1)"
+                )).scalar() or 0
+                k = max(2, int(est // max(lim, 1)) + 1)
+                sampled = True
+                rows = con.execute(text(
+                    f"SELECT TOP {lim} well_name, surface_latitude, "
+                    f"surface_longitude FROM {REFERENCE_MASTER} "
+                    f"WHERE {clause} AND ABS(CHECKSUM(uwi14)) % {k} = 0"),
+                    params).fetchall()
     except Exception as exc:
         print(f"[geography_layers] reference wells query failed: {exc}")
         return 0, 0
-    capped = len(rows) >= int(limit)
-    in_scope = None if capped else len(rows)
     if not rows:
         return 0, 0
-    label = (f"🔵 Reference wells ({len(rows):,}"
-             + (" shown, capped — zoom in to see the rest"
-                if capped else "") + ")")
+    in_scope = None if sampled else len(rows)
+    if sampled:
+        label = (f"🔵 Reference wells ({len(rows):,} spread sample "
+                 f"— draw a smaller area to see every well in it)")
+    else:
+        label = (f"🔵 Reference wells ({len(rows):,} in this area)")
     n_drawn = points_layer(m, ((la, lo, nm) for nm, la, lo in rows),
                            name=label, color="#1d4ed8", fill="#60a5fa",
                            radius=2, show=show, opacity=0.7)
