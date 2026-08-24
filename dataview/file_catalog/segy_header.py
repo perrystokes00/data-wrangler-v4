@@ -92,6 +92,10 @@ def _s32(buf, off, big=True):
     return struct.unpack_from(">i" if big else "<i", buf, off)[0]
 
 
+def _u32(buf, off, big=True):
+    return struct.unpack_from(">I" if big else "<I", buf, off)[0]
+
+
 # ── the trace-header layout the file declares about ITSELF ──────────────────
 # SEG-Y's standard positions are a default, not a guarantee, and the good
 # vendors say where they actually put things:
@@ -128,15 +132,69 @@ def _classify_byte_label(lbl: str):
     """Which geometry field a declared byte range names, or None."""
     u = lbl.upper()
     # crossline first: 'CROSSLINE' must never fall through to the inline test
-    if re.search(r"\bCROSS[\s_-]*LINE\b|\bX[\s_-]*LINE\b", u):
+    # TRAILING (?![A-Z0-9]), NOT \b. brecon_3d declares "XLINE_NO" / "ILINE_NO",
+    # and \b after LINE fails there because '_' IS a word character -- so both
+    # fields went unclassified, the reader fell back to the rev-1 offsets, and
+    # 300 of 300 sampled crossline values came back invalid. The lookahead also
+    # keeps the prose line "ILINES: 1-457  XLINES: 1 - 318" from matching, which
+    # a bare relaxation to \w* would not.
+    if re.search(r"\bCROSS[\s_-]*LINE(?![A-Z0-9])|\bX[\s_-]*LINE(?![A-Z0-9])", u):
         return "crossline"
-    if re.search(r"\bIN[\s_-]*LINE\b", u):
+    # "ILINE_NO" as well as "INLINE". The crossline test above runs first, so
+    # XLINE never reaches here.
+    if re.search(r"\bIN[\s_-]*LINE(?![A-Z0-9])|\bI[\s_-]*LINE(?![A-Z0-9])", u):
         return "inline"
     if re.search(r"\bCDP[\s_-]*X\b|\bX[\s_-]*COORD|\bEASTING\b", u):
         return "cdp_x"
     if re.search(r"\bCDP[\s_-]*Y\b|\bY[\s_-]*COORD|\bNORTHING\b", u):
         return "cdp_y"
     return None
+
+
+# THE OTHER WAY VENDORS WRITE IT: label, START offset, then size+format --
+#     C 6 BYTES FORMAT   (FOR NON STANDARD SEGY HEADERS)
+#     C 7 CDP_X          181   4R   CDP_Y          185   4R
+#     C 8 ILINE_NO       197   4I   XLINE_NO       201   4I
+# No "BYTES" keyword, no range, and the FORMAT is the point: 4R is a 4-byte
+# REAL. Read as int32, brecon_3d's easting 2,617,988 arrives as 1177023108 and,
+# with the scalar applied, 11,770,231 -- self-consistent, wrong, and it plots.
+#
+# Two or more spaces before the offset is what separates a declaration from
+# prose. The Geoscience Australia form ("CDP-X:73-76/181-184:INT") is
+# colon-delimited and does NOT match this, and "SAMPLE RATE  4 MS" does not
+# either; both are asserted in selftest rather than assumed.
+_DECL_FMT = re.compile(
+    r"([A-Z][A-Z0-9_ .\-]{1,22}?)\s{2,}(\d{1,3})\s+([1248])\s*([RIF])\b",
+    re.IGNORECASE)
+
+
+def declared_trace_layout(text):
+    """(offsets, formats) read from the textual header.
+
+    offsets -- {'cdp_x': 0-based offset, ...}, as declared_trace_map.
+    formats -- {'cdp_x': 'real'|'int', ...}, ONLY where a format is declared.
+               Absent means "not stated", which the caller reads as int32 (the
+               SEG-Y default). It does not mean int32 was declared.
+    """
+    offs = declared_trace_map(text)
+    fmts = {}
+    if not text:
+        return offs, fmts
+    for lbl, off, size, code in _DECL_FMT.findall(str(text)):
+        if size != "4":                 # every geometry field read here is 4 bytes
+            continue
+        try:
+            start = int(off)
+        except ValueError:
+            continue
+        if not (1 <= start <= TRACE_HDR - 3):
+            continue
+        field = _classify_byte_label(lbl)
+        if not field:
+            continue
+        offs.setdefault(field, start - 1)          # first declaration wins
+        fmts.setdefault(field, "real" if code.upper() in ("R", "F") else "int")
+    return offs, fmts
 
 
 def declared_trace_map(text: str) -> dict:
@@ -165,6 +223,19 @@ def declared_trace_map(text: str) -> dict:
         if field and field not in out:
             out[field] = start - 1                 # 1-based bytes -> 0-based
     return out
+
+
+def _ibm32(u32: int) -> float:
+    """One IBM System/360 float. _ibm_to_ieee is numpy-vectorised for SAMPLES;
+    a trace-header coordinate is a single word and must not drag numpy in per
+    trace. Same arithmetic: sign, 7-bit excess-64 exponent in base SIXTEEN,
+    24-bit fraction."""
+    if not u32:
+        return 0.0
+    sign = -1.0 if u32 >> 31 else 1.0
+    expo = ((u32 >> 24) & 0x7F) - 64
+    mant = (u32 & 0x00FFFFFF) / float(1 << 24)
+    return sign * mant * (16.0 ** expo)
 
 
 def _apply_scalar(value: int, scalar: int) -> float:
@@ -266,8 +337,9 @@ def read_segy_header(path: str, *, max_geom_traces: int = 300) -> dict:
             # ── geometry sample: read only the 240-byte trace headers ──
             # WHERE to read is decided before the loop: the file's own declared
             # layout if it states one, the rev-1 standard otherwise.
-            declared = declared_trace_map(out["textual_header"])
+            declared, declared_fmt = declared_trace_layout(out["textual_header"])
             out["trace_map"] = declared or None
+            out["trace_formats"] = declared_fmt or None
             offs = dict(STD_OFFSETS)
             offs.update(declared)
             out["trace_offsets"] = offs
@@ -286,6 +358,16 @@ def read_segy_header(path: str, *, max_geom_traces: int = 300) -> dict:
                 idx = 0
                 _sx = offs["cdp_x"] in _SCALAR_GOVERNED
                 _sy = offs["cdp_y"] in _SCALAR_GOVERNED
+                # A DECLARED REAL IS NOT SCALED. The bytes 71-72 scalar governs
+                # the INTEGER coordinate fields; a vendor writing floats has
+                # already put ground units in the word, and dividing brecon's
+                # 2,617,988 by its stated -100 would give 26,180.
+                _rx = declared_fmt.get("cdp_x") == "real"
+                _ry = declared_fmt.get("cdp_y") == "real"
+                # WHICH real: the file's own sample-format code says which
+                # convention this vendor writes. brecon declares code 1, so 4R
+                # is an IBM real -- read, not guessed. Code 5 is IEEE.
+                _ieee = (fmt == 5)
                 while idx < n_traces and sampled < max_geom_traces:
                     toff = data_start + idx * bytes_per_trace
                     f.seek(toff)
@@ -297,8 +379,20 @@ def read_segy_header(path: str, *, max_geom_traces: int = 300) -> dict:
                     cy = _s32(th, offs["cdp_y"], big)
                     il = _s32(th, offs["inline"], big)
                     xl = _s32(th, offs["crossline"], big)
-                    xs.append(_apply_scalar(cx, scalar) if _sx else float(cx))
-                    ys.append(_apply_scalar(cy, scalar) if _sy else float(cy))
+                    if _rx:
+                        _ux = _u32(th, offs["cdp_x"], big)
+                        xs.append(struct.unpack(">f" if big else "<f",
+                                                th[offs["cdp_x"]:offs["cdp_x"] + 4])[0]
+                                  if _ieee else _ibm32(_ux))
+                    else:
+                        xs.append(_apply_scalar(cx, scalar) if _sx else float(cx))
+                    if _ry:
+                        _uy = _u32(th, offs["cdp_y"], big)
+                        ys.append(struct.unpack(">f" if big else "<f",
+                                                th[offs["cdp_y"]:offs["cdp_y"] + 4])[0]
+                                  if _ieee else _ibm32(_uy))
+                    else:
+                        ys.append(_apply_scalar(cy, scalar) if _sy else float(cy))
                     ils.append(il)
                     xls.append(xl)
                     sampled += 1
@@ -391,9 +485,11 @@ def read_segy_header(path: str, *, max_geom_traces: int = 300) -> dict:
                 if _ok_frac < 0.75:
                     out["notes"].append(
                         f"only {_ok_frac:.0%} of {sampled} sampled trace "
-                        f"headers carry a usable coordinate pair — no "
-                        f"geometry is reported from them (use the survey's "
-                        f"navigation file)")
+                        f"headers carry a usable coordinate pair — no geometry "
+                        f"is read from them. The header may declare a byte "
+                        f"layout or coordinate FORMAT this reader does not "
+                        f"honour; a navigation file, where one exists, is the "
+                        f"other source")
                     cxr = cyr = None
                     xs = ys = []
                     # The surviving indices PASSED the type check, but passing

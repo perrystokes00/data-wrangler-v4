@@ -1796,6 +1796,108 @@ def tier_units(res, verbose=False):
     check("seismic: navigation-only surveys are held, not promoted",
           _seis_nav_only_never_promotes)
 
+    def _segy_declared_coord_format_is_honoured():
+        # "4R" IS A 4-BYTE REAL. brecon_3d states its own layout:
+        #     C 7 CDP_X          181   4R   CDP_Y          185   4R
+        #     C 8 ILINE_NO       197   4I   XLINE_NO       201   4I
+        # Read as int32 with the stated -100 scalar, its easting 2,617,988
+        # arrives as 11,770,231 and the survey spans 79 m -- self-consistent,
+        # wrong, and it plots. Its inline/crossline are at 197/201, not the
+        # rev-1 189/193, so index reads were garbage too.
+        #
+        # Verified against the file's OWN stated ranges (ILINES 1-457,
+        # XLINES 1-318), which is why this bug was provable rather than
+        # arguable. The fixture reproduces the shape without needing C:\Bulk.
+        import struct
+        import tempfile
+        import os
+        from dataview.file_catalog.segy_header import (
+            declared_trace_layout, read_segy_header, _classify_byte_label)
+
+        def _ibm(v):
+            """float -> IBM System/360 32-bit, the inverse of _ibm32."""
+            if v == 0:
+                return 0
+            sign, v = (1, -v) if v < 0 else (0, v)
+            e = 0
+            while v >= 1.0:
+                v /= 16.0
+                e += 1
+            while v < 1.0 / 16.0:
+                v *= 16.0
+                e -= 1
+            return ((sign << 31) | ((e + 64) << 24)
+                    | int(round(v * (1 << 24))) & 0x00FFFFFF)
+
+        NS, TR = 8, 40
+        X0, Y0, DX = 2_617_988.0, 6_197_988.0, 200.0
+
+        card = [" " * 80 for _ in range(40)]
+        card[0] = "C 1 CLIENT: TEST VOL:FD MIGRATION".ljust(80)
+        card[2] = "C 3 ILINES: 1-457  XLINES: 1 - 318".ljust(80)
+        card[3] = "C 4  SAMPLE RATE  4 MS  Time   4200 MS  DATUM 0 ASL".ljust(80)
+        card[5] = "C 6 BYTES FORMAT   (FOR NON STANDARD SEGY HEADERS)".ljust(80)
+        card[6] = "C 7 CDP_X          181   4R   CDP_Y          185   4R".ljust(80)
+        card[7] = "C 8 ILINE_NO       197   4I   XLINE_NO       201   4I".ljust(80)
+        text = "".join(card).encode("cp037")
+        binhdr = bytearray(400)
+        struct.pack_into(">H", binhdr, 20, NS)
+        struct.pack_into(">H", binhdr, 24, 1)          # format 1 => IBM reals
+        blob = bytearray(text + bytes(binhdr))
+        for i in range(TR):
+            th = bytearray(240)
+            struct.pack_into(">h", th, 70, -100)       # a scalar that must NOT apply
+            struct.pack_into(">I", th, 180, _ibm(X0 + i * DX))
+            struct.pack_into(">I", th, 184, _ibm(Y0 + i * DX))
+            struct.pack_into(">i", th, 196, 1 + i)     # ILINE_NO at 197
+            struct.pack_into(">i", th, 200, 1 + i)     # XLINE_NO at 201
+            struct.pack_into(">i", th, 188, -458751)   # rev-1 inline slot: junk
+            struct.pack_into(">i", th, 192, -458751)   # rev-1 crossline slot: junk
+            blob += th + b"\x00" * (NS * 4)
+
+        offs, fmts = declared_trace_layout(
+            "".join(card).replace(" " * 8, " " * 8))   # text form, not EBCDIC
+        assert fmts.get("cdp_x") == "real" and fmts.get("cdp_y") == "real", (
+            f"the declared 4R coordinate format was not read: {fmts!r} -- int32 "
+            f"there turns 2,617,988 into 11,770,231 and it still plots")
+        assert offs.get("inline") == 196 and offs.get("crossline") == 200, (
+            f"declared ILINE_NO/XLINE_NO byte positions ignored: {offs!r}")
+
+        # NEGATIVE CASES. The colon-delimited Geoscience Australia form and
+        # ordinary prose must not be mistaken for a layout declaration.
+        _ga = ("C28 SDATUM:57-60:INT;     CDP-X:73-76/181-184:INT; "
+               "CDP-Y:77-80/185-188:INT;")
+        assert not declared_trace_layout(_ga)[1], \
+            "the GA colon form was parsed as a FORMAT declaration"
+        assert _classify_byte_label("ILINES: 1-457") is None, \
+            "the prose line 'ILINES: 1-457' classifies as a field"
+        assert _classify_byte_label("XLINES: 1 - 318") is None, \
+            "the prose line 'XLINES: 1 - 318' classifies as a field"
+
+        fd, path = tempfile.mkstemp(suffix=".sgy")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(bytes(blob))
+            h = read_segy_header(path)
+        finally:
+            os.unlink(path)
+
+        pts = h.get("cdp_points") or []
+        assert pts, f"no coordinates read; notes={h.get('notes')}"
+        gx = [p[0] for p in pts]
+        assert abs(min(gx) - X0) < 2.0, (
+            f"CDP_X read as {min(gx):,.0f}, expected ~{X0:,.0f}. Either the "
+            f"declared real format was ignored, or the bytes 71-72 scalar was "
+            f"applied to it -- the scalar governs INTEGER coordinates only")
+        assert h.get("inline_range") and h["inline_range"][0] == 1, (
+            f"inline read from the rev-1 offset instead of the declared 197: "
+            f"{h.get('inline_range')!r}")
+        assert h.get("crossline_range") and h["crossline_range"][0] == 1, (
+            f"crossline read from the rev-1 offset instead of the declared 201: "
+            f"{h.get('crossline_range')!r}")
+    check("SEG-Y: a declared 4R coordinate format is honoured, not assumed int",
+          _segy_declared_coord_format_is_honoured)
+
     return res
 
 
