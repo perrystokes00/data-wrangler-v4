@@ -2327,6 +2327,67 @@ def tier_units(res, verbose=False):
     check("map: every widget key agrees with the persist filter, both ways",
           _widget_keys_agree_with_the_persist_filter)
 
+    def _wiggle_trace_is_legible():
+        # THE WIGGLE WAS BLACK INK ON A DARK NAVY GROUND, both at part opacity.
+        # Nothing errored and nothing looked broken in code review -- the
+        # colours are all valid, the plot is drawn, the data is real. It was
+        # simply unreadable, and it is the panel a geologist reads wavelet
+        # character from. The density panel beside it was fine only because
+        # RdBu_r happens to be white at zero amplitude.
+        #
+        # SO THIS MEASURES THE RENDER, NOT THE CONSTANTS. Grepping for a hex
+        # value would pass the moment someone picked a different dark colour;
+        # what matters is whether the ink and the ground are far enough apart
+        # to see, whatever they are.
+        import matplotlib
+        matplotlib.use("Agg")
+        import numpy as np
+        import streamlit as _stl
+        from matplotlib.colors import to_rgb
+        from dataview.file_catalog import file_viewer as _fv
+
+        def _lum(c):
+            r, g, b = to_rgb(c[:3] if isinstance(c, (tuple, list)) else c)
+            return 0.299 * r + 0.587 * g + 0.114 * b
+
+        grabbed = {}
+        _orig = _stl.pyplot
+        _stl.pyplot = lambda fig, **kw: grabbed.setdefault("fig", fig)
+        try:
+            ns, nt = 64, 8
+            rng = np.random.default_rng(0)
+            data = rng.normal(0, 1, (ns, nt)).astype("float32")
+            _fv._segy_plot(data, np.arange(ns).astype(float), nt, "synthetic.segy")
+        finally:
+            _stl.pyplot = _orig
+
+        fig = grabbed.get("fig")
+        assert fig is not None and len(fig.axes) >= 2,             "_segy_plot no longer produces a two-panel figure"
+        ax2 = fig.axes[1]
+        ground = _lum(ax2.get_facecolor())
+
+        inks = [_lum(ln.get_color()) for ln in ax2.get_lines()]
+        for coll in ax2.collections:              # the filled positive lobes
+            try:
+                fc = coll.get_facecolor()
+                if len(fc):
+                    inks.append(_lum(tuple(fc[0])))
+            except Exception:
+                pass
+        assert inks, "the wiggle panel drew no traces at all"
+
+        worst = min(abs(ground - i) for i in inks)
+        # Black on #1A2B4A measured 0.16 and was unreadable; black on #F7F4EC
+        # measures 0.89. 0.35 sits clearly between the two.
+        assert worst >= 0.35, (
+            "the wiggle ink and its background are too close to tell apart: "
+            "ground luminance " + format(ground, ".3f") + ", nearest ink "
+            + format(min(inks, key=lambda i: abs(ground - i)), ".3f")
+            + " (separation " + format(worst, ".3f") + "). Ink and ground too close TOGETHER, whichever way round -- dark on dark or pale on pale renders without error and cannot be read.")
+        matplotlib.pyplot.close(fig)
+    check("viewer: the wiggle trace is legible against its own background",
+          _wiggle_trace_is_legible)
+
     def _loader_key_transforms_agree():
         # TWO FAILURES, ONE ROOT: a key transform applied on one side only.
         #

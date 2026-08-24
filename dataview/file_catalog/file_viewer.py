@@ -635,21 +635,39 @@ def _segy_plot(data, samples, n_traces, file_path):
         ax1.set_facecolor("#1A2B4A")
 
         # Wiggle (first 30 traces max)
+        #
+        # THIS PANEL WAS BLACK INK ON A DARK NAVY GROUND. "k-" is black, the
+        # facecolor was #1A2B4A, and both the line and the fill were drawn at
+        # PART OPACITY on top of that -- so the wiggle, the one display a
+        # geologist reads wavelet character from, was the least legible thing
+        # on the page. The density panel beside it never had the problem
+        # because RdBu_r is WHITE at zero amplitude, which is also why the two
+        # looked like they came from different applications.
+        #
+        # A wiggle is conventionally black on white or cream with the positive
+        # lobes filled solid, and that convention exists because it is what
+        # makes a wavelet's shape readable. Restore it: pale ground,
+        # full-strength ink, solid peak fill.
         ax2 = axes[1]
         n_wig = min(30, n_traces)
         norm  = vmax * 2 if vmax > 0 else 1
         for i in range(n_wig):
             trace = data[:, i] / norm + i
-            ax2.plot(trace, samples, "k-", linewidth=0.4, alpha=0.7)
+            ax2.plot(trace, samples, "-", color="#111111", linewidth=0.6)
             ax2.fill_betweenx(samples, i, trace,
-                              where=(trace > i), color="#C8922A", alpha=0.4)
+                              where=(trace > i), color="#111111", alpha=0.9)
         ax2.set_xlim(-1, n_wig)
         ax2.invert_yaxis()
         ax2.set_title(f"Wiggle (first {n_wig} traces)", color="white")
         ax2.set_xlabel("Trace", color="white")
         ax2.set_ylabel("Sample", color="white")
+        # Ticks and labels sit OUTSIDE the axes, on a figure patch that is
+        # transparent, so they stay white against the dark page. Only the plot
+        # INTERIOR goes pale -- setting the figure light would strand them.
         ax2.tick_params(colors="white")
-        ax2.set_facecolor("#1A2B4A")
+        ax2.set_facecolor("#F7F4EC")
+        for _sp in ax2.spines.values():
+            _sp.set_color("#8A8A8A")
 
         fig.tight_layout()
         st.pyplot(fig, use_container_width=True)
