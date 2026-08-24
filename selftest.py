@@ -1518,6 +1518,33 @@ def tier_units(res, verbose=False):
         # header row hanging off a well
         assert all_sets(split_las3(_io.StringIO(
             las3.split("~Inclinometry_Definition")[0])), source_path="x") == {}
+
+        # A BARE ~Ascii MUST STILL FIND ITS DEFINITION. The spec samples write
+        # "~ASCII | CURVE" and take the association branch; the generator
+        # writes a bare "~Ascii" against "~CURVE INFORMATION" and takes the
+        # fallback — which matched the literal "Curve", so every generated 3.0
+        # file parsed to ZERO data sets while its header read perfectly. No
+        # exception, just nothing. Two sources of files, two paths through one
+        # function, and only the second source walked this one.
+        bare = (
+            "~VERSION INFORMATION\n"
+            "VERS.   3.0 : CWLS LOG ASCII STANDARD - VERSION 3.0\n"
+            "DLM .   COMMA : DELIMITING CHARACTER\n"
+            "\n~Well Information\n"
+            "UWI  .     15001209150000 : UNIQUE WELL IDENTIFIER\n"
+            "\n~CURVE INFORMATION\n"
+            "DEPT .M    : Depth {F}\n"
+            "GR   .GAPI : Gamma Ray {F}\n"
+            "\n~Ascii\n"
+            "540.5,61.2\n"
+            "541.0,62.7\n")
+        b = split_las3(_io.StringIO(bare))
+        assert "Log" in b.sets, (
+            "a bare ~Ascii found no definition — the fallback is matching "
+            "section names case-sensitively again, and '~CURVE INFORMATION' "
+            "is not '~Curve'")
+        assert b.sets["Log"].rows == [[540.5, 61.2], [541.0, 62.7]], \
+            b.sets["Log"].rows
     check("LAS 3.0: ~Inclinometry maps to the survey mirrors, parent included",
           _las3_inclinometry)
 

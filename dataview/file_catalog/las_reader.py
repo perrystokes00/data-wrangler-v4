@@ -378,8 +378,20 @@ def split_las3(source):
 
         defname = assoc or None
         if bare_ascii:
-            defname = next((c for c in ("Log_Definition", "Curve")
-                            if c in by_name), None)
+            # CASE-INSENSITIVE, like the association lookup below. Looking for
+            # the literal "Curve" found nothing in a file headed
+            # "~CURVE INFORMATION" — every generated 3.0 file parsed to zero
+            # data sets while its header read perfectly, which is the quiet
+            # kind of wrong: no exception, just an empty result.
+            #
+            # The real spec samples never caught this because they write
+            # "~ASCII | CURVE" — an explicit association, which took the other
+            # branch. It surfaced only once the generator produced 3.0 files
+            # of its own, with a bare ~Ascii. Two sources of files, two
+            # different paths through the same function.
+            _low = {k.lower(): k for k in by_name}
+            defname = next((_low[c] for c in ("log_definition", "curve")
+                            if c in _low), None)
         if defname and defname not in by_name:
             # case may differ between the association and the section it names
             # — the spec sample writes "~TEST | TEST_Definition" against a
