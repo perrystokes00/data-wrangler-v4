@@ -677,6 +677,87 @@ def _segy_plot(data, samples, n_traces, file_path):
         st.warning(f"SEGY plot failed: {e}")
 
 
+def segy_volume_plot(il, xl, title=""):
+    """A 3D volume as its two orthogonal sections, tied to each other.
+
+    WHY NOT _segy_plot. That draws "the section" plus a wiggle of its first 30
+    traces, which is the right display for a 2D LINE -- a line has one section
+    and nothing to cross-reference. A volume does not: the useful question is
+    always "what does this look like the other way", and the two panels only
+    mean something together if you can see where they intersect. So each
+    section is drawn against the OTHER axis's real numbering and carries a
+    marker at the position of the section beside it. Drawing both against
+    0..n-1 would put two pictures on a page with no way to relate them.
+
+    Greyscale on purpose: it is what a volume is conventionally interpreted in,
+    and the eye reads structural continuity out of it better than out of a
+    diverging colour ramp.
+
+    Either panel may be None -- a volume can carry a usable inline index and no
+    crossline one -- in which case the other is drawn alone rather than beside
+    an empty box.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        panels = [p for p in (il, xl) if p and p.get("data") is not None]
+        if not panels:
+            return None
+
+        fig, axes = plt.subplots(1, len(panels), figsize=(7.4 * len(panels), 8),
+                                 squeeze=False)
+        fig.patch.set_alpha(0.0)
+
+        for ax, p in zip(axes[0], panels):
+            data, times, xs = p["data"], p["times"], p.get("x")
+            # CLIP ON A PERCENTILE, NOT THE MAXIMUM. A single spike -- a bad
+            # trace, an edge effect -- sets the scale for the whole section and
+            # everything real fades to mid-grey. The 97th percentile keeps the
+            # section readable and lets the outlier saturate, which is what
+            # every interpretation package does.
+            vmax = float(np.percentile(np.abs(data), 97)) or 1.0
+            if xs is not None and len(xs) == data.shape[1]:
+                extent = [float(xs[0]), float(xs[-1]), float(times[-1]),
+                          float(times[0])]
+                xlabel = p.get("cross_label", "trace")
+            else:
+                extent = [0, data.shape[1], float(times[-1]), float(times[0])]
+                xlabel = "trace"
+            ax.imshow(data, aspect="auto", cmap="Greys", vmin=-vmax, vmax=vmax,
+                      extent=extent, interpolation="bilinear")
+
+            # THE TIE. Mark where the other section cuts this one.
+            tie = p.get("tie")
+            if tie is not None and extent[0] <= tie <= extent[1]:
+                ax.axvline(tie, color="#C81E1E", linewidth=1.1,
+                           linestyle="--", alpha=0.9)
+                ax.text(tie, extent[3], " " + str(p.get("tie_label") or "") + " ",
+                        color="#C81E1E", fontsize=8.5, va="top", ha="left",
+                        bbox=dict(facecolor="white", edgecolor="none",
+                                  alpha=0.75, pad=1.5))
+
+            ax.set_title(p.get("title", ""), color="white", fontsize=11)
+            ax.set_xlabel(xlabel, color="white")
+            ax.set_ylabel(p.get("ylabel", "Time (ms)"), color="white")
+            ax.tick_params(colors="white")
+            for _sp in ax.spines.values():
+                _sp.set_color("#8A8A8A")
+
+        if title:
+            fig.suptitle(title, color="white", fontsize=12)
+        fig.tight_layout()
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+        return True
+
+    except Exception as e:
+        st.warning(f"Volume plot failed: {e}")
+        return None
+
+
 # =============================================================================
 # P190
 # =============================================================================

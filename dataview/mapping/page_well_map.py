@@ -3950,7 +3950,11 @@ def _seis_candidates(lines, df3d=None):
             out.append({"path": _fp, "name": _l.get("file_name") or "",
                         "survey": _l.get("survey") or "", "line": _l.get("line") or "",
                         "epsg": _l.get("epsg"), "traces": _l.get("traces"),
-                        "kind": "2D line"})
+                        "kind": "2D line",
+                        "dim": "2D",
+                        "stage": _seis_stage(_fp), "product": _seis_product(_fp),
+                        "base": _seis_base_line(
+                            _l.get("line") or _l.get("file_name") or "")})
     try:
         if df3d is not None and not df3d.empty and "file_path" in df3d.columns:
             for _r in df3d.to_dict("records"):
@@ -3961,7 +3965,10 @@ def _seis_candidates(lines, df3d=None):
                                 "line": _r.get("line_name") or "",
                                 "epsg": _r.get("epsg_code"),
                                 "traces": _r.get("trace_count"),
-                                "kind": "3D survey"})
+                                "kind": "3D survey",
+                                "dim": "3D",
+                                "stage": _seis_stage(_fp), "product": _seis_product(_fp),
+                                "base": ""})
     except Exception:
         pass
     return out
@@ -4009,42 +4016,176 @@ def _seis_label(h):
     return f"{_lbl}  -  {_sfx}" if _sfx and _sfx not in _lbl else _lbl
 
 
-def _render_seis_pick(lines=None, df3d=None):
-    """The picked SEG-Y, opened in the shared file viewer.
+# -- Seismic vocabulary, read out of the file name -----------------------
+#
+# THERE IS NO PROCESSING COLUMN. Not in dv_seis_line, not in dv_seis_set,
+# not in FILE_SEIS_HEADER -- all 24 columns checked. Perry: "It's in the file
+# name usually," and the corpus bears that out: 230 of 240 catalogued lines
+# carry an unambiguous stage in their own name, on a consistent scheme
+#
+#     85-ZBF_PRESDM_PROCESSED_Stack_10KM.segy
+#     tarata-m3d-pr5857-t-pstm-full-ss-agc.sgy
+#
+# so this READS a convention rather than guessing at one. The ten that carry
+# no stage (lineA.sgy, f3.sgy, delft.sgy, the .p190 navigation files) are
+# reported as "(not stated)" and never assigned one: a filter that invents a
+# processing type puts a confident wrong label on a section, and a wrong label
+# is worse than an absent one because it plots, exports and gets quoted.
+_SEIS_STAGE = [
+    (r"PRE[_\- ]?SDM|PSDM", "PreSDM (pre-stack depth)"),
+    (r"PRE[_\- ]?STM|PSTM", "PreSTM (pre-stack time)"),
+    (r"POST[_\- ]?M(?![A-Z])", "PostM (post-stack)"),
+    (r"PRE[_\- ]?MIG", "Pre-migration"),
+    (r"FINAL[_\- ]?MIGRATION|MIGRATION|[_\-]MIG(?![A-Z])", "Migrated"),
+]
+_SEIS_PRODUCT = [(r"PROCESSED", "Processed"), (r"RAW", "Raw")]
+_SEIS_UNSTATED = "(not stated)"
 
-    THE VIEWER ALREADY EXISTED and the map simply could not reach it.
-    file_viewer.view() renders the textual header, the binary header, the
-    trace headers and the section itself (density + wiggle), with a tolerant
-    reader for the files segyio refuses and an honesty banner counting what it
-    skipped. All that was missing was the route from a line on the map to it.
+
+def _seis_stage(name):
+    """Imaging stage read out of a file name, or None. Order is significant:
+    PRESDM and PRESTM must both be tested before the generic migration
+    pattern, or every one of them reads as merely "Migrated"."""
+    u = str(name or "").upper()
+    for pat, lbl in _SEIS_STAGE:
+        if re.search(pat, u):
+            return lbl
+    return None
+
+
+def _seis_product(name):
+    """RAW vs PROCESSED, or None when the name does not say."""
+    u = str(name or "").upper()
+    for pat, lbl in _SEIS_PRODUCT:
+        if re.search(pat, u):
+            return lbl
+    return None
+
+
+def _seis_base_line(line_name):
+    """The line code with its processing suffix removed.
+
+    dv_seis_line.line_name carries the processing in it --
+    85-ZBF_PRESDM_PROCESSED_Stack_4S -- so a filter offering raw line names
+    lists the same physical line eight times and is useless for finding it.
+    Cutting at the first stage token collapses those to 85-ZBF: 240 names
+    become 38 line codes, which is what someone looking for a line means.
+    """
+    u = str(line_name or "")
+    m = re.search(r"[_\-](PRE[_\- ]?SDM|PRE[_\- ]?STM|POSTM|PRE[_\- ]?MIG|PSTM|PSDM)",
+                  u, re.I)
+    return (u[:m.start()] if m else u).strip("_- ") or u
+
+
+def _seis_filter_box(label, key, values, help_text=None):
+    """A cascading filter. Returns the chosen value, or None for "All".
+
+    THE OPTIONS ARE DRAWN FROM WHAT SURVIVED THE FILTERS ABOVE, so no
+    combination can select an empty set -- pick a survey and the line list is
+    that survey's lines only.
+
+    That is also why the stored value has to be released when it disappears
+    from the options: Streamlit keeps a keyed widget's value across reruns, and
+    a value no longer in the list leaves the box showing a selection the data
+    can no longer honour. Popping it BEFORE the widget is drawn is the safe
+    half of Streamlit scar #6 -- assigning a widget's own key AFTER it exists
+    raises on a later run, on whatever page draws next.
+    """
+    opts = ["All"] + values
+    if st.session_state.get(key) not in opts:
+        st.session_state.pop(key, None)
+    sel = st.selectbox(label, opts, key=key, help=help_text)
+    return None if sel == "All" else sel
+
+
+def _render_seis_pick(lines=None, df3d=None):
+    """Filter down to one seismic line or volume, then look at it.
+
+    THE VIEWER ALREADY EXISTED and the map could not reach it. file_viewer.view
+    renders the textual header, the binary header, the trace headers and the
+    section (density + wiggle), with a tolerant reader for the files segyio
+    refuses. What was missing was a way to GET to a given line: 240 of them in
+    one flat list is not a chooser, it is a haystack.
 
     It is nest-safe by construction -- _vsection is a bordered container, not
     an expander -- so it embeds here without tripping Streamlit scar #4.
     """
+    cands = _seis_candidates(lines, df3d)
+    if not cands and not st.session_state.get("_seis_pick"):
+        return
+
+    st.markdown("#### Seismic")
+
     # -- A DOOR THAT IS NOT THE MAP -------------------------------------
     # Every map click round-trips through Python: streamlit-folium returns the
     # click, Streamlit reruns the script, and the whole map is rebuilt and
     # re-serialised. That is what greys the page out and snaps you away from
-    # where you were -- it is the framework's model, not a bug we can patch
-    # out, and it is the same reason Python can never learn about a pan or a
-    # zoom. So browsing popups and OPENING a section are separated here: read
-    # the popups on the map as much as you like, and when you actually want
-    # the data, pick it from this list. Choosing here never touches the map.
-    _cands = _seis_candidates(lines, df3d)
-    if _cands:
-        _NONE = "-- none --"
-        _labels = [_NONE] + [_seis_label(h) for h in _cands]
-        # Clear asks for the chooser to be released; honour it HERE,
-        # before the selectbox exists. Without this the box still shows
-        # the cleared line, so picking that same line again matches the
-        # last applied value and silently does nothing.
-        if st.session_state.pop("_seis_sel_reset", False):
-            st.session_state["seis_open_sel"] = _NONE
-            st.session_state["_seis_sel_last"] = _NONE
-        _sel = st.selectbox(
-            "Open a seismic section", _labels, key="seis_open_sel",
-            help="Opens the source SEG-Y below: textual header, trace headers "
-                 "and the section itself. The map is left exactly as it is.")
+    # where you were -- the framework's model, not a bug we can patch out, and
+    # the same reason Python can never learn about a pan or a zoom. So
+    # browsing popups and CHOOSING a section are separated: read the map
+    # freely, and filter here when you want the data. Nothing below touches
+    # the map.
+    if cands:
+        _c = st.columns(3)
+        with _c[0]:
+            _dim = _seis_filter_box(
+                "Dimension", "seis_f_dim",
+                sorted({c["dim"] for c in cands if c.get("dim")}))
+        _f = [c for c in cands if not _dim or c.get("dim") == _dim]
+
+        # One control, two meanings: a 2D survey groups lines, a 3D survey IS
+        # the volume. Labelling it "Survey" in both cases reads as a mistake
+        # to anyone looking for a volume by name.
+        _lbl = ("Volume" if _dim == "3D"
+                else "Survey" if _dim == "2D" else "Survey / volume")
+        with _c[1]:
+            _surv = _seis_filter_box(
+                _lbl, "seis_f_survey",
+                sorted({c["survey"] for c in _f if c.get("survey")}))
+        _f = [c for c in _f if not _surv or c.get("survey") == _surv]
+
+        with _c[2]:
+            _stage = _seis_filter_box(
+                "Processing", "seis_f_stage",
+                sorted({c.get("stage") or _SEIS_UNSTATED for c in _f}),
+                help_text="Imaging stage, read from the file name -- there is "
+                          "no processing column in the catalogue. Names that "
+                          "do not state one are listed as " + _SEIS_UNSTATED
+                          + " rather than guessed at.")
+        _f = [c for c in _f
+              if not _stage or (c.get("stage") or _SEIS_UNSTATED) == _stage]
+
+        _c2 = st.columns(3)
+        with _c2[0]:
+            _base = _seis_filter_box(
+                "Line", "seis_f_line",
+                sorted({c["base"] for c in _f if c.get("base")}),
+                help_text="The line code with its processing suffix removed, "
+                          "so one physical line is one entry rather than eight.")
+        _f = [c for c in _f if not _base or c.get("base") == _base]
+
+        with _c2[1]:
+            _prod = _seis_filter_box(
+                "Product", "seis_f_product",
+                sorted({c.get("product") or _SEIS_UNSTATED for c in _f}))
+        _f = [c for c in _f
+              if not _prod or (c.get("product") or _SEIS_UNSTATED) == _prod]
+
+        with _c2[2]:
+            _NONE = "-- none --"
+            _labels = [_NONE] + [_seis_label(h) for h in _f]
+            # Clear asks for the chooser to be released; honour it HERE, before
+            # the selectbox exists. Without this the box still shows the
+            # cleared line, so picking that same line again matches the last
+            # applied value and silently does nothing.
+            if st.session_state.pop("_seis_sel_reset", False):
+                st.session_state["seis_open_sel"] = _NONE
+                st.session_state["_seis_sel_last"] = _NONE
+            if st.session_state.get("seis_open_sel") not in _labels:
+                st.session_state.pop("seis_open_sel", None)
+                st.session_state["_seis_sel_last"] = None
+            _sel = st.selectbox(f"Open ({len(_f)} match)", _labels,
+                                key="seis_open_sel")
         # ACT ON CHANGE ONLY. The selectbox keeps its value across reruns, so
         # re-applying it every pass would overrule a later map click and make
         # the two doors fight. Comparing against the last APPLIED value lets
@@ -4054,7 +4195,7 @@ def _render_seis_pick(lines=None, df3d=None):
             if _sel == _NONE:
                 st.session_state.pop("_seis_pick", None)
             else:
-                st.session_state["_seis_pick"] = dict(_cands[_labels.index(_sel) - 1])
+                st.session_state["_seis_pick"] = dict(_f[_labels.index(_sel) - 1])
 
     _pick = st.session_state.get("_seis_pick")
     if not _pick:
@@ -4062,10 +4203,14 @@ def _render_seis_pick(lines=None, df3d=None):
     _path = str(_pick.get("path") or "")
     _hdr = " - ".join([x for x in (_pick.get("survey"), _pick.get("line")) if x])
 
-    st.markdown("#### Seismic - " + (_hdr or _pick.get("name") or "picked file"))
-    _c1, _c2 = st.columns([5, 1])
+    st.markdown("##### " + (_hdr or _pick.get("name") or "picked file"))
+    _c1, _c2c = st.columns([5, 1])
     with _c1:
         _bits = [str(_pick.get("kind") or "seismic")]
+        if _pick.get("stage"):
+            _bits.append(str(_pick["stage"]))
+        if _pick.get("product"):
+            _bits.append(str(_pick["product"]))
         _bits.append(("EPSG " + str(_pick.get("epsg"))) if _pick.get("epsg")
                      else "EPSG unknown")
         if _pick.get("traces") not in (None, ""):
@@ -4074,7 +4219,7 @@ def _render_seis_pick(lines=None, df3d=None):
             except (TypeError, ValueError):
                 pass
         st.caption(" - ".join(_bits))
-    with _c2:
+    with _c2c:
         if st.button("Clear", key="seis_pick_clear", use_container_width=True):
             st.session_state.pop("_seis_pick", None)
             st.session_state["_seis_sel_reset"] = True
@@ -4116,12 +4261,121 @@ def _render_seis_pick(lines=None, df3d=None):
                    "through the browser, so it is read from disk in place:")
         st.code(_path, language=None)
 
+    if _pick.get("dim") == "3D" and _render_seis_slice(_path):
+        return
+
     try:
         from dataview.file_catalog.file_viewer import view as _fview
         _fview(_path, os.path.splitext(_path)[1].lower())
     except Exception as _e:
         st.error("The SEG-Y viewer could not open this file: " + str(_e))
         st.code(_path, language=None)
+
+
+def _render_seis_slice(path):
+    """A 3D volume browsed by inline and crossline. True if it drew.
+
+    THE SEQUENTIAL READER IS THE WRONG TOOL FOR A VOLUME. "The first 120
+    traces" of a 3D survey is a fragment of one inline and tells you nothing
+    about the survey; a NAMED inline is a section that can be interpreted.
+    Delft is 211,519 traces across 451 inlines, so without this the volume can
+    be catalogued, mapped and downloaded but not looked at.
+
+    Both sections are shown together and tied to each other, because the
+    question a volume raises is always "what does it look like the other way".
+
+    Not every volume can offer it, and one that cannot must SAY SO rather than
+    show a picker full of noise -- see segy_header.trace_index, which refuses a
+    file whose trace stride is not exact. Teapot's filt_mig.sgy is exactly that
+    file, and it falls through to the sequential viewer.
+    """
+    try:
+        from dataview.file_catalog.segy_header import (
+            slice_values, read_slice_samples)
+        from dataview.file_catalog.file_viewer import segy_volume_plot
+    except Exception as _e:
+        st.caption("Slice reader unavailable: " + str(_e))
+        return False
+
+    with st.spinner("Indexing the volume's inline / crossline numbers..."):
+        try:
+            _ils = slice_values(path, "inline")
+            _xls = slice_values(path, "crossline")
+        except Exception as _e:
+            st.caption("Could not index this volume: " + str(_e))
+            return False
+
+    if not _ils and not _xls:
+        st.info(
+            "**This volume carries no usable inline / crossline index**, so it "
+            "is shown as a sequential trace section below. Either those trace "
+            "header fields hold something else (Teapot's hold coordinates), or "
+            "the trace stride is not exact and a strided read would return "
+            "numbers that look like inline numbers and are not.")
+        return False
+
+    # A SLIDER, NOT A LIST. Delft has 451 inlines and Brecon 457; a selectbox
+    # of those is a scroll, while stepping a slider is how someone walks
+    # through a volume. select_slider keeps the REAL numbering rather than an
+    # index, so the label is the inline a geologist would quote.
+    _c = st.columns(2)
+    _il_no = _xl_no = None
+    if _ils:
+        with _c[0]:
+            if st.session_state.get("seis_il_no") not in _ils:
+                st.session_state.pop("seis_il_no", None)
+            _il_no = st.select_slider(
+                f"Inline  ({_ils[0]}-{_ils[-1]}, {len(_ils)})",
+                options=_ils, key="seis_il_no")
+    if _xls:
+        with _c[1 if _ils else 0]:
+            if st.session_state.get("seis_xl_no") not in _xls:
+                st.session_state.pop("seis_xl_no", None)
+            _xl_no = st.select_slider(
+                f"Crossline  ({_xls[0]}-{_xls[-1]}, {len(_xls)})",
+                options=_xls, key="seis_xl_no")
+
+    def _panel(axis, value, tie, tie_label):
+        if value is None:
+            return None
+        _d, _t = read_slice_samples(path, axis, int(value))
+        if _d is None:
+            return None
+        _s = getattr(read_slice_samples, "last_stats", {}) or {}
+        return {"data": _d, "times": _t,
+                "x": _s.get("cross_values"),
+                "cross_label": _s.get("cross_axis", "trace"),
+                "tie": tie, "tie_label": tie_label,
+                "title": f"{axis.capitalize()} {value}",
+                "_of": _s.get("of"), "_n": _d.shape[1]}
+
+    with st.spinner("Reading sections..."):
+        _ilp = _panel("inline", _il_no, _xl_no, f"XL {_xl_no}")
+        _xlp = _panel("crossline", _xl_no, _il_no, f"IL {_il_no}")
+
+    if _ilp is None and _xlp is None:
+        st.warning("Neither section could be read from this volume.")
+        return True
+
+    segy_volume_plot(_ilp, _xlp,
+                     title=os.path.basename(path))
+
+    # SAY WHAT WAS DECIMATED. A section quietly reduced to 1,200 traces reads
+    # as the whole slice, and the caption is the only thing that distinguishes
+    # "this is the section" from "this is a sample of it".
+    _notes = []
+    for _p, _lbl in ((_ilp, "inline"), (_xlp, "crossline")):
+        if not _p:
+            continue
+        _n, _of = _p["_n"], _p.get("_of") or _p["_n"]
+        _notes.append(f"{_lbl} {_n:,} trace(s)"
+                      + (f" decimated from {_of:,} across the whole slice"
+                         if _of > _n else ""))
+    if _notes:
+        st.caption(" - ".join(_notes)
+                   + ". The dashed red line on each section marks where the "
+                     "other one cuts through it.")
+    return True
 
 
 @st.cache_data(ttl=300, show_spinner=False)

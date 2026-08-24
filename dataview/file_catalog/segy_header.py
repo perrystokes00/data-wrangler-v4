@@ -786,6 +786,176 @@ def read_trace_samples(path: str, start: int = 0, count: int = 100,
     return data, times
 
 
+# ---------------------------------------------------------------------------
+# 3D slice access: one inline or one crossline out of a volume
+# ---------------------------------------------------------------------------
+
+# A scanned volume's trace index, keyed by (path, size, mtime) so an edited or
+# replaced file is never served from a stale scan. Small on purpose: the arrays
+# are one int32 per trace per axis (1.7 MB for Delft's 211,519 traces), and
+# holding every volume anyone browsed would be the leak.
+_INDEX_CACHE = {}
+_INDEX_CACHE_MAX = 4
+
+
+def trace_index(path: str):
+    """{ils, xls, n_traces, ...} for a 3D volume, or None.
+
+    WHY A WHOLE-FILE SCAN IS AFFORDABLE. Every trace header sits at a fixed
+    stride, so the inline and crossline columns can be read with ONE memory map
+    and a strided view -- no per-trace seek. Measured: 0.09s for f3.sgy
+    (56,726 traces, 51 MB) and 1.51s for delft.sgy (211,519 traces, 816 MB).
+    Reading the same headers one seek at a time is minutes.
+
+    THE STRIDE MUST BE EXACT, and that is checked rather than assumed. Teapot's
+    filt_mig.sgy drifts -- 74 boundaries in the first 40 MB sit two bytes later
+    than arithmetic predicts -- and a strided view over a drifting file reads
+    progressively further off-boundary, returning inline numbers that are pure
+    noise. Noise here is worse than nothing: it would populate a slice picker
+    with plausible numbers that select the wrong traces. So a body that is not
+    a whole multiple of the trace length returns None, and the caller says the
+    volume has no usable index. (filt_mig has no inline/crossline anyway -- its
+    IL/XL bytes hold coordinates -- so nothing is lost.)
+    """
+    try:
+        st = os.stat(path)
+        key = (os.path.abspath(path), st.st_size, int(st.st_mtime))
+    except OSError:
+        return None
+    if key in _INDEX_CACHE:
+        return _INDEX_CACHE[key]
+
+    import numpy as np
+    h = read_segy_header(path, max_geom_traces=1)
+    if not h.get("ok"):
+        return None
+    ds, bpt = h.get("_data_start"), h.get("_bytes_per_trace")
+    nt = int(h.get("n_traces") or 0)
+    if not ds or not bpt or nt <= 0:
+        return None
+
+    body_bytes = st.st_size - ds
+    if body_bytes < nt * bpt or (body_bytes % bpt) != 0:
+        # Ragged or drifting: see the docstring. Refuse rather than guess.
+        return None
+
+    tmap = h.get("trace_map") or {}
+    il_off = int(tmap.get("inline", STD_OFFSETS["inline"]))
+    xl_off = int(tmap.get("crossline", STD_OFFSETS["crossline"]))
+    big = (h.get("byte_order") != "little")
+    dt = ">i4" if big else "<i4"
+
+    try:
+        mm = np.memmap(path, dtype=np.uint8, mode="r")
+        rows = mm[ds: ds + nt * bpt].reshape(nt, bpt)
+        ils = rows[:, il_off:il_off + 4].copy().view(dt).ravel()
+        xls = rows[:, xl_off:xl_off + 4].copy().view(dt).ravel()
+        del rows, mm
+    except Exception:
+        return None
+
+    # AN INLINE NUMBER IS AN INDEX, NOT A MEASUREMENT -- the same test the
+    # header extractor applies. A relocated or absent field decodes to values
+    # like -2,123,710,427, and a picker offering those is worse than a picker
+    # offering nothing.
+    def _sane(a):
+        good = (a > 0) & (a < 10_000_000)
+        return good.mean() >= 0.95 if a.size else False
+
+    out = {"n_traces": nt, "il_offset": il_off, "xl_offset": xl_off,
+           "ils": ils if _sane(ils) else None,
+           "xls": xls if _sane(xls) else None,
+           "_data_start": ds, "_bytes_per_trace": bpt,
+           "n_samples": int(h.get("n_samples") or 0),
+           "format_code": int(h.get("format_code") or 0),
+           "sample_interval_us": h.get("sample_interval_us"),
+           "byte_order_big": big}
+    if out["ils"] is None and out["xls"] is None:
+        out = None
+
+    if len(_INDEX_CACHE) >= _INDEX_CACHE_MAX:
+        _INDEX_CACHE.pop(next(iter(_INDEX_CACHE)))
+    _INDEX_CACHE[key] = out
+    return out
+
+
+def slice_values(path: str, axis: str = "inline"):
+    """Sorted distinct inline (or crossline) numbers in a volume, or []."""
+    idx = trace_index(path)
+    if not idx:
+        return []
+    import numpy as np
+    a = idx.get("ils" if axis == "inline" else "xls")
+    if a is None:
+        return []
+    return [int(v) for v in np.unique(a)]
+
+
+def read_slice_samples(path: str, axis: str, value: int, max_traces: int = 1200):
+    """(data, times_ms) for ONE inline or crossline -- samples x traces.
+
+    This is the difference between browsing a volume and looking at it. The
+    sequential reader hands back "the first N traces", which in a 3D volume is
+    a fragment of one inline and tells you nothing about the survey; a named
+    inline is a section a geologist can actually interpret.
+    """
+    import numpy as np
+    idx = trace_index(path)
+    if not idx:
+        return None, None
+    a = idx.get("ils" if axis == "inline" else "xls")
+    if a is None:
+        return None, None
+    sel = np.flatnonzero(a == int(value))
+    if not sel.size:
+        return None, None
+    if sel.size > max_traces:
+        # Keep the section honest: take a regular decimation across the WHOLE
+        # slice rather than the first max_traces, which would silently show one
+        # end of the line and call it the section.
+        sel = sel[np.linspace(0, sel.size - 1, max_traces).astype(int)]
+
+    ns = idx["n_samples"]
+    ds, bpt = idx["_data_start"], idx["_bytes_per_trace"]
+    dtype, conv = _NP_FMT.get(idx["format_code"], (">i1", None))
+    if not idx["byte_order_big"]:
+        dtype = dtype.replace(">", "<")
+    isz = np.dtype(dtype).itemsize
+    if ns * isz > bpt - TRACE_HDR:
+        return None, None
+
+    try:
+        mm = np.memmap(path, dtype=np.uint8, mode="r")
+        cols = []
+        for i in sel:
+            off = ds + int(i) * bpt + TRACE_HDR
+            raw = mm[off: off + ns * isz]
+            v = np.frombuffer(raw.tobytes(), dtype=dtype, count=ns)
+            if conv == "ibm":
+                with np.errstate(over="ignore", invalid="ignore"):
+                    v = _ibm_to_ieee(v)
+            else:
+                v = v.astype(np.float32)
+            cols.append(np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0))
+        del mm
+    except Exception:
+        return None, None
+    if not cols:
+        return None, None
+
+    _other = idx.get("xls" if axis == "inline" else "ils")
+    read_slice_samples.last_stats = {
+        "axis": axis, "value": int(value), "traces": len(cols),
+        "of": int(np.count_nonzero(a == int(value))),
+        "cross_axis": "crossline" if axis == "inline" else "inline",
+        "cross_values": ([int(v) for v in _other[sel]]
+                         if _other is not None else None)}
+    data = np.column_stack(cols)
+    si_ms = (idx.get("sample_interval_us") or 0) / 1000.0
+    times = np.arange(ns) * (si_ms or 1.0)
+    data.flags.writeable = False
+    return data, times
+
 def _fmt_pair(p):
     return f"{p[0]:,} … {p[1]:,}" if p else "—"
 

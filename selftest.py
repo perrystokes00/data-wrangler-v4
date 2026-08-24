@@ -2388,6 +2388,118 @@ def tier_units(res, verbose=False):
     check("viewer: the wiggle trace is legible against its own background",
           _wiggle_trace_is_legible)
 
+    def _volume_slices_find_the_right_traces():
+        # A 3D SLICE IS AN INDEXING PROBLEM, AND A WRONG INDEX STILL DRAWS.
+        # Pull the wrong traces and you get a coherent-looking section of a
+        # different part of the survey -- no error, no warning, and it would be
+        # interpreted. So this does not ask "did a section come back"; it
+        # builds a volume whose every trace states its own inline and crossline
+        # in its SAMPLES, then checks that the traces returned are the ones
+        # asked for.
+        #
+        # Format 5 (IEEE) is used because writing IBM floats by hand would test
+        # the generator more than the reader; the IBM path (format 1) is what
+        # the real corpus exercises -- Teapot and the Australian 2D lines are
+        # all format 1.
+        import os
+        import struct
+        import tempfile
+        import numpy as np
+        from dataview.file_catalog import segy_header as _sh
+
+        ILS = [200, 201, 202, 203, 204]
+        XLS = [700, 701, 702, 703]
+        NS, SI = 12, 4000
+
+        def _trace_values(il, xl):
+            # Unique and reconstructable: sample k of trace (il,xl) is
+            # il*1000 + xl + k/100. Any mis-indexed trace is off by a whole
+            # unit, not a rounding.
+            return np.array([il * 1000.0 + xl + k / 100.0 for k in range(NS)],
+                            dtype=">f4")
+
+        binh = bytearray(400)
+        struct.pack_into(">H", binh, 16, SI)      # sample interval, microsec
+        struct.pack_into(">H", binh, 20, NS)      # samples per trace
+        struct.pack_into(">h", binh, 24, 5)       # format 5 = IEEE float32
+        body = bytearray()
+        for il in ILS:
+            for xl in XLS:
+                th = bytearray(240)
+                struct.pack_into(">i", th, 188, il)   # inline  @ bytes 189-192
+                struct.pack_into(">i", th, 192, xl)   # crossline @ 193-196
+                body += th + _trace_values(il, xl).tobytes()
+
+        tmp = tempfile.mkdtemp(prefix="segy_slice_")
+        path = os.path.join(tmp, "synthetic_volume.sgy")
+        try:
+            with open(path, "wb") as fh:
+                fh.write(b"\x40" * 3200)          # EBCDIC spaces
+                fh.write(bytes(binh))
+                fh.write(bytes(body))
+
+            assert _sh.slice_values(path, "inline") == ILS, \
+                "the inline numbers read back wrong: " \
+                + repr(_sh.slice_values(path, "inline"))
+            assert _sh.slice_values(path, "crossline") == XLS, \
+                "the crossline numbers read back wrong: " \
+                + repr(_sh.slice_values(path, "crossline"))
+
+            # THE TRACES MUST BE THE ONES ASKED FOR, not merely the right
+            # COUNT of traces. Every sample is checked against what that
+            # (inline, crossline) is defined to contain.
+            data, times = _sh.read_slice_samples(path, "inline", 202)
+            assert data is not None, "inline 202 returned nothing"
+            assert data.shape == (NS, len(XLS)), \
+                "inline 202 has the wrong shape: " + repr(data.shape)
+            stats = getattr(_sh.read_slice_samples, "last_stats", {})
+            assert stats.get("cross_values") == XLS, (
+                "the cross-axis positions are wrong, so the section would be "
+                "drawn against the wrong crossline numbers: "
+                + repr(stats.get("cross_values")))
+            for col, xl in enumerate(XLS):
+                assert np.allclose(data[:, col], _trace_values(202, xl)), (
+                    "inline 202 column " + str(col) + " is not the trace at "
+                    "crossline " + str(xl) + " -- the slice pulled the wrong "
+                    "traces, which draws a real section of the wrong place")
+
+            # And the same trace reached from the other direction must be the
+            # SAME BYTES. This is the check that caught nothing and proves
+            # everything: two independent index paths to one physical trace.
+            xdata, _ = _sh.read_slice_samples(path, "crossline", 701)
+            xstats = getattr(_sh.read_slice_samples, "last_stats", {})
+            a = data[:, XLS.index(701)]
+            b = xdata[:, xstats["cross_values"].index(202)]
+            assert np.array_equal(a, b), (
+                "trace (202, 701) differs depending on whether it is reached "
+                "along the inline or the crossline; one of the two indexes is "
+                "wrong")
+
+            # A RAGGED BODY MUST BE REFUSED, NOT GUESSED AT. Teapot's volume
+            # drifts, and a strided read over a drifting file returns numbers
+            # that look like inline numbers and are not -- which would fill the
+            # picker with plausible nonsense. Appending a partial trace makes
+            # the body stop being a whole multiple of the trace length.
+            ragged = os.path.join(tmp, "ragged.sgy")
+            with open(path, "rb") as src, open(ragged, "wb") as dst:
+                dst.write(src.read())
+                dst.write(b"\x00" * 7)
+            assert _sh.trace_index(ragged) is None, (
+                "a file whose body is not a whole number of traces was still "
+                "indexed -- its inline numbers cannot be trusted")
+        finally:
+            for f in os.listdir(tmp):
+                try:
+                    os.remove(os.path.join(tmp, f))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(tmp)
+            except OSError:
+                pass
+    check("segy: a 3D slice returns the traces it was asked for",
+          _volume_slices_find_the_right_traces)
+
     def _loader_key_transforms_agree():
         # TWO FAILURES, ONE ROOT: a key transform applied on one side only.
         #
