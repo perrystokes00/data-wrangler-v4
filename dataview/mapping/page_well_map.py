@@ -2704,11 +2704,24 @@ def _add_h3_layer(
     if selected_set is None:
         selected_set = set()
 
-    hex_group = folium.FeatureGroup(name="Wells (H3)", show=True)
-
-    # Build hexes one polygon at a time. For ~1,800 cells at R5 this is
-    # fast enough; if we move to R7 (37K cells) we may want to switch
-    # to a single GeoJson layer instead of individual Polygons.
+    # ONE GeoJson LAYER, NOT ONE POLYGON PER CELL. The loop this replaces
+    # carried its own warning -- "for ~1,800 cells at R5 this is fast enough;
+    # if we move to R7 (37K cells) we may want to switch to a single GeoJson
+    # layer" -- and the assumption expired: r5 is 14,780 cells now, r6 is
+    # 66,477, because the federated reference master brought 3.9M wells.
+    #
+    # Measured at 14,780 cells: 8.22s and 13.6 MB of HTML per Polygon, against
+    # 1.14s and 6.4 MB as one GeoJson -- 7.2x the build, half the payload, and
+    # Leaflet manages ONE layer object instead of 14,780. The payload crosses
+    # to the browser on every rerun, so it is paid far more often than it is
+    # built.
+    #
+    # CLICK-TO-DRILL IS UNAFFECTED, checked before changing the object type:
+    # the handler reads last_object_clicked's lat/lon and recomputes the cell
+    # with h3.latlng_to_cell, so it never depended on the polygon's identity.
+    # No popup is attached, deliberately -- the click path distinguishes a
+    # marker from a cell by "markers have popups, cells don't".
+    features = []
     n_rendered = 0
     for row in df.itertuples(index=False):
         try:
@@ -2716,48 +2729,47 @@ def _add_h3_layer(
             count = int(row.well_count)
         except (TypeError, ValueError):
             continue
-
         coords = _h3_cell_boundary_geojson(h3_id)
         if not coords:
             continue
-
-        # Folium polygon wants [lat, lon] (Y, X) — opposite of the
-        # GeoJSON [lon, lat] convention. _h3_cell_boundary_geojson
-        # returns GeoJSON order, so we flip back here.
-        latlon_ring = [[lat, lon] for lon, lat in coords]
-
-        color = _color_for(count)
-        _is_selected = h3_id in selected_set
-
-        if _is_selected:
-            border_color  = "#1d4ed8"
-            border_weight = 3
-            tooltip_html  = (f"<b>{count:,}</b> wells — ✓ selected "
-                             f"(click again to deselect)<br>"
-                             f"<span style='font-size:10px;opacity:0.7'>"
-                             f"{h3_id}</span>")
-        else:
-            border_color  = "#7f1d1d"
-            border_weight = 0.5
-            tooltip_html  = (f"<b>{count:,}</b> wells — click to select<br>"
-                             f"<span style='font-size:10px;opacity:0.7'>"
-                             f"{h3_id}</span>")
-
-        _poly = folium.Polygon(
-            locations=latlon_ring,
-            color=border_color,
-            weight=border_weight,
-            fill=True,
-            fill_color=color,
-            fill_opacity=0.55,
-            tooltip=(folium.Tooltip(tooltip_html, sticky=True)
-                     if interactive else None),
-        )
-        _poly.options["interactive"] = interactive
-        _poly.add_to(hex_group)
+        _sel = h3_id in selected_set
+        features.append({
+            "type": "Feature",
+            "properties": {
+                "h3": h3_id,
+                "fill": _color_for(count),
+                "line": "#1d4ed8" if _sel else "#7f1d1d",
+                "w": 3 if _sel else 0.5,
+                "tip": (f"{count:,} wells - "
+                        + ("selected, click again to deselect"
+                           if _sel else "click to select")
+                        + f"  ({h3_id})"),
+            },
+            # GeoJSON is [lon, lat]; _h3_cell_boundary_geojson already returns
+            # that order, so unlike the folium.Polygon path there is no flip.
+            "geometry": {"type": "Polygon", "coordinates": [list(coords)]},
+        })
         n_rendered += 1
 
-    hex_group.add_to(m)
+    if features:
+        _gj = folium.GeoJson(
+            {"type": "FeatureCollection", "features": features},
+            name="Wells (H3)",
+            style_function=lambda f: {
+                "fillColor": f["properties"]["fill"],
+                "color": f["properties"]["line"],
+                "weight": f["properties"]["w"],
+                "fillOpacity": 0.55,
+                # Inert in Circle-selection mode so a press-drag can pass
+                # through to Leaflet.draw, exactly as the old per-polygon
+                # options["interactive"] did.
+                "interactive": bool(interactive),
+            },
+            tooltip=(folium.GeoJsonTooltip(fields=["tip"], labels=False,
+                                           sticky=True)
+                     if interactive else None),
+        )
+        _gj.add_to(m)
     return n_rendered
 
 
@@ -8270,12 +8282,17 @@ def run(engine=None):
         _msg = st.empty()
         _msg.info(f"🗺 Building map for {len(dff):,} wells…")
 
-        # NOTE: prefer_canvas removed — Leaflet.markercluster needs SVG children
-        # to render its cluster bubbles correctly. With clustering on, marker
-        # count is always low (~50-100 cluster bubbles + viewport markers) so
-        # SVG performance is fine.
+        # CANVAS IN H3 MODE ONLY. prefer_canvas was removed globally because
+        # Leaflet.markercluster needs SVG children to render its cluster
+        # bubbles, and with clustering on the marker count is low (~50-100
+        # bubbles + viewport markers) so SVG is fine. That reasoning is about
+        # MARKERS. H3 mode draws thousands of hex polygons and no cluster, so
+        # the constraint does not apply and canvas is exactly what it wants:
+        # one <canvas> repaint instead of thousands of SVG nodes in the DOM.
+        _canvas = (st.session_state.get("map_mode", "none") == "h3")
         m = folium.Map(location=[lat0, lon0], zoom_start=zoom0,
                        tiles=bm["tiles"], attr=bm["attr"],
+                       prefer_canvas=_canvas,
                        max_zoom=bm.get("max_zoom", 19))
 
         # Every OTHER basemap as a selectable layer, so the map's own layer
