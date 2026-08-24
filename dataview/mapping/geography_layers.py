@@ -523,3 +523,137 @@ def add_horizon_contours(m, engine, show=False):
         fg.add_to(m)
         drawn += 1
     return drawn
+
+
+# ── Well symbols ─────────────────────────────────────────────────────────────
+# A COLOURED DOT IS NOT A WELL SYMBOL. The industry set is a SHAPE vocabulary
+# that predates colour printing and is still what a geologist reads first: a
+# solid circle is oil, a circle with rays is gas, an open circle with a cross
+# is a dry hole, an X through it is plugged. Colour is a second channel on top,
+# not a replacement -- rendered in greyscale, or by someone who cannot separate
+# red from green, the shapes still say what each well is.
+#
+# So these are inline SVG rather than CircleMarkers. That costs more per well
+# than a circle, which is why this layer is capped and the plain point layer
+# still exists for the 50,000-well reference set.
+_SYM_OIL = ('<circle cx="9" cy="9" r="5.5" fill="{c}" stroke="#111" '
+            'stroke-width="1.1"/>')
+_SYM_OPEN = ('<circle cx="9" cy="9" r="5.5" fill="none" stroke="{c}" '
+             'stroke-width="1.6"/>')
+
+# status/type -> (label, colour, svg body). Ordered most specific first: a
+# well that is INJECTING is an injector whatever fluid it once produced.
+WELL_SYMBOLS = [
+    ("INJECTING", None, "Injector",   "#2563eb",
+     _SYM_OPEN + '<path d="M9 3.2 v11.6 M5.6 11 L9 14.8 L12.4 11" '
+                 'fill="none" stroke="{c}" stroke-width="1.5"/>'),
+    ("SHUT-IN",   None, "Shut in",    "#d97706",
+     _SYM_OPEN + '<path d="M3.5 9 h11" stroke="{c}" stroke-width="1.8"/>'),
+    (None, "DRY",       "Dry hole",   "#111827",
+     _SYM_OPEN + '<path d="M9 2.6 v12.8 M2.6 9 h12.8" stroke="{c}" '
+                 'stroke-width="1.5"/>'),
+    ("P&A", None,       "Plugged",    "#6b7280",
+     _SYM_OPEN + '<path d="M5 5 L13 13 M13 5 L5 13" stroke="{c}" '
+                 'stroke-width="1.6"/>'),
+    (None, "GAS",       "Gas",        "#dc2626",
+     _SYM_OIL + '<path d="M9 1.4 v2.6 M9 14 v2.6 M1.4 9 h2.6 M14 9 h2.6" '
+                'stroke="{c}" stroke-width="1.5"/>'),
+    (None, "OIL & GAS", "Oil and gas", "#16a34a",
+     '<circle cx="9" cy="9" r="5.5" fill="#16a34a" stroke="#111" '
+     'stroke-width="1.1"/><path d="M9 3.5 A5.5 5.5 0 0 1 9 14.5 Z" '
+     'fill="#dc2626"/>'),
+    (None, "OIL",       "Oil",        "#16a34a", _SYM_OIL),
+]
+_SYM_FALLBACK = ("Other / unknown", "#7c3aed", _SYM_OPEN)
+
+
+def _classify_well(status, wtype):
+    """(label, colour, svg) for one well. Never returns None."""
+    s = (status or "").strip().upper()
+    t = (wtype or "").strip().upper()
+    for m_status, m_type, label, colour, svg in WELL_SYMBOLS:
+        if m_status and s != m_status.upper():
+            continue
+        if m_type and t != m_type.upper():
+            continue
+        if not m_status and not m_type:
+            continue
+        return label, colour, svg
+    return _SYM_FALLBACK
+
+
+def add_well_symbols(m, engine, show=True, limit=4000, uwi_like=None):
+    """Wells drawn with industry symbols, one toggleable group per kind.
+
+    ONE GROUP PER SYMBOL, so the layer control doubles as the legend -- there
+    is nowhere else on a folium map to put one, and a symbol set nobody can
+    decode is decoration.
+
+    Returns the number of wells drawn.
+    """
+    have = _table_columns(engine, "dv_well")
+    if not have:
+        return 0
+    _c = lambda n: n if n in have else "NULL"          # noqa: E731
+    where = "surface_latitude IS NOT NULL AND surface_longitude IS NOT NULL"
+    params = {}
+    if uwi_like:
+        where += " AND uwi LIKE :u"
+        params["u"] = uwi_like
+    try:
+        with engine.connect() as con:
+            rows = con.execute(text(f"""
+                SELECT TOP {int(limit)}
+                       {_c('well_name')} AS nm, uwi,
+                       surface_latitude AS la, surface_longitude AS lo,
+                       {_c('well_status')} AS st, {_c('well_type')} AS ty,
+                       {_c('well_profile_type')} AS pr,
+                       {_c('bottom_hole_latitude')}  AS bla,
+                       {_c('bottom_hole_longitude')} AS blo
+                  FROM dataview.dv_well
+                 WHERE {where}
+            """), params).fetchall()
+    except Exception as exc:
+        print(f"[geography_layers] well symbol query failed: {exc}")
+        return 0
+    if not rows:
+        return 0
+
+    groups = {}
+    for r in rows:
+        label, colour, svg = _classify_well(r.st, r.ty)
+        groups.setdefault((label, colour, svg), []).append(r)
+
+    drawn = 0
+    for (label, colour, svg), rs in sorted(groups.items(),
+                                           key=lambda kv: -len(kv[1])):
+        fg = folium.FeatureGroup(name=f"{label} ({len(rs):,})", show=show)
+        body = svg.replace("{c}", colour)
+        html = (f'<svg width="18" height="18" viewBox="0 0 18 18">{body}</svg>')
+        for r in rs:
+            _pr = (r.pr or "").strip().upper()
+            folium.Marker(
+                location=[float(r.la), float(r.lo)],
+                icon=folium.DivIcon(
+                    icon_size=(18, 18), icon_anchor=(9, 9), html=html),
+                tooltip=folium.Tooltip(
+                    f"<b>{r.nm or r.uwi}</b><br>{label}"
+                    + (f"<br>{_pr.title()}" if _pr else "")),
+            ).add_to(fg)
+            # A DEVIATED WELL IS TWO PLACES. Drawing only the surface hole puts
+            # the well where the rig stood, not where it produces -- and for a
+            # horizontal that is most of a mile out. The stick is the honest
+            # minimum until the full survey path is drawn.
+            if _pr in ("DIRECTIONAL", "HORIZONTAL") and r.bla and r.blo:
+                folium.PolyLine(
+                    [[float(r.la), float(r.lo)], [float(r.bla), float(r.blo)]],
+                    color=colour, weight=1.4, opacity=0.75, dash_array="4,3",
+                ).add_to(fg)
+                folium.CircleMarker(
+                    [float(r.bla), float(r.blo)], radius=2.6, color=colour,
+                    weight=1.2, fill=True, fill_color=colour, fill_opacity=0.9,
+                    tooltip=f"{r.nm or r.uwi} — bottom hole",
+                ).add_to(fg)
+            drawn += 1
+        fg.add_to(m)
+    return drawn

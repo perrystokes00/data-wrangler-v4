@@ -133,6 +133,62 @@ class Surfaces:
         return twt_to_depth_ft(float(np.nanmin(vals)))
 
 
+# Well profile by phase. dv_r_well_profile_type registers VERTICAL,
+# DIRECTIONAL, HORIZONTAL and SIDETRACK, and the mix is a history like the
+# rest: you test a prospect with a vertical hole, step out with directional
+# wells once it is proved, and drill laterals only where the development
+# pattern justifies the cost. A field that is uniformly horizontal from the
+# discovery well onward is not a field anyone drilled.
+PROFILE_MIX = {
+    "EXPLORATION": [("VERTICAL", 1.00)],
+    "DELINEATION": [("VERTICAL", 0.62), ("DIRECTIONAL", 1.00)],
+    "DEVELOPMENT": [("VERTICAL", 0.42), ("DIRECTIONAL", 0.78),
+                    ("HORIZONTAL", 1.00)],
+}
+
+# How far a profile actually goes. A "deviated" well that reaches 8 degrees is
+# a vertical well with survey noise; these are the inclinations that put the
+# bottom hole somewhere the surface location does not predict.
+PROFILE_GEOM = {
+    "VERTICAL":    dict(kop=0.95, inc=(0.0, 3.0)),
+    "DIRECTIONAL": dict(kop=0.45, inc=(28.0, 58.0)),
+    "HORIZONTAL":  dict(kop=0.55, inc=(86.0, 92.0)),
+}
+
+
+def _pick_profile(phase, rng):
+    r = rng.random()
+    for name, cum in PROFILE_MIX.get(phase, PROFILE_MIX["DEVELOPMENT"]):
+        if r <= cum:
+            return name
+    return "VERTICAL"
+
+
+def bottom_hole(lat, lon, td_ft, profile, rng):
+    """(bh_lat, bh_lon, max_inc, azimuth, closure_ft) for a well.
+
+    MINIMUM CURVATURE IS OVERKILL HERE and a straight cosine is wrong, so this
+    builds the hole in three parts the way one is actually drilled: vertical to
+    the kick-off, a build section, then tangent to TD. The horizontal
+    displacement is what moves the bottom hole, and it is what the map draws.
+    """
+    g = PROFILE_GEOM.get(profile, PROFILE_GEOM["VERTICAL"])
+    inc = rng.uniform(*g["inc"])
+    kop = td_ft * g["kop"]
+    azi = rng.uniform(0, 360)
+    build_len = min(td_ft - kop, inc / 2.5 * 100.0)      # 2.5 deg/100 ft
+    tangent = max(0.0, td_ft - kop - build_len)
+    ir = math.radians(inc)
+    # Build section averages half the inclination; tangent holds all of it.
+    disp = build_len * math.sin(ir / 2.0) + tangent * math.sin(ir)
+    dn = disp * math.cos(math.radians(azi))
+    de = disp * math.sin(math.radians(azi))
+    dlat = (dn / 3.28084) / 110574.0
+    dlon = ((de / 3.28084)
+            / (111320.0 * math.cos(math.radians(lat))))
+    return lat + dlat, lon + dlon, inc, azi, disp
+
+
 ON_SEISMIC = {"EXPLORATION": 1.00, "DELINEATION": 0.75,
               "DEVELOPMENT": 0.35}
 
@@ -233,8 +289,14 @@ def plan_field(n_expl=3, n_delin=8, n_dev=109, seed=90210,
         # reservoir is wet.
         dry = rng.random() < p_dry or below_crest > 520.0
 
+        profile = _pick_profile(phase, rng)
+        bh_lat, bh_lon, max_inc, azi, closure = bottom_hole(
+            lat, lon, td, profile, rng)
         if dry:
             qi = months = 0
+            # A DRY HOLE IS PLUGGED, and its type says what it was
+            # drilled as, not what it produced. Both are registered
+            # values in dv_r_well_status / dv_r_well_type.
             status, wtype = "P&A", "DRY"
         else:
             # Arps-ish: initial rate falls off with structural height, so the
@@ -245,6 +307,17 @@ def plan_field(n_expl=3, n_delin=8, n_dev=109, seed=90210,
             if phase == "DELINEATION":
                 months = min(months, prod_years * 12 - rng.randint(0, 14))
             status, wtype = "PRODUCING", "OIL"
+            # A few producers are later converted to water injection --
+            # every waterflood has them, and a field with none reads as
+            # one nobody ever pressure-supported. A few more are shut in,
+            # which is a status, not a failure.
+            if phase == "DEVELOPMENT" and rng.random() < 0.09:
+                qi = months = 0
+                status, wtype = "INJECTING", "INJ-WTR"
+            elif rng.random() < 0.11:
+                status, wtype = "SHUT-IN", "OIL"
+            elif wtype == "OIL" and rng.random() < 0.10:
+                wtype = "OIL & GAS"
 
         wells.append({
             "uwi": _uwi(seq),
@@ -262,6 +335,9 @@ def plan_field(n_expl=3, n_delin=8, n_dev=109, seed=90210,
             "completion_date": comp.isoformat(),
             "well_status": status,
             "well_type": wtype,
+            "well_profile_type": profile,
+            "bottom_hole_latitude": round(bh_lat, 6),
+            "bottom_hole_longitude": round(bh_lon, 6),
             # Dome-derived extras, honoured by synth_docs where present.
             "_tops": tops,
             "_qi": round(qi, 1),
@@ -270,6 +346,9 @@ def plan_field(n_expl=3, n_delin=8, n_dev=109, seed=90210,
             "_phase": phase,
             "_below_crest_ft": round(below_crest, 1),
             "_reservoir_depth_ft": round(res_z, 1),
+            "_max_inc": round(max_inc, 2),
+            "_azimuth": round(azi, 1),
+            "_closure_ft": round(closure, 1),
             "_seis_line": _on_line[0] if _on_line else None,
             "_seis_survey": _on_line[1] if _on_line else None,
             "_seis_trace": _on_line[2] if _on_line else None,
@@ -281,7 +360,9 @@ def plan_field(n_expl=3, n_delin=8, n_dev=109, seed=90210,
 CSV_FIELDS = ["uwi", "well_name", "operator_name", "field_name", "county",
               "province_state", "surface_latitude", "surface_longitude",
               "final_td", "kb_elevation", "ground_elevation", "spud_date",
-              "completion_date", "well_status", "well_type"]
+              "completion_date", "well_status", "well_type",
+              "well_profile_type", "bottom_hole_latitude",
+              "bottom_hole_longitude"]
 
 
 def write_csv(wells, path):

@@ -1208,6 +1208,17 @@ def las_file(path, w, rng, shown="full", wrap=False, version="2.0",
         _hline("API", "", _dashed(w["uwi"]) if shown != "none" else "",
                "API NUMBER", version),
         _hline("LOG_ID", "", f"LOG_{w['uwi']}_1", "LOG ID", version),
+        _hline("WTYP", "", w.get("well_type", ""), "WELL TYPE", version),
+        _hline("WSTA", "", w.get("well_status", ""), "WELL STATUS", version),
+        _hline("WPRF", "", w.get("well_profile_type", ""),
+               "WELL PROFILE / CLASS", version),
+    ] + ([
+        _hline("BHLA", "DEG", f"{float(w['bottom_hole_latitude']):.6f}",
+               "BOTTOM HOLE LATITUDE", version),
+        _hline("BHLO", "DEG", f"{float(w['bottom_hole_longitude']):.6f}",
+               "BOTTOM HOLE LONGITUDE", version),
+    ] if w.get("bottom_hole_latitude") not in (None, "")
+         and w.get("bottom_hole_longitude") not in (None, "") else []) + [
         "",
         "~PARAMETER INFORMATION",
         _hline("RUN", "", rng.randint(1, 3), "RUN NUMBER", version),

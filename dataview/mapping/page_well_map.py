@@ -8163,6 +8163,7 @@ def run(engine=None):
             ("geo_pipelines",  "➖ Pipelines"),
             ("geo_seismic",    "🟪 Seismic"),
             ("geo_horizons",   "〰️ Horizons"),
+            ("geo_wellsym",    "● Well symbols"),
             ("geo_wellpts",    "⚫ Well points"),
             ("geo_wellpath",   "🌀 Well paths"),
             ("geo_refwells",   "🔵 Reference wells"),
@@ -9292,7 +9293,8 @@ def run(engine=None):
         # layer happens to be on — which looks exactly like a broken layer.
         if _geo_on or "geo_wellpts" in active_db \
                 or "geo_wellpath" in active_db \
-                or "geo_horizons" in active_db:
+                or "geo_horizons" in active_db \
+                or "geo_wellsym" in active_db:
             try:
                 from dataview.mapping.geography_layers import add_geography_layer, add_well_points
                 for _ak in _geo_on:
@@ -9305,6 +9307,14 @@ def run(engine=None):
                 # riding on Seismic: a horizon is an interpretation over
                 # a survey, and someone looking at line geometry does not
                 # necessarily want a structure map drawn over it.
+                # Status symbols, one FeatureGroup per kind so the layer
+                # control doubles as the legend. Its own chip: the plain
+                # point layer still serves the 50,000-well reference set,
+                # where an SVG per well would be the H3 mistake again.
+                if "geo_wellsym" in active_db:
+                    from dataview.mapping.geography_layers import (
+                        add_well_symbols)
+                    add_well_symbols(m, engine, show=True)
                 if "geo_horizons" in active_db:
                     from dataview.mapping.geography_layers import (
                         add_horizon_contours)
