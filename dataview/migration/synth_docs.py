@@ -548,6 +548,14 @@ def _walk(prev, target, step_ft, rng, sd, tightness=0.06):
     return prev + pull + rng.gauss(0, sd)
 
 
+# THE FOUR EXCEPTIONS. LAS 1.2 orders the ~W section descr:value for every
+# mnemonic EXCEPT these, which keep the 2.0 order value:descr. That is not
+# a lasio quirk - it is the 1.2 spec, and lasio encodes it in
+# defaults.ORDER_DEFINITIONS[1.2]["Well"]. Swapping these four as well
+# hands a numeric column the string "STOP DEPTH".
+_LAS12_VALUE_FIRST = {"STRT", "STOP", "STEP", "NULL"}
+
+
 def _hline(mnem, unit, value, descr, version="2.0"):
     """One ~WELL / ~PARAMETER line, in the field order the declared VERSION
     actually specifies.
@@ -574,9 +582,22 @@ def _hline(mnem, unit, value, descr, version="2.0"):
     and asking lasio which came back right, not from memory. The matrix is
     symmetric: each order reads correctly under its own version and swapped
     under the other.
+
+    AND THEN IT WAS WRONG AGAIN, because the sample was wrong. That check
+    used UWI and LOG_ID, which really are descr:value, so a blanket swap
+    passed it. STRT/STOP/STEP/NULL are value:descr even in 1.2 - see
+    _LAS12_VALUE_FIRST above. Swapping them too wrote
+
+        STOP.FT   STOP DEPTH : 5165.0
+
+    so lasio returned value='STOP DEPTH', TOTAL_DEPTH got a string, the
+    FILE_WELL_HEADER MERGE failed nvarchar -> numeric, and because a failed
+    write leaves the file pending, the extract stage re-claimed the same
+    seven files ~570 times before the run was killed.
     """
-    left, right = ((descr, value) if str(version).startswith("1.2")
-                   else (value, descr))
+    swap = (str(version).startswith("1.2")
+            and str(mnem).strip().upper() not in _LAS12_VALUE_FIRST)
+    left, right = (descr, value) if swap else (value, descr)
     return f" {mnem:<4}.{unit:<17}{str(left):<30}: {right}"
 
 

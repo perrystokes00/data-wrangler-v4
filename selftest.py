@@ -1303,6 +1303,26 @@ def tier_units(res, verbose=False):
                     f"value comes back as its own description")
                 assert got_lid == f"LOG_{w['uwi']}_1", \
                     f"{tag}: lasio read LOG_ID as {got_lid!r}"
+
+                # UWI AND LOG_ID ARE NOT ENOUGH, and asserting only them is
+                # how the 1.2 generator shipped broken twice. Both really are
+                # descr:value in 1.2, so a generator that swapped EVERY field
+                # passed this check while writing
+                #     STOP.FT   STOP DEPTH : 5165.0
+                # STRT/STOP/STEP/NULL keep the 2.0 order even in 1.2, and they
+                # are the ones that reach a NUMERIC column: TOTAL_DEPTH took
+                # the string 'STOP DEPTH', the FILE_WELL_HEADER MERGE failed
+                # nvarchar -> numeric, and because a failed write leaves the
+                # file pending the extract stage re-claimed it ~570 times.
+                for _m in ("STRT", "STOP", "STEP", "NULL"):
+                    _v = getattr(d.get(_m), "value", None)
+                    assert isinstance(_v, (int, float)) and _v == _v, (
+                        f"{tag}: {_m} read back as {_v!r}, not a number. In "
+                        f"LAS 1.2 the ~W section is descr:value EXCEPT "
+                        f"STRT/STOP/STEP/NULL - swapping those too hands a "
+                        f"numeric column its own label")
+                assert float(d.get("NULL").value) == -999.25, (
+                    f"{tag}: NULL came back {d.get('NULL').value!r}")
                 assert len(las.curves) == 9, f"{tag}: {len(las.curves)} curves"
                 assert len(las.index) > 100, f"{tag}: {len(las.index)} rows"
                 # The curve data must be DATA, not a column of nulls. A
