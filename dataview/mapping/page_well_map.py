@@ -9298,7 +9298,13 @@ def run(engine=None):
             try:
                 from dataview.mapping.geography_layers import add_geography_layer, add_well_points
                 for _ak in _geo_on:
-                    add_geography_layer(m, engine, _geo_keys[_ak], show=True)
+                    if _ak == "geo_leases":
+                        from dataview.mapping.geography_layers import (
+                            add_lease_layer)
+                        add_lease_layer(m, engine, show=True)
+                    else:
+                        add_geography_layer(m, engine, _geo_keys[_ak],
+                                            show=True)
                 # Real 2D line paths ride along with the Seismic pill. The
                 # geog layer above holds SURVEY footprints; these are the
                 # individual LINES inside them, which is the thing you

@@ -26,7 +26,7 @@ for _s in (sys.stdout, sys.stderr):
 from dataview.migration.synth_field import Surfaces, plan_field   # noqa: E402
 from dataview.migration.synth_geography import (                  # noqa: E402
     CREATED_BY, OPERATOR, field_outline, gathering_system,
-    reserve_boundary, section_grid, wkt_line, wkt_polygon)
+    lease_parcels, reserve_boundary, wkt_line, wkt_polygon)
 
 TABLES = ("dv_field", "dv_land_tract", "dv_boundary", "dv_pipeline")
 
@@ -67,13 +67,15 @@ def main(argv=None):
               f"level_frac={a.level}. Try a lower value.")
         return 2
     bnd = reserve_boundary()
-    secs = section_grid(bnd)
+    secs = lease_parcels(bnd)
     pipes = gathering_system(wells)
 
     print(f"   field outline   {len(outline):4,} vertices, "
           f"closing contour at {level:,.0f} ms")
     print(f"   reserve boundary{len(bnd):4,} corners")
-    print(f"   lease sections  {len(secs):4,}")
+    print(f"   leases          {len(secs):4,}   "
+          f"{sum(len(r[2]) for r in secs) / max(1, len(secs)):.1f} "
+          f"vertices each on average")
     print(f"   pipelines       {len(pipes):4,} "
           f"({sum(1 for p in pipes if p[0].startswith('Flowline'))} flowlines)")
 
@@ -113,17 +115,24 @@ def main(argv=None):
                     {_geog(':wkt')})"""),
             {"wkt": wkt_polygon(bnd), "km": 38.4, "cb": CREATED_BY})
 
-        for num, ring in secs:
+        for num, (nm, legal, ring, owner, _col) in enumerate(secs, start=1):
             cx.execute(sa.text(f"""
                 INSERT INTO dataview.dv_land_tract
                   (land_tract_id, tract_name, lease_number, operator_name,
                    province_state, country, area_km2, active_ind, source,
                    row_created_by, geog)
-                VALUES (:id, :nm, :ln, :op, 'WY', 'US', 2.59, 'Y', 'SYNTH', :cb,
+                VALUES (:id, :nm, :ln, :op, 'WY', 'US', :km, 'Y', 'SYNTH', :cb,
                         {_geog(':wkt')})"""),
-                {"id": f"NPR3_SEC_{num:03d}", "nm": f"NPR-3 Section {num}",
-                 "ln": f"WYW-{160000 + num}", "op": OPERATOR,
-                 "wkt": wkt_polygon(ring), "cb": CREATED_BY})
+                {"id": f"NPR3_LSE_{num:03d}", "nm": nm[:255],
+                 "ln": f"WYW-{160000 + num}", "op": owner,
+                 "wkt": wkt_polygon(ring), "km": None,
+                 "cb": CREATED_BY})
+
+        cx.execute(sa.text("""
+            UPDATE dataview.dv_land_tract
+               SET area_km2 = ROUND(geog.STArea() / 1e6, 4)
+             WHERE row_created_by = :cb AND geog IS NOT NULL"""),
+            {"cb": CREATED_BY})
 
         for i, (nm, pts) in enumerate(pipes, start=1):
             cx.execute(sa.text(f"""

@@ -34,6 +34,35 @@ RESERVE_HALF_EW_KM = 3.4
 SECTION_MI = 1.0                 # a PLSS section is one mile square
 
 
+# Working-interest owners. NPR-3 is a federal reserve, so the operator of
+# record stays with it; the rest are the kind of mix any mature field carries
+# once interests have been traded -- a couple of majors, a handful of
+# independents, and a royalty holder who never operates anything.
+#
+# NAMES ARE DELIBERATELY FICTIONAL. Putting a real company on synthetic acreage
+# produces a lease map that looks like a public record and is not one, and the
+# first person to screenshot it will not add the caveat.
+LEASE_OWNERS = [
+    ("Naval Petroleum Reserve Operations", "#c0392b", 0.28),
+    ("Sweetwater Resources LLC",           "#2980b9", 0.18),
+    ("Bighorn Basin Energy Co",            "#27ae60", 0.15),
+    ("Salt Creek Minerals Trust",          "#8e44ad", 0.12),
+    ("Casper Ridge Petroleum",             "#e67e22", 0.12),
+    ("Powder River Royalty Partners",      "#16a085", 0.09),
+    ("Unleased federal acreage",           "#7f8c8d", 0.06),
+]
+
+
+def _pick_owner(rng):
+    r = rng.random()
+    acc = 0.0
+    for name, colour, share in LEASE_OWNERS:
+        acc += share
+        if r <= acc:
+            return name, colour
+    return LEASE_OWNERS[0][0], LEASE_OWNERS[0][1]
+
+
 def _km_per_deg(lat):
     """(north-south, east-west) km per degree at a latitude."""
     return 110.574, 111.320 * math.cos(math.radians(lat))
@@ -119,33 +148,86 @@ def reserve_boundary(lon=None, lat=None):
             (lon + dlon, lat + dlat), (lon - dlon, lat + dlat)]
 
 
-def section_grid(bounds=None, lat=None):
-    """[(name, ring)] -- one-mile PLSS sections tiling the reserve.
+def _aliquot_label(cells, ncol):
+    """A legal-style description of which quarters a lease covers."""
+    QUARTER = {(0, 0): "SW/4", (0, 1): "SE/4", (1, 0): "NW/4", (1, 1): "NE/4"}
+    secs = {}
+    for r, c in cells:
+        secs.setdefault((r // 2, c // 2), []).append(QUARTER[(r % 2, c % 2)])
+    parts = []
+    for (sr, sc), qs in sorted(secs.items()):
+        num = sr * max(1, ncol // 2) + sc + 1
+        parts.append(("All" if len(qs) == 4 else ", ".join(sorted(qs)))
+                     + f" Sec {num}")
+    return "; ".join(parts[:4]) + (" ..." if len(parts) > 4 else "")
 
-    Numbered the way a township is: section 1 in the north-east, snaking west
-    then back east, six to a row. Anyone who has read a lease description
-    expects that order, and a left-to-right numbering reads as wrong.
+
+def lease_parcels(bounds=None, lat=None, rng=None, quarter_mi=0.5,
+                  size=(2, 9), unleased=0.10):
+    """[(name, legal, ring, owner, colour)] -- irregular aliquot leases.
+
+    A LEASE IS NOT A SQUARE. In a PLSS state it is assembled out of aliquot
+    parts -- "the NW/4 of Section 12, the S/2 of Section 13" -- so its outline
+    is rectilinear but STEPPED, and no two are the same size. A tidy grid of
+    identical sections is a township diagram, not a lease map, and anyone who
+    has read a lease description reads the difference immediately.
+
+    So: quarter the ground, then grow each lease by flood-fill over adjacent
+    quarters until it reaches its size. Unioning the cells dissolves the
+    internal edges and leaves exactly the stepped outline a real parcel has.
+
+    `unleased` leaves a share of the ground open, because a lease map with no
+    gaps in it is a map of something nobody had to negotiate.
     """
+    import random
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+
+    rng = rng or random.Random(7)
     ring = bounds or reserve_boundary()
     lons = [p[0] for p in ring]
     lats = [p[1] for p in ring]
     lat = lat if lat is not None else (min(lats) + max(lats)) / 2.0
     kns, kew = _km_per_deg(lat)
-    dlat = (SECTION_MI * 1.609344) / kns
-    dlon = (SECTION_MI * 1.609344) / kew
+    dlat = (quarter_mi * 1.609344) / kns
+    dlon = (quarter_mi * 1.609344) / kew
+    ncol = max(2, int(round((max(lons) - min(lons)) / dlon)))
+    nrow = max(2, int(round((max(lats) - min(lats)) / dlat)))
 
-    ncol = max(1, int(round((max(lons) - min(lons)) / dlon)))
-    nrow = max(1, int(round((max(lats) - min(lats)) / dlat)))
-    out = []
-    for r in range(nrow):
-        for cc in range(ncol):
-            # Row 0 is the NORTH row; sections run east-to-west on odd rows.
-            top = max(lats) - r * dlat
-            col = (ncol - 1 - cc) if (r % 2 == 0) else cc
-            x0 = min(lons) + col * dlon
-            num = r * ncol + cc + 1
-            out.append((num, [(x0, top - dlat), (x0 + dlon, top - dlat),
-                              (x0 + dlon, top), (x0, top)]))
+    free = {(r, c) for r in range(nrow) for c in range(ncol)
+            if rng.random() > unleased}
+    out, n = [], 0
+    while free:
+        seed = min(free)                       # deterministic sweep order
+        target = rng.randint(*size)
+        cells, frontier = set(), [seed]
+        while frontier and len(cells) < target:
+            cur = frontier.pop(rng.randrange(len(frontier)))
+            if cur not in free:
+                continue
+            free.discard(cur)
+            cells.add(cur)
+            r, c = cur
+            for nb in ((r + 1, c), (r - 1, c), (r, c + 1), (r, c - 1)):
+                if nb in free:
+                    frontier.append(nb)
+        if not cells:
+            continue
+        geom = unary_union([
+            box(min(lons) + c * dlon, max(lats) - (r + 1) * dlat,
+                min(lons) + (c + 1) * dlon, max(lats) - r * dlat)
+            for r, c in cells])
+        if geom.geom_type == "MultiPolygon":
+            # Flood-fill over a set with holes in it can strand a cell; keep
+            # the body and let the stray go back to unleased rather than
+            # writing a lease that is two disconnected pieces.
+            geom = max(geom.geoms, key=lambda g: g.area)
+        n += 1
+        _own, _col = _pick_owner(rng)
+        out.append((f"NPR-3 Lease {n:02d}",
+                    _aliquot_label(cells, ncol),
+                    [(float(x), float(y)) for x, y in geom.exterior.coords],
+                    _own, _col))
     return out
 
 
@@ -175,7 +257,10 @@ def gathering_system(wells, battery=None, max_spur_km=3.0):
         # lease road.
         lines.append((f"Flowline {w['well_name']}",
                       [(x, y), (bx, y), (bx, by)]))
-    # The trunk out of the field, to the north-east.
-    lines.append(("NPR-3 Trunk Line",
-                  [(bx, by), (bx + 0.06, by + 0.05), (bx + 0.14, by + 0.13)]))
+    # The sales line out of the battery. Kept short on purpose -- a trunk
+    # drawn to its real length doubles the extent of every map that
+    # includes it, and the tie-in is the part that matters here.
+    lines.append(("NPR-3 Sales Line",
+                  [(bx, by), (bx + 0.022, by + 0.018),
+                   (bx + 0.046, by + 0.041)]))
     return lines

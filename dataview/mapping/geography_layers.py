@@ -657,3 +657,151 @@ def add_well_symbols(m, engine, show=True, limit=4000, uwi_like=None):
             drawn += 1
         fg.add_to(m)
     return drawn
+
+
+# ── Leases, coloured by who owns them ────────────────────────────────────────
+# A LEASE MAP'S WHOLE JOB IS TO SHOW WHO HOLDS WHAT. One colour for every tract
+# answers "where is there acreage" and nothing else; the question anyone
+# actually brings to it is whose acreage, and where two owners abut.
+#
+# The colours live HERE rather than in the database because they are a display
+# choice, not a fact about the lease -- a second map with a different palette
+# must not require an UPDATE. Owners not in the table get a stable colour from
+# their own name, so an operator nobody anticipated still draws consistently
+# rather than falling into a shared "other" bucket.
+LEASE_OWNER_COLOURS = {
+    "naval petroleum reserve operations": "#c0392b",
+    "sweetwater resources llc":           "#2980b9",
+    "bighorn basin energy co":            "#27ae60",
+    "salt creek minerals trust":          "#8e44ad",
+    "casper ridge petroleum":             "#e67e22",
+    "powder river royalty partners":      "#16a085",
+    "unleased federal acreage":           "#7f8c8d",
+}
+_FALLBACK_COLOURS = ["#d35400", "#2c3e50", "#c2185b", "#00838f", "#5d4037",
+                     "#455a64", "#6a1b9a", "#00695c"]
+
+
+def lease_colour(owner):
+    """A stable colour for an owner, known or not."""
+    key = (owner or "").strip().lower()
+    if key in LEASE_OWNER_COLOURS:
+        return LEASE_OWNER_COLOURS[key]
+    # Deterministic across runs and machines -- hash() is salted per process,
+    # so it would give the same lease a different colour on every rerun.
+    import zlib
+    return _FALLBACK_COLOURS[zlib.crc32(key.encode("utf-8"))
+                             % len(_FALLBACK_COLOURS)]
+
+
+def add_lease_layer(m, engine, show=True, limit=5000):
+    """dv_land_tract coloured by owner, one toggleable group each.
+
+    Returns the number of leases drawn.
+    """
+    have = _table_columns(engine, "dv_land_tract")
+    if not have or "geog" not in have:
+        return 0
+    _c = lambda n: n if n in have else "NULL"          # noqa: E731
+    try:
+        with engine.connect() as con:
+            rows = con.execute(text(f"""
+                SELECT TOP {int(limit)}
+                       {_c('tract_name')}   AS nm,
+                       {_c('lease_number')} AS ln,
+                       {_c('operator_name')} AS own,
+                       {_c('area_km2')}     AS km2,
+                       geog.STAsText()      AS wkt
+                  FROM dataview.dv_land_tract
+                 WHERE geog IS NOT NULL
+                   AND ISNULL(active_ind, 'Y') = 'Y'
+            """)).fetchall()
+    except Exception as exc:
+        print(f"[geography_layers] lease query failed: {exc}")
+        return 0
+    if not rows:
+        return 0
+
+    by_owner = {}
+    for r in rows:
+        by_owner.setdefault((r.own or "Unknown owner").strip(), []).append(r)
+
+    drawn = 0
+    for owner in sorted(by_owner, key=lambda o: -len(by_owner[o])):
+        group = by_owner[owner]
+        colour = lease_colour(owner)
+        feats = []
+        for r in group:
+            ring = _polygon_rings(r.wkt)
+            if not ring:
+                continue
+            feats.append({
+                "type": "Feature",
+                "geometry": {"type": "Polygon", "coordinates": ring},
+                "properties": {
+                    "nm": r.nm or "(unnamed)",
+                    "ln": r.ln or "",
+                    "own": owner,
+                    # Pre-formatted: a GeoJsonTooltip prints the property as
+                    # it finds it, and Decimal('5.8671') is not an area.
+                    "ac": (f"{float(r.km2) * 247.105:,.0f} ac"
+                           if r.km2 is not None else ""),
+                },
+            })
+        if not feats:
+            continue
+        fg = folium.FeatureGroup(name=f"▩ {owner} ({len(feats)})", show=show)
+        folium.GeoJson(
+            {"type": "FeatureCollection", "features": feats},
+            style_function=lambda _f, _c=colour: {
+                "color": _c, "weight": 1.6, "opacity": 0.95,
+                "fillColor": _c, "fillOpacity": 0.32},
+            highlight_function=lambda _f, _c=colour: {
+                "weight": 3, "fillOpacity": 0.5},
+            tooltip=folium.GeoJsonTooltip(
+                fields=["nm", "own", "ln", "ac"],
+                aliases=["Lease", "Owner", "Number", "Area"], sticky=True),
+        ).add_to(fg)
+        fg.add_to(m)
+        drawn += len(feats)
+    return drawn
+
+
+def _polygon_rings(wkt):
+    """[[ [lon,lat], ... ]] from a POLYGON WKT, GeoJSON ring order.
+
+    Interior rings are kept: a lease with a hole in it is a lease somebody
+    else owns the middle of, and dropping the hole silently claims it.
+    """
+    if not wkt or "POLYGON" not in wkt.upper():
+        return None
+    body = wkt[wkt.find("(") + 1: wkt.rfind(")")]
+    rings, depth, cur = [], 0, ""
+    for ch in body:
+        if ch == "(":
+            depth += 1
+            if depth == 1:
+                cur = ""
+                continue
+        if ch == ")":
+            depth -= 1
+            if depth == 0:
+                rings.append(cur)
+                continue
+        if depth >= 1:
+            cur += ch
+    if not rings:
+        rings = [body]
+    out = []
+    for r in rings:
+        pts = []
+        for pair in r.split(","):
+            bits = pair.split()
+            if len(bits) >= 2:
+                try:
+                    pts.append([float(bits[0]), float(bits[1])])
+                except ValueError:
+                    pass
+        if len(pts) >= 4:
+            out.append(pts)
+    return out or None
