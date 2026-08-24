@@ -1400,6 +1400,85 @@ def tier_units(res, verbose=False):
     check("LAS 3.0: named data sets parse, with types and quoting",
           _las3_sections)
 
+    # 23. ~Inclinometry -> the directional-survey mirrors. A LAS 3.0 file can
+    #     carry a survey as DATA; the mirrors for it already promote and
+    #     already draw on the map, so this is a mapping and its risks are a
+    #     mapping's risks: a column pointed at the wrong column, an invented
+    #     value, or a child staged without its parent.
+    def _las3_inclinometry():
+        from dataview.file_catalog.las_reader import split_las3
+        from dataview.file_catalog.las3_capture import all_sets
+        import io as _io
+        las3 = (
+            "~VERSION INFORMATION\n"
+            "VERS.   3.0 : CWLS LOG ASCII STANDARD - VERSION 3.0\n"
+            "WRAP.   NO  : ONE LINE PER DEPTH STEP\n"
+            "DLM .   COMMA : DELIMITING CHARACTER\n"
+            "\n~Well Information\n"
+            "STRT .M    0.0 : First Index Value\n"
+            "UWI  .     15001209150000 : UNIQUE WELL IDENTIFIER\n"
+            "SRVC .     ANY LOGGING COMPANY INC. : SERVICE COMPANY\n"
+            "\n~Inclinometry_Definition\n"
+            "MD   .  : Measured Depth {F}\n"
+            "TVD  .  : True Vertical Depth {F}\n"
+            "AZIM .DEG : Borehole Azimuth {F}\n"
+            "DEVI .DEG : Borehole Deviation {F}\n"
+            "\n~Inclinometry | Inclinometry_Definition\n"
+            "0.0,0.0,290.0,0.0\n"
+            "200.0,198.34,284.86,1.43\n"
+            "600.0,571.90,204.39,7.41\n")
+        las = split_las3(_io.StringIO(las3))
+        out = all_sets(las, source_path=r"C:\x\demo_3.las")
+
+        # THE PARENT SHIPS WITH THE CHILD. Stations carry fk_srvy_sta_hdr ->
+        # dv_well_dir_srvy_hdr; staging one without the other is exactly what
+        # left 153 log curves unpromotable this morning.
+        assert set(out) == {"cat_well_dir_srvy_hdr", "cat_well_dir_srvy_sta"}, \
+            sorted(out)
+        hdr = out["cat_well_dir_srvy_hdr"][0]
+        sta = out["cat_well_dir_srvy_sta"]
+        assert len(sta) == 3, len(sta)
+        assert hdr["survey_id"] == sta[0]["survey_id"], "header/station id split"
+
+        # DEVI IS INCLINATION. Pointing it at azim, or dropping it, gives a
+        # survey that plots as a different hole.
+        assert [r["incl"] for r in sta] == [0.0, 1.43, 7.41], \
+            [r["incl"] for r in sta]
+        assert [r["azim"] for r in sta] == [290.0, 284.86, 204.39]
+        assert [r["md"] for r in sta] == [0.0, 200.0, 600.0]
+        assert [r["tvd"] for r in sta] == [0.0, 198.34, 571.90]
+
+        # uwi in the catalog's char(14) form, the same transform promote uses
+        assert all(r["uwi"] == "15001209150000" for r in sta)
+
+        # the unit comes from the file's ~Well STRT, not a default
+        assert hdr["depth_ouom"] == "M" and sta[0]["depth_ouom"] == "M"
+        # extent is computed from the stations, not guessed
+        assert (hdr["survey_top_depth"], hdr["survey_base_depth"]) == (0.0, 600.0)
+
+        # NOTHING INVENTED. The file carries no dogleg, no offsets, no
+        # position, and no contractor id — a plausible value in any of these
+        # would plot and get quoted.
+        for k in ("ns_offset", "ew_offset", "dls",
+                  "surface_latitude", "surface_longitude"):
+            assert not sta[0].get(k), f"{k} was invented"
+        assert hdr["contractor_ba_id"] is None, \
+            "a service-company NAME was written into an FK to " \
+            "dv_business_associate — seeding an entity parent is a decision"
+        assert hdr["survey_date"] is None, \
+            "the well header's log DATE was reused as the survey date"
+
+        # station_id sorts in depth order as TEXT — '10' before '2' makes a
+        # survey read as nonsense in any grid that orders by it
+        assert [r["station_id"] for r in sta] == ["00001", "00002", "00003"]
+
+        # and a file with no such section yields nothing rather than an empty
+        # header row hanging off a well
+        assert all_sets(split_las3(_io.StringIO(
+            las3.split("~Inclinometry_Definition")[0])), source_path="x") == {}
+    check("LAS 3.0: ~Inclinometry maps to the survey mirrors, parent included",
+          _las3_inclinometry)
+
     return res
 
 

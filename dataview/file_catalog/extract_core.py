@@ -1938,6 +1938,39 @@ def _load_rows_to_catalog(engine, dialect, fpath, fext, uwi, rows):
                     from dataview.file_catalog.catalog_capture import capture as _cap
                 _now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
                 inv = well_info.get("inventory_id")
+
+                # ── LAS 3.0 named data sets ──────────────────────────────
+                # A 3.0 file may carry an ~Inclinometry section — a
+                # directional survey as DATA, not as a PDF somebody reads the
+                # numbers off. The mirrors for it already exist and already
+                # promote, so this is a mapping, not a new pipeline.
+                #
+                # Tried BEFORE lasio because lasio cannot read a multi-section
+                # 3.0 file at all ("Cannot reshape ~A data size"), and because
+                # split_las3 refuses anything that is not VERS 3.x — so an
+                # ordinary 1.2/2.0 LAS falls straight through to the code
+                # below, which is well tested and handles wrapping.
+                #
+                # Non-fatal by construction: a 3.0 file still has curves and a
+                # log header, and those are captured by the normal path after
+                # this. A failure here must not cost the file its log.
+                try:
+                    from dataview.file_catalog.las_reader import split_las3
+                    from dataview.file_catalog.las3_capture import all_sets
+                    _l3 = split_las3(fpath)
+                    _l3rows = all_sets(_l3, uwi=uwi, inventory_id=inv,
+                                       source_path=fpath)
+                    for _t3, _r3 in _l3rows.items():
+                        _n3 = _cap(engine, _t3, _r3, uwi=uwi, inventory_id=inv,
+                                   source_path=fpath, source="LAS")
+                        if _n3:
+                            res["detail"][_t3] = res["detail"].get(_t3, 0) + _n3
+                            res["loaded"] = res.get("loaded", 0) + _n3
+                except ValueError:
+                    pass                      # not a 3.0 file — the usual case
+                except Exception as _l3e:
+                    res["errors"].append(f"las3 capture: {_l3e}")
+
                 las = read_las(fpath)
 
                 def _wv(*keys):
