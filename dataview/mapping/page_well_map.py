@@ -7676,6 +7676,15 @@ def run(engine=None):
             ("geo_wellpts",    "⚫ Well points"),
             ("geo_wellpath",   "🌀 Well paths"),
             ("geo_refwells",   "🔵 Reference wells"),
+            # THE RENDERERS WERE ALREADY HERE. _add_production_bubbles and
+            # _add_production_heatmap survived the July cull of the seven
+            # data-layer checkboxes -- the comment above active_db = set()
+            # says so: "the render blocks are now dead but harmless, and can
+            # be stripped separately". They were never stripped, so this is a
+            # switch being reconnected, not a feature being written. Both read
+            # db_* flags, so they come back the moment the chips set them.
+            ("db_production",      "📈 Production bubbles"),
+            ("db_production_heat", "🔥 Production heat"),
         ]
         _label_to_flag = {lbl: flag for flag, lbl in _geo_defs}
         if hasattr(st, "pills"):
@@ -7693,6 +7702,18 @@ def run(engine=None):
             for _i, (_flag, _lbl) in enumerate(_geo_defs):
                 if _gc[_i % 3].checkbox(_lbl, key=f"wm_{_flag}"):
                     active_db.add(_flag)
+
+        # THE HEATMAP'S WEIGHT LOST ITS CONTROL, NOT ITS MEANING. The read at
+        # the render site survived the July cull -- st.session_state.get(
+        # "wm_db_prod_heat_wt", "BOE") -- but the widget that set it did not,
+        # so the layer had one permanent setting and no way to say so. Oil
+        # against gas is a real question about a field, not a preference.
+        if "db_production_heat" in active_db:
+            st.radio("Heatmap weight", ["BOE", "Oil", "Gas"],
+                     key="wm_db_prod_heat_wt", horizontal=True,
+                     help="BOE counts 6 Mcf of gas as one barrel. Intensity "
+                          "is sqrt-scaled so a few giant wells do not wash "
+                          "out the rest of the field.")
 
         # 🌀 WELL PATHS ARE COMPUTED, NOT LOADED. Nothing in any load
         # builds them: the survey stations carry md/incl/azim, and the
