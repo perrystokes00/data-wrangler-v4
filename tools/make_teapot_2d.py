@@ -36,7 +36,8 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 from dataview.migration.synth_seismic import (               # noqa: E402
-    write_line, teapot_model, TEAPOT_CREST, TEAPOT_AREA, TEAPOT_EPSG)
+    write_line, teapot_model, teapot_2d_layout,
+    TEAPOT_CREST, TEAPOT_AREA, TEAPOT_EPSG)
 
 DEFAULT_DIR = (r"C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai"
                r"\data_wrangler\training\Teapot_Dome\DataSets\Seismic"
@@ -126,22 +127,13 @@ def main(argv=None):
     os.makedirs(a.dir, exist_ok=True)
     t0 = time.perf_counter()
     made = 0
-    for sv, code, az_deg in VINTAGES:
-        for li in range(per_vintage):
-            if made >= n_lines * a.variants:
-                break
-            # A campaign's lines share an azimuth, with the small variation any
-            # real acquisition has.
-            az = math.radians(az_deg + rng.gauss(0, 1.6))
-            # Centre anywhere in the area, inset so the line stays inside it.
-            cxx = rng.uniform(x0 + line_m / 2, x1 - line_m / 2)
-            my = rng.uniform(y0 + line_m / 2, y1 - line_m / 2)
-            half = (a.traces - 1) / 2.0
-            xs = [cxx + (i - half) * a.spacing * math.cos(az)
-                  for i in range(a.traces)]
-            ys = [my + (i - half) * a.spacing * math.sin(az)
-                  for i in range(a.traces)]
-            line_id = f"{code}-{li + 1:03d}"
+    layout = teapot_2d_layout(n_lines=n_lines, traces=a.traces,
+                              spacing=a.spacing, seed=a.seed, epsg=EPSG)
+    for _ln in layout:
+        if True:
+            sv, li = _ln["survey"], int(_ln["line_id"].split("-")[1])
+            xs, ys = _ln["xs"], _ln["ys"]
+            line_id = _ln["line_id"]
             for stage, product in _variants(rng, a.variants):
                 if made >= n_lines * a.variants:
                     break

@@ -256,3 +256,56 @@ def teapot_model(seed=TEAPOT_SEED, epsg=TEAPOT_EPSG):
     dome = Dome(cx, cy, relief_ms=145, radius_m=3900,
                 horizons_ms=[h[1] for h in TEAPOT_HORIZONS], rng=rng)
     return dome, to_utm, to_ll
+
+
+# Acquisition campaigns. Real 2D coverage accumulates like this, which is also
+# why one line has several processing versions and its neighbour has none.
+TEAPOT_VINTAGES = [
+    ("NPR-3 TEAPOT DOME 1977 2D", "TPD77", 78.0),
+    ("NPR-3 TEAPOT DOME 1979 2D", "TPD79", 168.0),
+    ("NPR-3 TEAPOT DOME 1982 2D", "TPD82", 45.0),
+    ("NPR-3 TEAPOT DOME 1987 2D", "TPD87", 120.0),
+    ("NPR-3 TEAPOT DOME 1996 2D", "TPD96", 15.0),
+]
+
+
+def teapot_2d_layout(n_lines=250, traces=150, spacing=50.0, seed=TEAPOT_SEED,
+                     epsg=TEAPOT_EPSG, area=None):
+    """[{survey, code, line_id, xs, ys}] -- where every 2D line actually runs.
+
+    ONE DEFINITION OF THE GRID. The SEG-Y writer needs it to place traces and
+    the field planner needs it to put wells ON lines; deriving it twice is how
+    the wells end up beside the seismic instead of on it, with nothing to say
+    so. Same seed, same grid, from either caller.
+
+    The rng is consumed in exactly the order the writer used, so the layout is
+    unchanged from the files already on disk.
+    """
+    import random
+    from pyproj import Transformer
+
+    area = area or TEAPOT_AREA
+    to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
+    x0, y0 = to_utm.transform(area["min_lon"], area["min_lat"])
+    x1, y1 = to_utm.transform(area["max_lon"], area["max_lat"])
+    rng = random.Random(seed + 1)          # this function's own generator
+    line_m = traces * spacing
+    per_vintage = max(1, n_lines // len(TEAPOT_VINTAGES))
+    half = (traces - 1) / 2.0
+
+    out = []
+    for sv, code, az_deg in TEAPOT_VINTAGES:
+        for li in range(per_vintage):
+            if len(out) >= n_lines:
+                break
+            az = math.radians(az_deg + rng.gauss(0, 1.6))
+            cxx = rng.uniform(x0 + line_m / 2, x1 - line_m / 2)
+            my = rng.uniform(y0 + line_m / 2, y1 - line_m / 2)
+            out.append({
+                "survey": sv, "code": code, "line_id": f"{code}-{li + 1:03d}",
+                "xs": [cxx + (i - half) * spacing * math.cos(az)
+                       for i in range(traces)],
+                "ys": [my + (i - half) * spacing * math.sin(az)
+                       for i in range(traces)],
+            })
+    return out

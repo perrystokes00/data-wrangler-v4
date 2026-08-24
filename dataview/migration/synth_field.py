@@ -24,7 +24,7 @@ import math
 import numpy as np
 
 from dataview.migration.synth_seismic import (
-    TEAPOT_AREA, TEAPOT_HORIZONS, teapot_model)
+    TEAPOT_AREA, TEAPOT_HORIZONS, teapot_2d_layout, teapot_model)
 
 # Velocity for time-depth. V(z) = V0 + k*z gives
 #     z = (V0/k) * (exp(k*t/2) - 1)     t = two-way time, seconds
@@ -133,6 +133,10 @@ class Surfaces:
         return twt_to_depth_ft(float(np.nanmin(vals)))
 
 
+ON_SEISMIC = {"EXPLORATION": 1.00, "DELINEATION": 0.75,
+              "DEVELOPMENT": 0.35}
+
+
 def _uwi(seq):
     """A Natrona County UWI in the block the old Teapot wells did not use."""
     return f"49025{90000 + seq:05d}0000"
@@ -161,6 +165,13 @@ def plan_field(n_expl=3, n_delin=8, n_dev=109, seed=90210,
     cx, cy = S.to_utm.transform(-106.212, 43.290)
     crest_z = S.crest_depth()
 
+    # The SAME layout the SEG-Y writer uses -- one definition, so a well
+    # placed on TPD79-014 sits on the traces of the file called
+    # TPD79-014, not near it.
+    try:
+        _lines = teapot_2d_layout()          # TEAPOT_SEED, as the SEG-Y uses
+    except Exception:
+        _lines = []
     spots = []
     spots += [("EXPLORATION", p) for p in _ring(rng, cx, cy, 150, 1100, n_expl)]
     spots += [("DELINEATION", p) for p in _ring(rng, cx, cy, 1900, 3600, n_delin)]
@@ -179,6 +190,16 @@ def plan_field(n_expl=3, n_delin=8, n_dev=109, seed=90210,
 
     wells, seq = [], 1
     for phase, (x, y) in spots:
+        _on_line = None
+        if _lines and rng.random() < ON_SEISMIC.get(phase, 0.0):
+            _ln = rng.choice(_lines)
+            _ti = rng.randrange(len(_ln["xs"]))
+            # A few metres off the trace, not exactly on it: a wellhead
+            # is surveyed, a trace is a bin centre, and they never agree
+            # to the millimetre.
+            x = _ln["xs"][_ti] + rng.uniform(-12, 12)
+            y = _ln["ys"][_ti] + rng.uniform(-12, 12)
+            _on_line = (_ln["line_id"], _ln["survey"], _ti + 1)
         lon, lat = S.to_ll.transform(x, y)
         if not (TEAPOT_AREA["min_lat"] < lat < TEAPOT_AREA["max_lat"]
                 and TEAPOT_AREA["min_lon"] < lon < TEAPOT_AREA["max_lon"]):
@@ -249,6 +270,9 @@ def plan_field(n_expl=3, n_delin=8, n_dev=109, seed=90210,
             "_phase": phase,
             "_below_crest_ft": round(below_crest, 1),
             "_reservoir_depth_ft": round(res_z, 1),
+            "_seis_line": _on_line[0] if _on_line else None,
+            "_seis_survey": _on_line[1] if _on_line else None,
+            "_seis_trace": _on_line[2] if _on_line else None,
         })
         seq += 1
     return wells

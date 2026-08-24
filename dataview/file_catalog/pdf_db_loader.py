@@ -490,6 +490,8 @@ def load_scout(engine, dialect: str, well_info: dict,
     frac   = sc.get("frac")    or []
     core   = sc.get("core")    or []
     ip     = sc.get("ip_rows") or rows or []
+    perfs  = sc.get("perfs")   or []
+    shots  = sc.get("checkshots") or []
 
     ts = _ts()
     loaded = 0
@@ -654,6 +656,62 @@ def load_scout(engine, dialect: str, well_info: dict,
                 "row_created_by":        "DataWrangler",
                 "row_created_date":      ts,
             } for c in core])
+
+        # -- Checkshots -> cat_well_checkshot ----------------------------
+        # One survey per document, its stations keyed by depth. Both TWT
+        # and OWT are carried through as stated rather than one being
+        # halved into the other: the factor of two between them is the
+        # classic silent error, and a reader that assumes which it has
+        # mis-ties the whole well.
+        if shots:
+            cs_id = _uid()
+            _cap("cat_well_checkshot", [{
+                "checkshot_id":     cs_id,
+                "station_id":       _trunc(s.get("STATION"), 40) or _uid(),
+                "md":               _safe_float(s.get("MD")),
+                "tvd":              _safe_float(s.get("TVD")),
+                "depth_ouom":       "ft",
+                "depth_datum":      "KB",
+                "twt_ms":           _safe_float(s.get("TWT")),
+                "owt_ms":           _safe_float(s.get("OWT")),
+                "time_ouom":        "ms",
+                "avg_velocity":     _safe_float(s.get("AVG_VEL")),
+                "interval_velocity": _safe_float(s.get("INT_VEL")),
+                "velocity_ouom":    "ft/s",
+                "active_ind":       "Y",
+                "row_created_by":   "DataWrangler",
+                "row_created_date": ts,
+            } for s in shots])
+
+        # -- Perforations -> cat_well_perforation ------------------------
+        # completion_id is NOT NULL in dv_well_perforation, and the link is
+        # real rather than invented: a scout ticket describes ONE
+        # completion, load_scout already mints comp_id for it and hangs
+        # the frac stages off it, and these shots are part of that same
+        # job. With no completion there is nothing to attach them to, and
+        # skipping is honest -- the schema has no home for an unattached
+        # perforation.
+        if perfs and comp_id:
+            _cap("cat_well_perforation", [{
+                "perf_id":          _uid(),
+                "completion_id":    comp_id,
+                "perf_date":        _safe_date(p.get("PERF_DATE")),
+                "top_depth":        _safe_float(p.get("TOP")),
+                "base_depth":       _safe_float(p.get("BASE")),
+                "depth_ouom":       "ft",
+                "shot_count":       _safe_float(p.get("SHOTS")),
+                "shot_density":     _safe_float(p.get("SPF")),
+                "shot_density_ouom": "SPF",
+                "perf_diameter_in": "0.42",   # not stated on the ticket
+                "gun_type":         _trunc(p.get("GUN"), 40),
+                "phasing_deg":      _safe_float(p.get("PHASING")),
+                "strat_unit_name":  _trunc(p.get("FORMATION"), 100),
+                "perf_status":      _trunc(p.get("STATUS"), 40),
+                "source":           source,
+                "active_ind":       "Y",
+                "row_created_by":   "DataWrangler",
+                "row_created_date": ts,
+            } for p in perfs])
 
         # ── IP / production → cat_prod_entity + cat_prod_volume ───────────
         if ip:

@@ -73,6 +73,7 @@ LINEAGE = (
     ("cat_well_formation_top",  "dv_well_formation_top",  "tops"),
     ("cat_well_dst",            "dv_well_dst",            "welltest"),
     ("cat_well_dst_period",     "dv_well_dst_period",     "welltest_period"),
+    ("cat_well_checkshot",      "dv_well_checkshot",      "checkshot"),
     ("cat_well_completion",     "dv_well_completion",     "completion"),
     ("cat_prod_entity",         "dv_prod_entity",         "prod_entity"),
     ("cat_prod_volume",         "dv_prod_volume",         "production"),

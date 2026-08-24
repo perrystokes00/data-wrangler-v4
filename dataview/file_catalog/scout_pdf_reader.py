@@ -30,6 +30,19 @@ SECTIONS = {
     "Frac Stages":        ["Stage", "Top MD", "Base MD", "Clusters", "Cluster Sp", "Fluid (bbl)",
                            "Proppant (lbs)", "ISIP", "Avg Treat", "Max Rate"],
     "Production Summary": ["Date", "Oil (bbl)", "Gas (Mcf)", "Water (bbl)", "Avg Rate"],
+    # cat_well_perforation is a mirror WITH NO PRODUCER: it is in
+    # MIRROR_TABLES and in LINEAGE, and nothing has ever written it.
+    # dv_office_loader still says perforation is "outside the 11-table
+    # mirror scope", which stopped being true when the mirror was added.
+    # Perforations belong on a scout ticket, so that is where they come
+    # from now.
+    # THE ONE MEASUREMENT THAT TIES A WELL TO SEISMIC. Every other
+    # time-depth here is derived from a velocity model; these are the
+    # observations that model is supposed to honour.
+    "Checkshots":         ["Station", "MD (ft)", "TVD (ft)", "TWT (ms)",
+                           "OWT (ms)", "Avg Vel", "Int Vel"],
+    "Perforations":       ["Perf Date", "Top MD", "Base MD", "Shots", "SPF",
+                           "Gun", "Phasing", "Formation", "Status"],
 }
 
 # Tokens that a narrow column wrapped mid-word, so pdfplumber rejoined them with a
@@ -105,7 +118,9 @@ def extract_scout_pdf_tables(path: str) -> dict:
                 break
             vals = (vals + [""] * len(cols))[:len(cols)]
             body.append(vals)
-        out[sec] = pd.DataFrame(body, columns=cols)
+        _df = pd.DataFrame(body, columns=cols)
+        out[sec] = (pd.concat([out[sec], _df], ignore_index=True)
+                    if sec in out and not out[sec].empty else _df)
     return out
 
 
@@ -247,6 +262,27 @@ def extract_scout_ticket_text(path: str) -> dict:
                 "GAS_MCFD":   _num(r.get("Gas (Mcf)")),
                 "WATER_BWPD": _num(r.get("Water (bbl)"))} for r in recs("Production Summary")]
 
+    perfs = [{"PERF_DATE":  _txt(r.get("Perf Date")),
+              "TOP":        _num(r.get("Top MD")),
+              "BASE":       _num(r.get("Base MD")),
+              "SHOTS":      _num(r.get("Shots")),
+              "SPF":        _num(r.get("SPF")),
+              "GUN":        _txt(r.get("Gun")),
+              "PHASING":    _num(r.get("Phasing")),
+              "FORMATION":  _txt(r.get("Formation")),
+              "STATUS":     _txt(r.get("Status"))}
+             for r in recs("Perforations")]
+
+    checkshots = [{"STATION":  _txt(r.get("Station")),
+                   "MD":       _num(r.get("MD (ft)")),
+                   "TVD":      _num(r.get("TVD (ft)")),
+                   "TWT":      _num(r.get("TWT (ms)")),
+                   "OWT":      _num(r.get("OWT (ms)")),
+                   "AVG_VEL":  _num(r.get("Avg Vel")),
+                   "INT_VEL":  _num(r.get("Int Vel"))}
+                  for r in recs("Checkshots")]
+
     return {"header": header, "tops": tops, "dst": dst, "frac": frac,
             "core": core, "core_runs": [], "survey": survey, "ip_rows": ip_rows,
+            "perfs": perfs, "checkshots": checkshots,
             "completion": recs("Completion Summary")}

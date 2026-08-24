@@ -68,6 +68,7 @@ MIRROR_TABLES = [
     # document's flow table was reduced to three numbers. A multi-rate test IS
     # its periods; the maxima are a summary of them, not a substitute.
     "dv_well_dst_period",                             # flow periods of a test
+    "dv_well_checkshot",                              # time-depth ties to seismic
     "dv_prod_entity", "dv_prod_volume",              # production
 ]
 
