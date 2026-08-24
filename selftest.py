@@ -3131,6 +3131,81 @@ def tier_invariants(res, server, database, verbose=False):
         # same convention as above: unable to run is not a violation
         res.add("invariants", "mirror_registry", True,
                 f"skipped: {str(e)[:90]}")
+
+    # Not expressible as one SQL statement either: every cat_* column that
+    # points at a dv_r_ reference table must hold values that table knows, and
+    # WHICH columns those are has to be discovered rather than listed.
+    #
+    # THIS IS THE FAILURE THAT LOOKS LIKE NOTHING. Promote holds a row whose
+    # coded value is not registered -- correctly, because inventing the value
+    # is worse -- and reports it as "held (unresolved source,rate_ouom)" in a
+    # column of a table nobody is reading at the time. Three separate stalls in
+    # one afternoon came from exactly this, and every one was a REFERENCE LIST
+    # THAT WAS SHORT rather than data that was wrong:
+    #
+    #   MCF/D        every GAS volume held -- 1,005 rows -- while BBL, MCF and
+    #                bbl/d were all registered
+    #   PDF_HEADER   every well whose header came from a PDF held, while
+    #                LAS_HEADER was registered
+    #   PDF_SURVEY   every directional survey from a PDF held, while
+    #                DIRECTIONAL_SURVEY was registered
+    #
+    # Each was invisible until someone counted rows that should have moved.
+    # Naming it here turns it into a failing check with the missing value in
+    # the message.
+    try:
+        _REF_FOR = {"source": "dv_r_source", "depth_ouom": "dv_r_uom",
+                    "volume_ouom": "dv_r_uom", "rate_ouom": "dv_r_uom",
+                    "length_ouom": "dv_r_uom", "pressure_ouom": "dv_r_uom",
+                    "depth_datum": "dv_r_depth_datum",
+                    "well_status": "dv_r_well_status",
+                    "well_type": "dv_r_well_type"}
+        with eng.connect() as cx:
+            # DERIVED, NOT LISTED. A hard-coded table list goes stale the first
+            # time someone adds a mirror, which is the shape of fault this
+            # whole tier exists to catch.
+            _cols = cx.execute(text("""
+                SELECT TABLE_NAME, LOWER(COLUMN_NAME)
+                  FROM INFORMATION_SCHEMA.COLUMNS
+                 WHERE TABLE_SCHEMA = 'file_catalog'
+                   AND TABLE_NAME LIKE 'cat[_]%'""")).fetchall()
+            _refs = {r[0] for r in cx.execute(text("""
+                SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+                 WHERE TABLE_SCHEMA = 'dataview'
+                   AND TABLE_NAME LIKE 'dv[_]r[_]%'"""))}
+            _key = {}
+            for _rt in _refs:
+                _key[_rt] = cx.execute(text(
+                    "SELECT TOP 1 COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA='dataview' AND TABLE_NAME=:t "
+                    "ORDER BY ORDINAL_POSITION"), {"t": _rt}).scalar()
+            _bad = []
+            for _tbl, _col in _cols:
+                _ref = _REF_FOR.get(_col)
+                if not _ref or _ref not in _refs or not _key.get(_ref):
+                    continue
+                try:
+                    _vals = cx.execute(text(f"""
+                        SELECT DISTINCT TOP 5 x.[{_col}]
+                          FROM file_catalog.[{_tbl}] x
+                         WHERE x.[{_col}] IS NOT NULL
+                           AND LTRIM(RTRIM(x.[{_col}])) <> ''
+                           AND NOT EXISTS (
+                               SELECT 1 FROM dataview.[{_ref}] r
+                                WHERE UPPER(LTRIM(RTRIM(r.[{_key[_ref]}])))
+                                    = UPPER(LTRIM(RTRIM(x.[{_col}]))))
+                    """)).fetchall()
+                except Exception:
+                    continue          # a missing table is a different database
+                for _v in _vals:
+                    _bad.append(f"{_tbl}.{_col}={_v[0]!r} (not in {_ref})")
+            res.add("invariants", "coded_values_registered", not _bad,
+                    "; ".join(sorted(set(_bad))[:6])
+                    + (" — these rows will be HELD by promote, silently"
+                       if _bad else ""))
+    except Exception as e:
+        res.add("invariants", "coded_values_registered", True,
+                f"skipped: {str(e)[:90]}")
     return res
 
 
