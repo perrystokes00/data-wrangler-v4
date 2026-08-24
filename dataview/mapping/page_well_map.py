@@ -3920,6 +3920,7 @@ def _seismic_line_paths(_engine, _v: int = 2):
                        sl.line_name       AS line_name,
                        sl.trace_count     AS trace_count,
                        ss.epsg_code       AS epsg,
+                       sl.file_path       AS file_path,
                        sl.geog.STAsText() AS wkt
                   FROM dataview.dv_seis_line sl
                   LEFT JOIN dataview.dv_seis_set ss
@@ -3944,10 +3945,17 @@ def _seismic_line_paths(_engine, _v: int = 2):
             _tr = int(r.trace_count) if pd.notna(r.trace_count) else None
         except (TypeError, ValueError):
             _tr = None
+        # THE FILE IS THE POINT OF PICKING A LINE. dv_seis_line.file_path is
+        # populated on every row (240/240), so the map already knew which
+        # SEG-Y each line came from and simply never said. A line you can see
+        # but cannot trace back to a file is a picture, not a catalogue.
+        _fp = str(getattr(r, "file_path", "") or "")
         out.append({"pts": pts,
                     "survey": r.survey or "(unnamed survey)",
                     "line": r.line_name or "",
-                    "epsg": _epsg, "traces": _tr})
+                    "epsg": _epsg, "traces": _tr,
+                    "file": _fp,
+                    "file_name": _fp.replace("/", "\\").split("\\")[-1]})
     return out
 
 
@@ -8817,8 +8825,12 @@ def run(engine=None):
                                 f"<b>📈 2D seismic line</b><br>"
                                 f"<b>{_sl['survey']}</b><br>{_sl['line']}<br>"
                                 f"EPSG {_sl['epsg'] or '—'}<br>"
-                                f"{_sl['traces'] or '?'} traces",
-                                max_width=280),
+                                f"{_sl['traces'] or '?'} traces"
+                                + (f"<br><b>💾 {_sl['file_name']}</b>"
+                                   f"<br><span style='font-size:10px;"
+                                   f"word-break:break-all'>{_sl['file']}</span>"
+                                   if _sl.get("file") else ""),
+                                max_width=320),
                         ).add_to(m)
                 if "geo_wellpath" in active_db:
                     # Wellbore paths are a geography layer like any other:

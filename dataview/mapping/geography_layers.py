@@ -46,7 +46,7 @@ _LAYER_KEYS = {
     # rule; the per-line LINESTRINGs live on dv_seis_line.geog and are drawn
     # by page_well_map._seismic_line_paths, not by this layer).
     "seismic":    ("dv_seis_set",   "seis_set_name",
-                   ["seis_set_type", "epsg_code"],    "#0E6E6E",
+                   ["seis_set_type", "epsg_code", "file_path"], "#0E6E6E",
                    "🟦 Seismic surveys (geog)",  True),
 }
 
@@ -147,6 +147,12 @@ def add_geography_layer(m, engine, key: str, show: bool = True) -> int:
         highlight_function=lambda _f, _c=color: {"weight": 4, "color": _c},
         tooltip=folium.GeoJsonTooltip(fields=tip_fields, aliases=tip_aliases,
                                       sticky=True),
+        # A TOOLTIP VANISHES WHEN THE POINTER DOES, which is fine for a name
+        # and useless for a file path you want to read or copy. The popup
+        # holds still. Same fields, one template, so it costs the aliases and
+        # nothing per feature.
+        popup=folium.GeoJsonPopup(fields=tip_fields, aliases=tip_aliases,
+                                  labels=True, max_width=340),
     ).add_to(fg)
     fg.add_to(m)
     return len(gj["features"])
