@@ -1183,13 +1183,64 @@ def _view_las3_sections(file_path: str, why: str = "") -> bool:
                   "Type": c.fmt or "—", "Description": c.descr}
                  for c in s.columns]), hide_index=True,
                 use_container_width=True)
-            if s.rows:
-                # Capped: a Log set runs to tens of thousands of rows and the
-                # point here is to show WHAT is in the file, not to be a grid.
-                st.dataframe(pd.DataFrame(s.rows[:500], columns=s.mnemonics),
-                             hide_index=True, use_container_width=True)
-                if len(s.rows) > 500:
-                    st.caption(f"first 500 of {len(s.rows):,} rows")
-            else:
+            if not s.rows:
                 st.caption("no data rows in this section")
+                continue
+
+            # THE CURVES WERE ALWAYS HERE, ONLY NEVER DRAWN. This section had
+            # the definitions table and a 500-row preview grid, so a LAS 3.0
+            # file showed "the header but not the curves" -- while a LAS 2.0
+            # file, which lasio can open, got a full log plot. Nothing was
+            # missing from the parse: this file carries 13,084 depths x 8
+            # curves and split_las3 reads every one, including turning the
+            # file's declared NULL into a real gap rather than plotting
+            # -999.25 as a value.
+            #
+            # DUPLICATE MNEMONICS ARE LEGAL IN LAS and would make df[mnem]
+            # return a DataFrame instead of a Series, so the "is this column
+            # numeric" test raises "truth value is ambiguous" and the whole
+            # viewer falls over. Suffix the repeats.
+            _seen, _cols = {}, []
+            for _m in s.mnemonics:
+                _seen[_m] = _seen.get(_m, 0) + 1
+                _cols.append(_m if _seen[_m] == 1 else f"{_m}[{_seen[_m]}]")
+            _df = pd.DataFrame(s.rows, columns=_cols)
+            _num = _df.apply(lambda c: pd.to_numeric(c, errors="coerce"))
+
+            _depth = next((c for c in _cols
+                           if c.upper().split("[")[0]
+                           in ("DEPT", "DEPTH", "MD", "TVD", "TVDSS")), None)
+            if _depth is None and _cols:
+                _depth = _cols[0]
+            # A section is only plottable if its index column and at least one
+            # other column are numeric. Core descriptions and Tops names are
+            # tabular and real, and a log plot of them would be meaningless --
+            # they keep the grid and nothing else.
+            _plot = [c for c in _cols
+                     if c != _depth and bool(_num[c].notna().any())]
+            if _depth and bool(_num[_depth].notna().any()) and _plot:
+                _sel = st.multiselect(
+                    "Curves to plot", _plot,
+                    default=_plot[:min(4, len(_plot))],
+                    key=f"las3_curves_{file_path}_{name}")
+                if _sel:
+                    # THE WHOLE SECTION, NOT THE PREVIEW. Plotting the 500
+                    # rows shown below would draw the top of the well and
+                    # label it the log -- here, 500 of 13,084 samples is the
+                    # first 250 feet of a 6,500 foot hole.
+                    _pdf = _num[[_depth] + list(_sel)].dropna(subset=[_depth])
+                    _las_log_plot(_pdf, _depth, list(_sel), file_path)
+
+            st.dataframe(_df.head(500), hide_index=True,
+                         use_container_width=True)
+            if len(s.rows) > 500:
+                st.caption(f"grid shows the first 500 of {len(s.rows):,} rows"
+                           + (f"; the plot uses all {len(s.rows):,}"
+                              if _plot else ""))
+            st.download_button(
+                f"Download ~{name} as CSV ({len(s.rows):,} rows)",
+                data=_df.to_csv(index=False),
+                file_name=Path(file_path).stem + f"_{name}.csv",
+                mime="text/csv",
+                key=f"las3_dl_{file_path}_{name}")
     return True
