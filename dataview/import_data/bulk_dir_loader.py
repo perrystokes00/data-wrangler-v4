@@ -3068,7 +3068,9 @@ def render_fk_resolution(ss, server, database, schema="dataview"):
     st.header("Phase 4 — resolve FK violations")
     st.caption("Per parent: Add (seed the parent), Remap (fold onto an existing value), or Null "
                "(blank it). Applied as set-based UPDATEs to staging / INSERTs to the parent. "
-               "Data-table parents (e.g. DV_WELL) can't be seeded — resolve by promote order.")
+               "A data-table parent (e.g. DV_WELL) still cannot be INVENTED from a "
+               "child's key — that would mint a well that is only a number — but where "
+               "the reference master describes it, ⬇ From master copies the real row.")
 
     eng = get_engine(server, database)
     open_parents = {p: info for p, info in by_parent.items() if info.get("values")}
@@ -3098,18 +3100,51 @@ def render_fk_resolution(ss, server, database, schema="dataview"):
             kind = info["kind"]
             can_add = kind in ("entity", "reference")     # data-table parents can't be seeded
             opts = ["— skip —"] + _existing_options(eng, parent, kind, schema)
+            # WHICH OF THESE DOES THE REFERENCE MASTER ACTUALLY DESCRIBE?
+            # Asked once per parent, not per row, and only for data parents:
+            # Add is refused for them because a well minted from a child's key
+            # is just a number, but a well the master describes is a real row
+            # with a name, an operator and a location. Offering the checkbox on
+            # a value the master does not have would be the invention this
+            # screen exists to prevent, so it is offered on nothing else.
+            _from_master = {}
+            if not can_add:
+                try:
+                    from dataview.import_data import seed_from_master as _sfm
+                    with eng.connect() as _mcx:
+                        _from_master = {r["uwi"]: r for r in _sfm.master_rows(
+                            _mcx, list(info["values"].keys()))}
+                except Exception as _me:
+                    st.caption(f"reference master unavailable: "
+                               f"{type(_me).__name__}: {_me}")
             with st.expander(f"{parent}  ({kind}) · {len(info['values'])} unmatched"
                              + ("" if can_add else "  — Remap/Null only"), expanded=True):
                 rows = []
                 _tick = can_add and bool(_allmap.get(parent, True))
                 for v, c in sorted(info["values"].items()):
+                    _m = _from_master.get(v)
                     rows.append({"☑ Add": _tick, "value": v, "rows": c["n"],
-                                 "Map to existing": "— skip —", "☑ Remap": False, "☑ Null": False})
+                                 "⬇ From master": bool(_m),
+                                 "in master": (str(_m["well_name"])[:28] if _m
+                                               else ("—" if not can_add else "")),
+                                 "Map to existing": "— skip —", "☑ Remap": False,
+                                 "☑ Null": False})
                 grid = pd.DataFrame(rows)
                 cfg = {"value": st.column_config.TextColumn(disabled=True),
                        "rows": st.column_config.NumberColumn(disabled=True, width="small"),
                        "☑ Add": st.column_config.CheckboxColumn(disabled=not can_add,
                                  help="Seed this value into the parent"),
+                       "⬇ From master": st.column_config.CheckboxColumn(
+                                 disabled=can_add or not _from_master,
+                                 help="Copy this well from the reference master "
+                                      "— name, operator, coordinates. Ticked "
+                                      "already where the master has a row; a "
+                                      "value it cannot describe stays held."),
+                       "in master": st.column_config.TextColumn(
+                                 disabled=True, width="medium",
+                                 help="What the master calls it. — means the "
+                                      "master has no row, so nothing can be "
+                                      "copied and the children stay held."),
                        "Map to existing": st.column_config.SelectboxColumn(options=opts),
                        "☑ Remap": st.column_config.CheckboxColumn(help="Use 'Map to existing'"),
                        "☑ Null": st.column_config.CheckboxColumn(help="Blank the value in staging")}
@@ -3125,9 +3160,19 @@ def render_fk_resolution(ss, server, database, schema="dataview"):
 
     if applied:
         decisions = {}
+        seed_uwis = []                 # data parents to copy from the master
         for parent, ed in editors.items():
             decs = []
             for _, r in ed.iterrows():
+                # FROM MASTER IS NOT A RESOLUTION DECISION. The other three
+                # rewrite STAGING (remap, null) or invent a parent row (add);
+                # this one copies a described row out of the reference master
+                # into dv_well. It is collected separately and applied through
+                # seed_from_master, so the two paths cannot drift and the
+                # command-line tool and this screen do the identical thing.
+                if r.get("⬇ From master"):
+                    seed_uwis.append(str(r["value"]))
+                    continue
                 if r["☑ Remap"] and r["Map to existing"] not in ("— skip —", "", None):
                     decs.append({"value": r["value"], "action": "remap", "remap_to": r["Map to existing"]})
                 elif r["☑ Null"]:
@@ -3139,6 +3184,24 @@ def render_fk_resolution(ss, server, database, schema="dataview"):
         log = apply_resolutions(eng, by_parent, decisions, schema)
         for line in log:
             (st.error if "ERROR" in line else st.success)(line)
+
+        if seed_uwis:
+            try:
+                from dataview.import_data import seed_from_master as _sfm
+                with eng.connect() as _cx:
+                    _rows = _sfm.master_rows(_cx, seed_uwis)
+                _n = _sfm.seed(eng, _rows)
+                _skipped = len(seed_uwis) - len(_rows)
+                st.success(
+                    f"Seeded {_n} well(s) from {_sfm.MASTER} — name, operator "
+                    f"and location as the master states them, stamped "
+                    f"row_created_by='{_sfm.CREATED_BY}' so they can be found "
+                    f"or undone."
+                    + (f" {_skipped} had no master row and stay held."
+                       if _skipped else ""))
+            except Exception as _se:
+                st.error(f"Seed from master failed: {type(_se).__name__}: {_se}")
+
         st.info("Re-run Phase 3 (Analyze FKs) to confirm violations cleared, then promote (Phase 5).")
 
 

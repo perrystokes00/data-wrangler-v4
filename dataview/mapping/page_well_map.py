@@ -7681,6 +7681,57 @@ def run(engine=None):
                 if _gc[_i % 3].checkbox(_lbl, key=f"wm_{_flag}"):
                     active_db.add(_flag)
 
+        # 🌀 WELL PATHS ARE COMPUTED, NOT LOADED. Nothing in any load
+        # builds them: the survey stations carry md/incl/azim, and the
+        # minimum-curvature geometry has to be derived from those plus the
+        # surface location. The layer above only DRAWS what is stored, so
+        # without this the map said "run well_path_sql apply" and left the
+        # operator to find a command line.
+        #
+        # Offered here, beside the layer that needs it, rather than in the
+        # message slot below — that is an st.empty() and the next status
+        # message would overwrite the button mid-render.
+        if "geo_wellpath" in active_db:
+            try:
+                from dataview.mapping import well_path as _wp
+                from sqlalchemy import text as _t
+                with engine.connect() as _pcx:
+                    _stored = _pcx.execute(_t(
+                        "SELECT COUNT(*) FROM dataview.dv_well_dir_srvy_hdr "
+                        "WHERE PATH_GEOG IS NOT NULL")).scalar() or 0
+            except Exception:
+                _stored = None
+            _pc1, _pc2 = st.columns([3, 1])
+            if _stored == 0:
+                _pc1.caption(
+                    "🌀 No paths stored yet — the survey stations are loaded "
+                    "but the geometry has not been computed.")
+            elif _stored:
+                _pc1.caption(f"🌀 {_stored:,} stored path(s). Recompute after "
+                             f"loading more surveys.")
+            if _pc2.button("Compute paths", key="wm_compute_paths",
+                           use_container_width=True,
+                           help="Minimum curvature from md/incl/azim, projected to "
+                                "WGS84, generalised, and stored. Only wells whose "
+                                "closure would be visible at map scale are kept — "
+                                "a vertical hole is a dot and stays a marker."):
+                try:
+                    with st.spinner("Computing well paths…"):
+                        _res, _probs = _wp.compute_paths(
+                            engine, log=lambda *_a: None)
+                        _drawable = [r for r in _res if r.get("drawable")]
+                        _wrote = _wp.write_paths(engine, _res,
+                                                 log=lambda *_a: None)
+                    st.success(
+                        f"Computed {len(_res):,} survey(s): stored {_wrote:,}, "
+                        f"skipped {len(_res) - len(_drawable):,} too vertical to "
+                        f"show (closure under {_wp.MIN_CLOSURE_M:.0f} m)"
+                        + (f", {len(_probs):,} could not be computed"
+                           if _probs else "") + ".")
+                    st.rerun()
+                except Exception as _ce:
+                    st.error(f"Compute failed: {type(_ce).__name__}: {_ce}")
+
         # Safe filter — if nothing selected fall back to show all.
         # When wells_df is empty (lazy-load not yet fired), dff is also empty
         # — the grid render path handles that gracefully (it has its own data).
