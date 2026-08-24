@@ -39,6 +39,18 @@ CHILDREN = [("stg.dv_well_formation_top", "API_NUMBER"),
 
 CREATED_BY = "SEED_FROM_WELL_REF"
 
+# THE ROW'S OWN KEY, not the parent's. Counting repeats of the PARENT key says
+# 41,983 of 42,059 stations are duplicates, because a well legitimately has
+# thousands of stations -- a confidently wrong number of exactly the kind this
+# panel exists to prevent. A table absent here reports duplicates as None
+# (unknown) rather than a guess.
+NATURAL_KEY = {
+    "stg.dv_well_formation_top":  ["API_NUMBER", "UNIT_CODE"],
+    "stg.dv_prod_entity":         ["PROD_ENTITY_ID"],
+    "stg.dv_well_dir_srvy_hdr":   ["UWI", "SURVEY_ID"],
+    "stg.dv_well_dir_srvy_sta":   ["UWI", "SURVEY_ID", "STATION_ID"],
+}
+
 
 # NEVER WRAP THE INDEXED COLUMN. LTRIM(RTRIM(col)) makes a predicate
 # non-sargable, and the master is 4,031,052 rows: measured 31.844s wrapped
@@ -170,3 +182,80 @@ def seed(engine, rows, source=None, created_by=CREATED_BY):
                 f"(SELECT 1 FROM dataview.dv_well w WHERE w.uwi = :uwi)"),
                 {k: vals.get(k) for k in set(use) | {"uwi"}}).rowcount or 0
     return n, present
+
+
+# ─────────────────────────── the backlog ──────────────────────────────────
+# WHAT IS STUCK, WHY, AND THE ONE THING THAT CLEARS IT.
+#
+# Phases 3-6 only render when session state still holds the batch, so a
+# Streamlit restart hides every hold while the rows sit in stg untouched --
+# the data persists and the view does not. This reads the DATABASE, so it
+# survives a restart, and it pairs each blocker with its remedy: a backlog you
+# can only look at teaches you to ignore it (Perry, 24 Aug: "just knowing data
+# is being held is not of much use unless you can optionally do something to
+# clear the backlog").
+#
+# Scoped to the dv_well parent on purpose. That is the blocker this codebase
+# actually meets, and a generic FK sweep here would need the batch's column
+# map -- which is the session state this exists to survive without.
+def backlog(conn):
+    """[{table, staged, held, recoverable, duplicates, key}] per staging table.
+
+    held        -- rows whose well is not in dv_well. They promote by
+                   themselves once it is, so this is a queue, not an error.
+    recoverable -- of those, how many the reference master can describe. The
+                   difference between the two is what nothing can fix here.
+    duplicates  -- rows the promote dedupe will discard because they repeat a
+                   key. Reported because ROW_NUMBER discarding them silently is
+                   how 5,655 formation tops disappeared.
+    """
+    import sqlalchemy as sa
+    out = []
+    for tbl, col in CHILDREN:
+        try:
+            staged = conn.execute(sa.text(f"SELECT COUNT(*) FROM {tbl}")).scalar() or 0
+        except Exception:
+            continue                      # table not staged in this database
+        if not staged:
+            continue
+        k = pad_sql("s.[" + col + "]")
+        held_uwis = [r[0] for r in conn.execute(sa.text(
+            f"SELECT DISTINCT {k} AS u FROM {tbl} s "
+            f"WHERE {k} IS NOT NULL AND NOT EXISTS "
+            f"(SELECT 1 FROM dataview.dv_well w WHERE w.uwi = {k})"))]
+        held = conn.execute(sa.text(
+            f"SELECT COUNT(*) FROM {tbl} s WHERE NOT EXISTS "
+            f"(SELECT 1 FROM dataview.dv_well w WHERE w.uwi = {k})")).scalar() or 0
+        rec = len(master_rows(conn, held_uwis)) if held_uwis else 0
+        nk = NATURAL_KEY.get(tbl)
+        dups = None
+        if nk:
+            expr = ", '|', ".join(
+                f"ISNULL(CAST(s.[{c2}] AS nvarchar(400)), '')" for c2 in nk)
+            dups = conn.execute(sa.text(
+                f"SELECT COUNT(*) - COUNT(DISTINCT CONCAT({expr}, '')) "
+                f"FROM {tbl} s")).scalar() or 0
+            dups = max(0, dups)
+        out.append({"table": tbl, "key": col, "staged": staged, "held": held,
+                    "held_wells": len(held_uwis), "recoverable_wells": rec,
+                    "duplicates": dups, "natural_key": nk})
+    return out
+
+
+def null_parent_link(engine, table, col, uwis):
+    """Blank the parent key in staging for these wells, so the rows promote.
+
+    THE LAST RESORT, AND IT IS A REAL DECISION. The row loads with no link to a
+    well, which is honest for a measurement whose well genuinely is not in any
+    source -- and wrong for one whose well simply has not been loaded yet.
+    Offered only for wells the reference master cannot describe, because every
+    other case has a better answer one button to the left.
+    """
+    import sqlalchemy as sa
+    if not uwis:
+        return 0
+    inlist = ",".join("'" + str(u).replace("'", "''") + "'" for u in uwis)
+    k = pad_sql("[" + col + "]")
+    with engine.begin() as cx:
+        return cx.execute(sa.text(
+            f"UPDATE {table} SET [{col}] = NULL WHERE {k} IN ({inlist})")).rowcount or 0

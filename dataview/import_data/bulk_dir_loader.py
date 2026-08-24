@@ -4547,6 +4547,116 @@ def render_verify(ss, server, database, schema="dataview"):
                      "Promote (idempotent) or check the mapping.")
 
 
+def render_backlog(server, database, schema="dataview"):
+    """What is stuck in staging, why, and the button that clears it.
+
+    READS THE DATABASE, NOT SESSION STATE. Phases 3-6 only render while the
+    batch is still in ss, so a Streamlit restart hides every hold while the
+    rows sit in stg untouched -- the data persists and the view does not.
+    This survives a restart because it asks stg and dv directly.
+
+    EVERY LINE PAIRS A BLOCKER WITH ITS REMEDY. A backlog you can only look at
+    teaches you to ignore it, which is how the "Not fully loaded" warning
+    became wallpaper.
+    """
+    from dataview.import_data import seed_from_master as sfm
+    with st.expander("⏸ Backlog — what is held in staging, and how to clear it",
+                     expanded=False):
+        try:
+            eng = get_engine(server, database)
+            with eng.connect() as cx:
+                rows = sfm.backlog(cx)
+        except Exception as e:
+            st.caption(f"Backlog unavailable: {type(e).__name__}: {e}")
+            return
+        if not rows:
+            st.success("Nothing staged — no backlog.")
+            return
+
+        import pandas as pd
+        st.dataframe(pd.DataFrame([{
+            "staging table": r["table"],
+            "staged": r["staged"],
+            "held (no well)": r["held"],
+            "wells missing": r["held_wells"],
+            "in master": r["recoverable_wells"],
+            "duplicate keys": ("?" if r["duplicates"] is None
+                               else r["duplicates"]),
+            "key": "+".join(r["natural_key"] or []) or "?",
+        } for r in rows]), hide_index=True, use_container_width=True)
+        st.caption(
+            "**held** = the row's well is not in dv_well; it promotes by itself "
+            "once the well is, so this is a queue rather than an error · "
+            "**in master** = how many of those wells the reference master can "
+            "describe, which is what the first button can fix · "
+            "**duplicate keys** = rows repeating the row's OWN key, which "
+            "promote keeps one of (first one in wins) — counted on the key "
+            "named, never on the parent key, because a well legitimately has "
+            "thousands of stations.")
+
+        _held_all, _rec_all = sum(r["held"] for r in rows), 0
+        with eng.connect() as cx:
+            _uw = sfm.orphan_uwis(cx)
+            _rec = sfm.master_rows(cx, _uw)
+            _rec_all = len(_rec)
+        _stuck = [u for u in _uw if u not in {x["uwi"] for x in _rec}]
+
+        if not _uw:
+            st.success("No held rows — every staged row has its well. "
+                       "Run Promote (Phase 5) for anything not yet loaded.")
+            return
+
+        c1, c2 = st.columns(2)
+        # REMEDY 1, and the one to reach for: the master describes the well, so
+        # the parent is real data rather than a row minted to satisfy a key.
+        if c1.button(f"⬇ Seed {_rec_all} well(s) from the reference master",
+                     key="bdl_backlog_seed", disabled=not _rec_all,
+                     use_container_width=True,
+                     help="Copies name, operator and location as the master "
+                          "states them. The held rows promote on the next run."):
+            n, already = sfm.seed(eng, _rec)
+            if n:
+                st.success(f"Seeded {n} well(s). Run Promote — the held rows "
+                           f"lift on their own.")
+            else:
+                st.info(f"Nothing to seed — all {already} already in dv_well.")
+            st.rerun()
+
+        # REMEDY 2, deliberately harder to reach: it loads a measurement with
+        # no well attached. Right when no source describes the well, wrong when
+        # the well simply has not been loaded yet -- so it is offered ONLY for
+        # the wells the master cannot describe, and it says what it costs.
+        if _stuck:
+            c2.caption(f"{len(_stuck)} well(s) no source describes: "
+                       + ", ".join(_stuck[:3])
+                       + ("…" if len(_stuck) > 3 else ""))
+            _armed = c2.checkbox("I accept these rows will load with no well",
+                                 key="bdl_backlog_arm")
+            if c2.button(f"⊘ Null the well link on their rows",
+                         key="bdl_backlog_null", disabled=not _armed,
+                         use_container_width=True,
+                         help="Blanks the well key in STAGING so the rows "
+                              "promote unattached. dv_* is not touched."):
+                _n = 0
+                for _t, _c in sfm.CHILDREN:
+                    try:
+                        _n += sfm.null_parent_link(eng, _t, _c, _stuck)
+                    except Exception as _ne:
+                        st.error(f"{_t}: {type(_ne).__name__}: {_ne}")
+                st.success(f"Blanked the well link on {_n:,} staged row(s). "
+                           f"They promote unattached on the next run.")
+                st.rerun()
+
+        _dups = sum(r["duplicates"] or 0 for r in rows)
+        if _dups:
+            st.caption(
+                f"⚠ {_dups:,} staged row(s) repeat their own key and only one "
+                f"of each will be kept. That is correct for a genuine repeat and "
+                f"wrong when a key column was never mapped — if the count "
+                f"surprises you, check Phase 2's column map before promoting.")
+
+
+
 def run():
     import pandas as pd
     ss = st.session_state
@@ -4760,6 +4870,14 @@ def run():
             ss.pop("bdl_uwi_msg", None)
         except Exception as e:
             st.error(f"Scan failed: {e}")
+
+    # THE BACKLOG GOES ABOVE THE SCAN GATE, and that is the entire point.
+    # `if not scan: return` is exactly the state this panel exists for -- a
+    # restart, no batch in session, rows still sitting in stg and nobody able
+    # to see what is holding them. Below the gate it would render only when a
+    # scan was already loaded, which is when it is least needed: the same
+    # mistake as a control put in a function nothing calls.
+    render_backlog(server, database, ss.get("bdl_schema", "dataview"))
 
     scan = ss.get("bdl_scan")
     if not scan:
