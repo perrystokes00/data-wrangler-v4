@@ -153,7 +153,8 @@ def add_geography_layer(m, engine, key: str, show: bool = True) -> int:
 
 
 def points_layer(m, points, name, *, color="#222", fill="#555",
-                 radius=3, show=True, opacity=0.9):
+                 radius=3, show=True, opacity=0.9,
+                 popup_fields=None, popup_aliases=None, extra=None):
     """N points as ONE GeoJson layer. Returns the number drawn.
 
     ONE LAYER, NOT N MARKERS. A CircleMarker per point makes folium serialise
@@ -172,15 +173,25 @@ def points_layer(m, points, name, *, color="#222", fill="#555",
     a density cell by "markers have popups, cells don't", so giving these
     popups would make every point look like a marker click to that code.
     """
+    # A GeoJsonPopup emits ONE template plus the per-feature property values,
+    # where a folium.Popup per point would emit a block of HTML each. That is
+    # the same reason this is one layer and not N markers, and it is why 50,000
+    # popups cost kilobytes of template rather than megabytes of markup.
     feats = []
-    for la, lo, label in points:
+    extra = list(extra or [])
+    for row in points:
+        la, lo, label = row[0], row[1], row[2]
         try:
             la, lo = float(la), float(lo)
         except (TypeError, ValueError):
             continue
+        props = {"nm": str(label or "")}
+        for i, key in enumerate(extra):
+            v = row[3 + i] if len(row) > 3 + i else None
+            props[key] = "" if v is None else str(v)
         feats.append({
             "type": "Feature",
-            "properties": {"nm": str(label or "")},
+            "properties": props,
             "geometry": {"type": "Point",
                          "coordinates": [round(lo, 5), round(la, 5)]},
         })
@@ -193,6 +204,10 @@ def points_layer(m, points, name, *, color="#222", fill="#555",
                                    fill=True, fill_color=fill,
                                    fill_opacity=opacity),
         tooltip=folium.GeoJsonTooltip(fields=["nm"], labels=False),
+        popup=(folium.GeoJsonPopup(fields=list(popup_fields),
+                                   aliases=list(popup_aliases or popup_fields),
+                                   labels=True, max_width=320)
+               if popup_fields else None),
     ).add_to(m)
     return len(feats)
 
@@ -225,6 +240,21 @@ def add_well_points(m, engine, show: bool = True, limit: int = 50000) -> int:
 
 
 REFERENCE_MASTER = "WELL_REF.well_ref.well_master_gold"
+
+# What a reference-well popup answers. Declared once so the two queries below
+# cannot drift apart, and ordered to match the tuple unpack at the call site --
+# a mismatch there is silent, it just puts the operator in the county field.
+_REF_COLS = ("well_name, surface_latitude, surface_longitude, uwi14, "
+             "operator_name, county, province_state, std_well_type, "
+             "std_well_status, total_depth, spud_date")
+_REF_COLS_LIGHT = "well_name, surface_latitude, surface_longitude"
+
+# ABOVE THIS, POPUPS ARE PAID FOR AND NOT USED. A popup costs ~320 bytes of
+# feature properties, so 11,291 wells go 2.5 -> 6.1 MB and 48,218 go 10.4 ->
+# 25.6 MB, on every rerun -- to attach detail to points nobody can click
+# through at that density. Below it, "which well is this" is exactly the
+# question being asked and the popup is the answer.
+POPUP_MAX = 20000
 
 
 def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
@@ -296,8 +326,8 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
             # limit+1 tells us "capped" without a COUNT, which measured 5.90s
             # over a 2M-row bbox for a number that only ever reads "lots".
             rows = con.execute(text(
-                f"SELECT TOP {lim + 1} well_name, surface_latitude, "
-                f"surface_longitude FROM {REFERENCE_MASTER} WHERE {clause}"),
+                f"SELECT TOP {lim + 1} {_REF_COLS_LIGHT} "
+                f"FROM {REFERENCE_MASTER} WHERE {clause}"),
                 params).fetchall()
             if len(rows) > lim:
                 est = con.execute(text(
@@ -305,24 +335,77 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
                     "JOIN WELL_REF.sys.objects o ON o.object_id = p.object_id "
                     "WHERE o.name = 'well_master_gold' AND p.index_id IN (0,1)"
                 )).scalar() or 0
+                # k FROM THE SCOPE, NOT THE MASTER -- and the first sample
+                # is what measures the scope. Deriving k from the master's
+                # 3.9M rows thins every view by the same 79x, so a bbox
+                # holding ~200k wells drew 2,613 of them: correct in shape,
+                # 19x sparser than the cap allows, and indistinguishable to
+                # the eye from "there are hardly any wells here".
+                #
+                # Counting the scope directly is the expensive thing this
+                # code already avoids (5.90s over a 2M-row bbox). But a
+                # 1-in-k sample IS an estimator: n * k approximates the
+                # population, so one cheap sample tells us what k should have
+                # been, and we re-ask only if the answer differs.
                 k = max(2, int(est // max(lim, 1)) + 1)
                 sampled = True
                 rows = con.execute(text(
-                    f"SELECT TOP {lim} well_name, surface_latitude, "
-                    f"surface_longitude FROM {REFERENCE_MASTER} "
+                    f"SELECT TOP {lim} {_REF_COLS_LIGHT} "
+                    f"FROM {REFERENCE_MASTER} "
                     f"WHERE {clause} AND ABS(CHECKSUM(uwi14)) % {k} = 0"),
                     params).fetchall()
+                if rows:
+                    scope_est = len(rows) * k
+                    k2 = max(2, int(scope_est // max(lim, 1)) + 1)
+                    # Only worth a second pass if it changes the picture.
+                    if k2 < k // 2:
+                        q2 = (f"SELECT TOP {lim} {_REF_COLS_LIGHT} "
+                              f"FROM {REFERENCE_MASTER} WHERE {clause} "
+                              f"AND ABS(CHECKSUM(uwi14)) % {k2} = 0")
+                        rows = con.execute(text(q2), params).fetchall()
     except Exception as exc:
         print(f"[geography_layers] reference wells query failed: {exc}")
         return 0, 0
     if not rows:
         return 0, 0
+
+    # A SECOND QUERY, ON PURPOSE. The probe fetches three columns so the
+    # common "too many to popup" case never pays for eleven; only when the
+    # set is small enough to be clicked does it go back for the detail. That
+    # re-read is bounded by POPUP_MAX and measured in tenths of a second,
+    # against the ~10s the wide sample scan costs.
+    detail = False
+    if not sampled and len(rows) <= POPUP_MAX:
+        try:
+            with engine.connect() as con:
+                rows = con.execute(text(
+                    f"SELECT TOP {lim} {_REF_COLS} "
+                    f"FROM {REFERENCE_MASTER} WHERE {clause}"),
+                    params).fetchall()
+            detail = True
+        except Exception as exc:
+            print(f"[geography_layers] reference detail query failed: {exc}")
+
     in_scope = None if sampled else len(rows)
     label = (f"🔵 Reference wells ({len(rows):,}"
              + (" sample)" if sampled else ")"))
-    n_drawn = points_layer(m, ((la, lo, nm) for nm, la, lo in rows),
-                           name=label, color="#1d4ed8", fill="#60a5fa",
-                           radius=2, show=show, opacity=0.7)
+    # The popup is what makes a reference well answerable rather than merely
+    # visible -- "which well is this" is the whole reason to draw points at all
+    # instead of a density hex. Every field is one the master states; a column
+    # it leaves NULL shows blank rather than a guess.
+    _f = ["uwi", "operator", "county", "state", "type", "status", "td", "spud"]
+    if detail:
+        n_drawn = points_layer(
+            m, ((la, lo, nm, uwi, op, cty, prov, ty, stat, td, spud)
+                for nm, la, lo, uwi, op, cty, prov, ty, stat, td, spud in rows),
+            name=label, color="#1d4ed8", fill="#60a5fa", radius=2, show=show,
+            opacity=0.7, extra=_f, popup_fields=["nm"] + _f,
+            popup_aliases=["Well", "UWI", "Operator", "County", "State",
+                           "Type", "Status", "TD", "Spud"])
+    else:
+        n_drawn = points_layer(m, ((la, lo, nm) for nm, la, lo in rows),
+                               name=label, color="#1d4ed8", fill="#60a5fa",
+                               radius=2, show=show, opacity=0.7)
     # in_scope is None when capped: "we do not know, and finding out costs
     # more than the answer is worth". Never 0, which would read as "none here".
     return n_drawn, in_scope
