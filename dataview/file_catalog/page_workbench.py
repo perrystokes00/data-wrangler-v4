@@ -3062,6 +3062,72 @@ def _toggle_flag(engine, inv_id: str, flag: bool):
         st.error(f"Flag failed: {e}")
 
 
+# Columns of FILE_WELL_HEADER that are NOT evidence the file said anything.
+# Keys and provenance, obviously -- and two that look like content and are not:
+#   REPORT_TYPE is assigned from the FILE TYPE, so every .doc carries 'OFFICE'
+#               whether or not a word was read out of it.
+#   CONFIDENCE  is a score ABOUT the extraction; 0.00 is not a fact about a well.
+# Measured 24 Aug: teapot_3d_load.doc and Synthetic.doc each filled 1 of 25
+# columns, and that one column was REPORT_TYPE='OFFICE'. Counting the ROW as
+# extraction kept 16 of 20 blocklisted files, including every useless one --
+# right question, wrong test, the shape this codebase keeps meeting.
+_NOT_EVIDENCE = {"WELL_HEADER_ID", "INVENTORY_ID", "EXTRACTED_DATE",
+                 "EXTRACTED_BY", "REPORT_TYPE", "CONFIDENCE"}
+
+
+def _has_real_extraction(con, inv_id):
+    """Did this file actually yield anything worth a catalog row?
+
+    True when ANY of:
+      * a dv_* row is attributed to it. This one is not about bloat, it is
+        about provenance: delete the catalog row and those rows cite a source
+        nothing can resolve -- the exact break that left 1,317 dv_well rows
+        orphaned in August. Checked FIRST for that reason.
+      * a FILE_SEIS_HEADER row exists. Seismic headers are substantive by
+        construction; there is no label-only variant.
+      * a FILE_WELL_HEADER row carries a value in any column that is not a key,
+        provenance, the file-type label, or a confidence score.
+
+    The dv_ sweep is derived from INFORMATION_SCHEMA rather than a hand-kept
+    list, for the reason MIRROR_TABLES exists as a cautionary tale.
+    """
+    from sqlalchemy import text as _t
+
+    dv = [r[0] for r in con.execute(_t("""
+        SELECT t.name FROM sys.tables t
+          JOIN sys.schemas s ON s.schema_id = t.schema_id
+          JOIN sys.columns c ON c.object_id = t.object_id
+         WHERE s.name = 'dataview' AND c.name = 'INVENTORY_ID'
+         ORDER BY t.name""")).fetchall()]
+    if dv:
+        union = " UNION ALL ".join(
+            f"SELECT 1 AS hit FROM dataview.[{t}] WHERE INVENTORY_ID = :id"
+            for t in dv)
+        if con.execute(_t(f"SELECT TOP 1 hit FROM ({union}) q"),
+                       {"id": inv_id}).fetchone():
+            return True
+
+    if con.execute(_t("SELECT TOP 1 1 FROM file_catalog.FILE_SEIS_HEADER "
+                      "WHERE INVENTORY_ID = :id"), {"id": inv_id}).fetchone():
+        return True
+
+    cols = [r[0] for r in con.execute(_t("""
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = 'file_catalog'
+           AND TABLE_NAME  = 'FILE_WELL_HEADER'""")).fetchall()]
+    ev = [c for c in cols if c.upper() not in _NOT_EVIDENCE]
+    if not ev:
+        return False
+    # CONVERT then NULLIF, so '' and '   ' count as absent the way NULL does.
+    where = " OR ".join(
+        f"NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(4000), [{c}]))), '') IS NOT NULL"
+        for c in ev)
+    return bool(con.execute(
+        _t(f"SELECT TOP 1 1 FROM file_catalog.FILE_WELL_HEADER "
+           f"WHERE INVENTORY_ID = :id AND ({where})"),
+        {"id": inv_id}).fetchone())
+
+
 def _mark_bad(engine, inv_id, fpath, fname=None, size_kb=None, reason=None):
     """Fingerprint a file as bad (junk / badly formatted) so the next crawl
     skips it, DROP THE ROWS IT STAGED, and retire its catalog row as SKIPPED.
@@ -3172,12 +3238,38 @@ def _mark_bad(engine, inv_id, fpath, fname=None, size_kb=None, reason=None):
         # Deleting the row instead threw away the file's entire catalog history
         # and the join path every report and lineage query needs. The crawl skip
         # reads BAD_FILE, not the row's absence, so blocklisting still works.
-        con.execute(_t("""
-            UPDATE file_catalog.GLOBAL_FILE_CATALOG
-               SET CATALOG_READINESS = 'SKIPPED',
-                   ROW_CHANGED_DATE  = GETUTCDATE()
-             WHERE INVENTORY_ID = :id
-        """), {"id": inv_id})
+        # RETIRE WHAT HAS A HISTORY; REMOVE WHAT NEVER HAD ONE.
+        #
+        # Retiring rather than deleting is right for a file that produced
+        # something: the row is the join path every lineage query needs, and
+        # deleting it once left dv_ rows citing a source nothing could resolve.
+        # None of that applies to a file that yielded nothing. Its row records
+        # a path, a size and a list of everything it did not contain, which is
+        # bloat wearing the costume of history -- and BAD_FILE already holds
+        # the path AND the content hash, so the crawl still skips it (the skip
+        # reads BAD_FILE, never the row's absence).
+        #
+        # Measured 24 Aug: of 20 blocklisted files, 4 had no header row at all
+        # and 4 more had one filled solely with REPORT_TYPE='OFFICE'. Those 8
+        # rows are what this removes; the other 12 carry real content and stay.
+        #
+        # Restore works either way: _unmark_bad clears BAD_FILE, and because
+        # INVENTORY_ID is a deterministic hash of the path, a re-scan rebuilds
+        # a removed row under the SAME id.
+        if _has_real_extraction(con, inv_id):
+            con.execute(_t("""
+                UPDATE file_catalog.GLOBAL_FILE_CATALOG
+                   SET CATALOG_READINESS = 'SKIPPED',
+                       ROW_CHANGED_DATE  = GETUTCDATE()
+                 WHERE INVENTORY_ID = :id
+            """), {"id": inv_id})
+        else:
+            # The empty header row goes with it -- leaving it behind would
+            # orphan the very thing this is meant to stop accumulating.
+            con.execute(_t("DELETE FROM file_catalog.FILE_WELL_HEADER "
+                           "WHERE INVENTORY_ID = :id"), {"id": inv_id})
+            con.execute(_t("DELETE FROM file_catalog.GLOBAL_FILE_CATALOG "
+                           "WHERE INVENTORY_ID = :id"), {"id": inv_id})
     return dropped
 
 
@@ -4109,6 +4201,93 @@ def _tab_status(engine, dialect):
         _status_run(engine)
         st.session_state["sb_nonce"] = _nonce + 1
         st.rerun()
+
+    # ── The blocklist ───────────────────────────────────────
+    # BAD_FILE is the AUTHORITATIVE list of rejected files, and it has to be:
+    # rejecting a file that extracted nothing now removes its catalog row, so
+    # the grid above cannot show them all any more. Filtering State = SKIPPED
+    # finds only the rejects that kept a row; this panel finds every one, and
+    # for a pruned file it is the only place it exists at all.
+    #
+    # A CONTAINER, NOT AN EXPANDER. Status & Backlog already opens expanders of
+    # its own and Streamlit refuses to nest them -- the failure surfaces on
+    # whatever page draws next, which is how a layout error once got reported
+    # as a corrupt SEG-Y file.
+    with st.container(border=True):
+        try:
+            _bl = pd.read_sql(
+                "SELECT b.INVENTORY_ID, b.FILE_NAME, b.FILE_SIZE_KB, b.REASON, "
+                "       b.MARKED_DATE, b.FILE_PATH, "
+                "       CASE WHEN g.INVENTORY_ID IS NULL THEN 'row removed' "
+                "            ELSE 'row kept' END AS CATALOG_ROW "
+                "  FROM file_catalog.BAD_FILE b "
+                "  LEFT JOIN file_catalog.GLOBAL_FILE_CATALOG g "
+                "         ON g.INVENTORY_ID = b.INVENTORY_ID "
+                " ORDER BY b.MARKED_DATE DESC", engine)
+        except Exception as _be:
+            _bl = pd.DataFrame()
+            st.caption(f"Blocklist unavailable: {type(_be).__name__}: {_be}")
+
+        if _bl.empty:
+            st.markdown("**🚫 Blocklist** — empty. Nothing has been rejected.")
+        else:
+            st.markdown(f"**🚫 Blocklist — {len(_bl):,} rejected file(s)**")
+            st.caption(
+                "Every rejected file, whether or not it kept a catalog row. "
+                "`row removed` means the file had extracted nothing, so its "
+                "catalog entry was dropped rather than retired — restoring it "
+                "clears the blocklist, and the next scan of its folder rebuilds "
+                "the entry under the same id.")
+            _blv = _bl.drop(columns=["INVENTORY_ID"]).copy()
+            _blv.insert(0, "Select", False)
+            _bled = st.data_editor(
+                _blv, hide_index=True, use_container_width=True,
+                key=f"sb_blocklist_{_nonce}_editor",
+                disabled=[c for c in _blv.columns if c != "Select"],
+                column_config={
+                    "Select": st.column_config.CheckboxColumn("✓", width="small"),
+                    "FILE_NAME": st.column_config.TextColumn("File", width="medium"),
+                    "FILE_SIZE_KB": st.column_config.NumberColumn("KB", width="small"),
+                    "REASON": st.column_config.TextColumn("Why", width="large"),
+                    "MARKED_DATE": st.column_config.TextColumn("When", width="small"),
+                    "FILE_PATH": st.column_config.TextColumn("Path", width="large"),
+                    "CATALOG_ROW": st.column_config.TextColumn("Catalog", width="small"),
+                })
+            try:
+                _blsel = [i for i, v in enumerate(_bled["Select"]) if v]
+            except Exception:
+                _blsel = []
+            if st.button(f"♻ Restore {len(_blsel)} from blocklist",
+                         key="sb_blrestore", use_container_width=True,
+                         disabled=not _blsel,
+                         help="Clears the blocklist entry and, where the catalog "
+                              "row survived, marks the file pending again. A file "
+                              "whose row was removed comes back on the next scan "
+                              "of its folder."):
+                if not _blsel:
+                    st.error("Nothing ticked — nothing was changed.")
+                    st.stop()
+                _n_ok, _n_rescan, _bfail = 0, 0, []
+                for _i in _blsel:
+                    _row = _bl.iloc[_i]
+                    try:
+                        _unmark_bad(engine, str(_row["INVENTORY_ID"]))
+                        _n_ok += 1
+                        if _row["CATALOG_ROW"] == "row removed":
+                            _n_rescan += 1
+                    except Exception as _re:
+                        _bfail.append(f"{_row['FILE_NAME']}: "
+                                      f"{type(_re).__name__}: {_re}")
+                st.success(
+                    f"Restored {_n_ok} file(s) off the blocklist."
+                    + (f" {_n_rescan} had no catalog row left — re-scan their "
+                       f"folder to bring them back." if _n_rescan else
+                       " Run capture to re-stage their rows."))
+                if _bfail:
+                    st.error("Some restores failed: " + " | ".join(_bfail))
+                _status_run(engine)
+                st.session_state["sb_nonce"] = _nonce + 1
+                st.rerun()
 
     # ── Export ───────────────────────────────────────────────────────────────
     import time as _tm

@@ -1971,6 +1971,88 @@ def tier_units(res, verbose=False):
     check("reject: a single click, because restore reverses all three parts",
           _reject_is_reversible)
 
+    def _reject_prunes_only_empty_rows():
+        # A REJECTED FILE THAT PRODUCED NOTHING KEEPS NO CATALOG ROW. Retiring
+        # rather than deleting is right for a file with a history -- the row is
+        # the join path lineage needs. A file that yielded nothing has no
+        # history; its row records a path, a size, and a list of everything it
+        # did not contain. BAD_FILE already holds the path and the content
+        # hash, and the crawl skip reads BAD_FILE, never the row's absence.
+        #
+        # THE PROVENANCE CHECK IS THE LOAD-BEARING PART. dv_strat_interval.csv
+        # has no header row and no cat_* rows, so a test that looked only there
+        # called it empty -- and 512 rows in dv_strat_interval cite its
+        # INVENTORY_ID. Deleting its catalog row would have orphaned every one,
+        # which is the break that left 1,317 dv_well rows citing an
+        # unresolvable source in August. dv_* is asked FIRST for that reason.
+        import inspect
+        from dataview.file_catalog import page_workbench as _pw
+
+        assert hasattr(_pw, "_has_real_extraction"), \
+            "the emptiness test is gone; reject would prune every catalog row"
+        src = inspect.getsource(_pw._has_real_extraction)
+
+        _dv = src.find("SELECT t.name FROM sys.tables t")
+        _wh = src.find("FROM file_catalog.FILE_WELL_HEADER")
+        assert _dv >= 0, (
+            "the dv_* provenance sweep is gone from _has_real_extraction -- a "
+            "rejected file whose rows already promoted would lose the catalog "
+            "row those rows are attributed through")
+        assert _dv < _wh, (
+            "the dv_* provenance sweep no longer runs before the header test; "
+            "it is the check that must not be skipped")
+        # AND IT MUST ACTUALLY ASK dataview. Asserting the query's SHAPE is not
+        # enough: pointing it at a schema that does not exist returns no tables,
+        # every file then looks empty, and the row with 512 promoted rows behind
+        # it gets pruned. The first version of this check passed that mutation.
+        assert "'dataview'" in src[_dv:_wh], (
+            "the provenance sweep no longer names the dataview schema, so it "
+            "finds no tables, every rejected file reads as empty, and rows "
+            "already promoted lose the catalog entry they are attributed to")
+        assert "INVENTORY_ID" in src[_dv:_wh],             "the provenance sweep no longer filters on INVENTORY_ID"
+        assert "INFORMATION_SCHEMA" in src, (
+            "the dv_/column sweep is hand-listed again rather than derived -- "
+            "a hand-kept list is what MIRROR_TABLES exists to warn about")
+
+        # REPORT_TYPE and CONFIDENCE must not count as evidence. Every .doc
+        # carries REPORT_TYPE='OFFICE' whether or not a word was read from it,
+        # and CONFIDENCE is a score ABOUT the extraction. Counting either kept
+        # 16 of 20 blocklisted files, including all the useless ones.
+        assert "REPORT_TYPE" in _pw._NOT_EVIDENCE, (
+            "REPORT_TYPE counts as extracted content again, so a .doc whose "
+            "only value is the file-type label 'OFFICE' keeps a catalog row")
+        assert "CONFIDENCE" in _pw._NOT_EVIDENCE, \
+            "CONFIDENCE counts as content, but 0.00 is not a fact about a well"
+
+        # _mark_bad must do BOTH: retire when there is something to keep,
+        # remove when there is not. One branch without the other is either the
+        # old bloat or a provenance break.
+        mb = inspect.getsource(_pw._mark_bad)
+        assert "_has_real_extraction" in mb, \
+            "_mark_bad no longer asks whether the row is worth keeping"
+        assert "CATALOG_READINESS = 'SKIPPED'" in mb, \
+            "_mark_bad no longer retires the row of a file that DID extract"
+        assert "DELETE FROM file_catalog.GLOBAL_FILE_CATALOG" in mb, \
+            "_mark_bad no longer removes the row of a file that extracted " \
+            "nothing, so the catalog goes on accumulating empty entries"
+
+        # And the pruned file must still be findable. Reject is one click
+        # BECAUSE restore exists; a file whose catalog row is gone cannot be
+        # found by filtering State = SKIPPED, so the blocklist panel is the
+        # only surface that still reaches it.
+        page = inspect.getsource(_pw)
+        assert 'key="sb_blrestore"' in page, (
+            "the blocklist restore panel is gone -- a rejected file whose "
+            "catalog row was pruned now has no way back from the UI, and "
+            "one-click Reject becomes a one-way door again")
+        _i = page.index('key=f"sb_blocklist_')
+        _win = page[max(0, _i - 2000):_i]
+        assert "st.container(border=True)" in _win and "st.expander" not in _win[-600:], \
+            "the blocklist panel opens an expander, but Status & Backlog draws " \
+            "expanders of its own and Streamlit refuses to nest them"
+    check("reject: prunes an empty catalog row, never one with provenance",
+          _reject_prunes_only_empty_rows)
+
     return res
 
 
