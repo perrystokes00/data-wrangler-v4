@@ -8312,17 +8312,22 @@ def run(engine=None):
         _msg = st.empty()
         _msg.info(f"🗺 Building map for {len(dff):,} wells…")
 
-        # CANVAS IN H3 MODE ONLY. prefer_canvas was removed globally because
-        # Leaflet.markercluster needs SVG children to render its cluster
-        # bubbles, and with clustering on the marker count is low (~50-100
-        # bubbles + viewport markers) so SVG is fine. That reasoning is about
-        # MARKERS. H3 mode draws thousands of hex polygons and no cluster, so
-        # the constraint does not apply and canvas is exactly what it wants:
-        # one <canvas> repaint instead of thousands of SVG nodes in the DOM.
-        _canvas = (st.session_state.get("map_mode", "none") == "h3")
+        # NO prefer_canvas. THE COMMENT THAT WAS HERE WAS RIGHT AND I
+        # OVERRODE IT. It said Leaflet.markercluster needs SVG children to
+        # render its cluster bubbles, so canvas was removed globally. I
+        # re-enabled it for H3 mode on the reasoning that H3 draws hexes and
+        # no cluster -- and that is simply false: H3 mode shows the hex layer
+        # ALONGSIDE marker layers (viewport selection, GOM markers, the
+        # clustered well set). Canvas plus markercluster throws during map
+        # init, and a Leaflet map that throws while initialising renders
+        # nothing at all -- no basemap, no layers, a white rectangle.
+        #
+        # The canvas was never where the win came from anyway. Build and
+        # serialise are PYTHON-side costs, and the 16x came from replacing
+        # 14,727 folium.Polygon objects with one GeoJson layer; canvas only
+        # changes how the browser paints what it is given. That change stays.
         m = folium.Map(location=[lat0, lon0], zoom_start=zoom0,
                        tiles=bm["tiles"], attr=bm["attr"],
-                       prefer_canvas=_canvas,
                        max_zoom=bm.get("max_zoom", 19))
 
         # Every OTHER basemap as a selectable layer, so the map's own layer

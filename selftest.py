@@ -2106,6 +2106,55 @@ def tier_units(res, verbose=False):
     check("well paths: only computed where the offset would show on a map",
           _well_path_offset_gate)
 
+    def _map_never_prefers_canvas():
+        # LEAFLET.MARKERCLUSTER NEEDS SVG CHILDREN. With prefer_canvas the
+        # cluster plugin throws during map init, and a Leaflet map that throws
+        # while initialising renders NOTHING -- no basemap, no layers, a white
+        # rectangle. There is no error on the page and no exception in Python,
+        # which is what makes it expensive to diagnose.
+        #
+        # A COMMENT SAYING THIS WAS ALREADY THERE and did not stop it being
+        # re-enabled on 24 Aug, on the reasoning that H3 mode draws hexes and
+        # no cluster. That is false: H3 mode shows the hex layer ALONGSIDE
+        # marker layers -- viewport selection, GOM markers, the clustered well
+        # set. A rule that is only written down gets broken; this one is
+        # checked now.
+        #
+        # And it bought nothing. Measured at 14,727 hex cells, canvas on
+        # against off: 1.34s and 1.37s, identical 10.4 MB. Build and serialise
+        # are PYTHON-side costs; canvas only changes how the browser paints
+        # what it is handed. The 21x came from using one GeoJson layer instead
+        # of 14,727 folium.Polygon objects, and that is untouched.
+        import ast
+        import inspect
+        from dataview.mapping import page_well_map as _pw
+
+        tree = ast.parse(inspect.getsource(_pw).replace("\r\n", "\n"))
+        bad = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = (fn.attr if isinstance(fn, ast.Attribute)
+                    else getattr(fn, "id", ""))
+            if name != "Map":
+                continue
+            for kw in node.keywords:
+                if kw.arg == "prefer_canvas":
+                    # Only a literal False is safe; anything computed can be
+                    # True at runtime, which is exactly how it came back.
+                    lit = getattr(kw.value, "value", "not-a-literal")
+                    if lit is not False:
+                        bad.append(ast.unparse(kw))
+        assert not bad, (
+            "folium.Map is being given prefer_canvas again: "
+            + "; ".join(bad)
+            + ". Leaflet.markercluster needs SVG children, and H3 mode shows "
+              "marker layers alongside the hexes, so this renders a blank map "
+              "with no error anywhere. It also measured no faster.")
+    check("map: prefer_canvas stays off, markercluster needs SVG",
+          _map_never_prefers_canvas)
+
     def _loader_key_transforms_agree():
         # TWO FAILURES, ONE ROOT: a key transform applied on one side only.
         #
