@@ -3311,7 +3311,7 @@ def _typed(expr, sqltype):
 
 
 def build_promote_sql(engine, target, cmap, functions, schema="dataview", stg=None, parsed=None,
-                      holds_out=None, inventory_id=None):
+                      holds_out=None, inventory_id=None, stats_out=None):
     """Build the idempotent INSERT…SELECT that promotes stg → dataview.<target>.
     Transforms: de-sep identifiers, entity SHA1, function rules, audit stamp; NOT EXISTS on PK.
     Pass `parsed` (FKC, COLS, KIND) to avoid re-introspecting the whole schema per table.
@@ -3440,19 +3440,73 @@ def build_promote_sql(engine, target, cmap, functions, schema="dataview", stg=No
         else:
             continue                      # can't determine the join -> old behavior
         e = col_exprs[ccol]
-        hold_filters.append((parent, pcol,ccol,
+        hold_filters.append((parent, pcol, ccol,
                              f"({e} IS NULL OR EXISTS (SELECT 1 FROM "
-                             f"{schema}.{parent.lower()} p WHERE p.[{pcol}] = {e}))"))
-    if holds_out is not None:
-        holds_out.extend(hold_filters)
-
+                             f"{schema}.{parent.lower()} p WHERE p.[{pcol}] = {e}))",
+                             None))
     pk = _table_pk_live(engine, target, schema)
     pk_in = [p for p in (pk or []) if p in insert_cols]
+
+    # A BLANK PK COMPONENT IS NOT A DUPLICATE KEY. The dedupe below keeps one
+    # row per PK because staging legitimately repeats keys (reference data
+    # especially). But when a PK column was never mapped, EVERY row of a group
+    # lands in the same partition and all but one are discarded -- silently,
+    # and the count looks like a successful load minus some holds.
+    #
+    # Teapot's formation tops, 24 Aug: UNIT_CODE (59 distinct values) was not
+    # mapped to strat_unit_id, so the PK (uwi, strat_unit_id, interp_id)
+    # collapsed to (uwi, '', '1') and 7,285 staged tops became 1,031 rows --
+    # exactly one per well, up to 47 thrown away per well, with nothing said.
+    # Wrong is worse than missing, and this was both: fewer rows than the
+    # source, presented as complete.
+    #
+    # Held, not dropped: the rows stay in staging and promote on a later run
+    # once the column is mapped, the same as an absent-parent hold.
+    for _pkc in pk_in:
+        _e = col_exprs.get(_pkc)
+        if not _e:
+            continue
+        hold_filters.append((
+            None, _pkc, _pkc,
+            f"NULLIF({_e}, '') IS NOT NULL",
+            f"[{_pkc}] is part of the primary key of {target} but this row "
+            f"supplies no value for it, so every such row would collapse onto "
+            f"the same key and all but one be discarded. Map a source column "
+            f"to it, then re-run"))
+
+    if holds_out is not None:
+        holds_out.extend(hold_filters)
     pk_join = " AND ".join(f"d.[{p}] = src.[{p}]" for p in pk_in)
     sel = ",\n       ".join(select_cols)
     inner = f"SELECT {sel}\n  FROM {stg} s"
     if hold_filters:
         inner += "\n  WHERE " + "\n    AND ".join(f[3] for f in hold_filters)
+    # WHAT THE DEDUPE IS ABOUT TO THROW AWAY, counted before it happens.
+    #
+    # A schema rule cannot tell a harmless unmapped PK column from a ruinous
+    # one. dv_well_formation_top.interp_id defaults to '1' and is never mapped;
+    # that is FINE once strat_unit_id carries a real value, and fatal when it
+    # does not. Same column, same schema, opposite verdicts -- so the question
+    # is not "is a PK column unmapped" but "does this data collapse", and only
+    # the data can answer it.
+    #
+    # Teapot's tops, 24 Aug: UNIT_CODE was mapped to __SKIP__, so the key became
+    # (uwi, '', '1') and 7,285 staged rows became 1,031 -- one per well, up to
+    # 47 discarded each, reported as a successful load. The rows were not
+    # rejected or held; ROW_NUMBER simply kept the first and the rest ceased to
+    # exist. Wrong is worse than missing, and this was both.
+    if stats_out is not None and pk_in:
+        _keyexpr = ", '|', ".join(f"ISNULL(CAST({col_exprs[p]} AS nvarchar(400)), '')"
+                                  for p in pk_in if p in col_exprs)
+        if _keyexpr:
+            _w = (" WHERE " + " AND ".join(f[3] for f in hold_filters)
+                  if hold_filters else "")
+            stats_out["dedupe_sql"] = (
+                f"SELECT COUNT(*) - COUNT(DISTINCT CONCAT({_keyexpr}, ''))"
+                f" FROM {stg} s{_w}")
+            stats_out["pk_cols"] = list(pk_in)
+            stats_out["pk_unmapped"] = [p for p in (pk or []) if p not in col_exprs]
+
     if pk_in:
         # keep one row per PK — staging may contain duplicate keys (common in reference data),
         # and NOT EXISTS only guards against rows already in the target, not within the batch
@@ -3790,10 +3844,11 @@ def render_promote(ss, server, database, schema="dataview"):
                     for _s_p in [s for s, t in _cmap_p.items()
                                  if str(t).lower() == "inventory_id"]:
                         _cmap_p.pop(_s_p, None)
+                _stats = {}
                 sql, cols, pk = build_promote_sql(eng, target, _cmap_p, funcs_all.get(skey, []),
                                                   schema, stg=stg_tbl, parsed=parsed,
                                                   holds_out=_holds,
-                                                  inventory_id=_inv_p)
+                                                  inventory_id=_inv_p, stats_out=_stats)
                 build_t = time.perf_counter() - tb
                 tc = time.perf_counter()
                 with eng.connect() as cx:
@@ -3813,7 +3868,7 @@ def render_promote(ss, server, database, schema="dataview"):
                 label = target if stg_tbl == stg_name(target) else f"{target} ⟵ {stg_tbl.split('.')[-1]}"
                 prev.append({"table": label, "target": target, "staged": staged,
                              "cols": len(cols), "sql": sql, "stg": stg_tbl,
-                             "holds": _holds,
+                             "holds": _holds, "stats": _stats,
                              "err": None, "build_t": build_t, "count_t": count_t})
             except Exception as e:
                 label = f"{meta.get(skey,(skey,''))[0]}"
@@ -3924,7 +3979,13 @@ def render_promote(ss, server, database, schema="dataview"):
                             cx.execute(text(p["sql"]))
                             after = cx.execute(text(f"SELECT COUNT(*) FROM {schema}.{t.lower()}")).scalar()
                         held_msgs = []
-                        for parent, pcol, ccol, _f in (p.get("holds") or []):
+                        # *_rest tolerates the 4-tuple shape this used to be;
+                        # a 5th element carries a reason for holds that are NOT
+                        # about a missing parent, whose message would otherwise
+                        # send the reader looking for a parent table that has
+                        # nothing to do with it.
+                        for parent, pcol, ccol, _f, *_rest in (p.get("holds") or []):
+                            _why = _rest[0] if _rest else None
                             try:
                                 # the filter expr references alias [s]
                                 n_held = cx.execute(text(
@@ -3932,12 +3993,41 @@ def render_promote(ss, server, database, schema="dataview"):
                                     f"WHERE NOT {_f}")).scalar() or 0
                             except Exception:
                                 n_held = None
-                            if n_held:
+                            if n_held and _why:
+                                held_msgs.append(
+                                    f"⏸ {n_held} row(s) HELD in staging — "
+                                    f"{_why}.")
+                            elif n_held:
                                 held_msgs.append(
                                     f"⏸ {n_held} row(s) HELD in staging — "
                                     f"[{ccol}] has no match in {parent}. They "
                                     f"promote automatically on the next run "
                                     f"once {parent} has those rows.")
+                        # THE DEDUPE MUST NOT BE SILENT. ROW_NUMBER keeps one
+                        # row per PK, which is right for genuinely repeated
+                        # keys and catastrophic when a PK column carries no
+                        # real value: Teapot's 7,285 tops became 1,031 that
+                        # way, one per well, and the run reported success.
+                        # Counting it costs one query and turns an invisible
+                        # loss into a line that names the columns to look at.
+                        _dsql = (p.get("stats") or {}).get("dedupe_sql")
+                        if _dsql:
+                            try:
+                                _dropped = cx.execute(text(_dsql)).scalar() or 0
+                            except Exception:
+                                _dropped = 0
+                            if _dropped:
+                                _pkc = ", ".join((p.get("stats") or {}).get("pk_cols") or [])
+                                _unm = (p.get("stats") or {}).get("pk_unmapped") or []
+                                held_msgs.append(
+                                    f"⚠ {_dropped:,} staged row(s) share a primary key "
+                                    f"({_pkc}) and only one of each was kept. "
+                                    + (f"Nothing maps to [{', '.join(_unm)}], so that part of "
+                                       f"the key is the same on every row — map it and "
+                                       f"re-run to keep them all."
+                                       if _unm else
+                                       "If those are not true duplicates, a key column is "
+                                       "carrying the same value on every row."))
                         log.append((label, after - before, round(time.perf_counter() - ti, 2), None,
                                     held_msgs))
                     except Exception as e:
@@ -4145,10 +4235,28 @@ def verify_promote(engine, maps, schema="dataview", staged=None, meta=None, sinc
                     mapped_all = False                       # generated / unmapped PK part
                     continue
                 if pkc in _IDENT:
-                    expr = f"REPLACE(REPLACE(REPLACE(LTRIM(RTRIM([s].[{src}])),'-',''),' ',''),'.','')"
+                    # THE PAD, NOT JUST THE DE-SEPARATION. Promote canonicalises
+                    # an identifier with _uwi14 at the write point -- strip
+                    # separators, then right-pad zeros to 14 -- so the target
+                    # holds '49025103970000' while staging holds the 12-digit
+                    # '490251039700'. De-separating alone leaves the two
+                    # different strings, EXISTS matches nothing, and a load that
+                    # worked perfectly reports itself as a total failure: all
+                    # 1,317 Teapot wells came back "-1317" while sitting in
+                    # dataview.
+                    #
+                    # _uwi14_sql is the one expression both sides of any
+                    # identifier comparison use. It already existed, with this
+                    # exact failure in its docstring, for build_promote_sql and
+                    # the repair UPDATE. This is the fourth site, and the one
+                    # that was still hand-rolling its own version.
+                    expr = _uwi14_sql(
+                        f"REPLACE(REPLACE(REPLACE(LTRIM(RTRIM([s].[{src}])),"
+                        f"'-',''),' ',''),'.','')")
+                    conds.append(f"{_uwi14_sql(f'd.[{pkc}]')} = {expr}")
                 else:
                     expr = f"LTRIM(RTRIM([s].[{src}]))"
-                conds.append(f"d.[{pkc}] = {expr}")
+                    conds.append(f"d.[{pkc}] = {expr}")
             try:
                 staged_n = cx.execute(text(f"SELECT COUNT(*) FROM {stg} s")).scalar()
                 dv_n = cx.execute(text(f"SELECT COUNT(*) FROM {schema}.{target.lower()}")).scalar()

@@ -2106,6 +2106,64 @@ def tier_units(res, verbose=False):
     check("well paths: only computed where the offset would show on a map",
           _well_path_offset_gate)
 
+    def _loader_key_transforms_agree():
+        # TWO FAILURES, ONE ROOT: a key transform applied on one side only.
+        #
+        # 1. VERIFY. promote canonicalises an identifier with _uwi14 at the
+        #    write point, so dv_well holds '49025103970000' while staging holds
+        #    the 12-digit '490251039700'. verify_promote de-separated but never
+        #    padded, so EXISTS matched nothing and a load that worked perfectly
+        #    reported "-1317" for all 1,317 Teapot wells. _uwi14_sql exists
+        #    precisely for this, with that failure in its docstring; verify was
+        #    the fourth site and the only one still hand-rolling its own.
+        #
+        # 2. DEDUPE. ROW_NUMBER keeps one row per PK, which is right for
+        #    repeated keys and ruinous when a PK column carries no real value.
+        #    UNIT_CODE mapped to __SKIP__ made the key (uwi, '', '1'), and
+        #    7,285 staged tops became 1,031 -- one per well, up to 47 discarded
+        #    each, reported as success.
+        import inspect
+        from dataview.import_data import bulk_dir_loader as _bdl
+
+        vp = inspect.getsource(_bdl.verify_promote)
+        assert "_uwi14_sql" in vp, (
+            "verify_promote no longer applies the UWI-14 pad, so it compares a "
+            "padded stored key against an unpadded staged one and reports a "
+            "correct load as a total failure")
+        # BOTH sides, not one -- applying the pad to the staged value alone is
+        # the same bug wearing the fix's clothes.
+        #
+        # COUNTING OCCURRENCES DOES NOT WORK: the comment above the code names
+        # _uwi14_sql twice, so a segment that had lost one CODE use still
+        # counted three and the mutation passed. Assert the two code shapes.
+        assert "expr = _uwi14_sql(" in vp,             "the STAGED side of the verify comparison is no longer padded"
+        assert "_uwi14_sql(f'd.[{pkc}]')" in vp, (
+            "the TARGET side of the verify comparison is no longer padded, so "
+            "a padded stored key is compared against an unpadded staged one "
+            "and every row reports as missing")
+
+        # The dedupe must be MEASURED, not assumed harmless.
+        sig = inspect.signature(_bdl.build_promote_sql)
+        assert "stats_out" in sig.parameters, \
+            "build_promote_sql no longer reports what the dedupe discards"
+        bp = inspect.getsource(_bdl.build_promote_sql)
+        for token in ("dedupe_sql", "pk_unmapped"):
+            assert token in bp, f"build_promote_sql no longer publishes {token}"
+        # CONCAT takes 2-254 arguments: with a single mapped PK column the
+        # one-argument form is a syntax error, which is how this was found.
+        assert "'')" in bp[bp.find("dedupe_sql"):bp.find("dedupe_sql") + 400], (
+            "the dedupe key expression can emit a one-argument CONCAT, which "
+            "SQL Server rejects -- keep the trailing '' that pads it to two")
+
+        # And the count must reach the operator. A statistic nobody prints is
+        # the silent loss it was meant to replace.
+        rp = inspect.getsource(_bdl)
+        assert "dedupe_sql" in rp[rp.find("held_msgs = []"):], (
+            "the promote loop never runs the dedupe count, so rows discarded "
+            "by ROW_NUMBER are still invisible")
+    check("loader: key transforms agree on both sides, and dedupe is not silent",
+          _loader_key_transforms_agree)
+
     return res
 
 
