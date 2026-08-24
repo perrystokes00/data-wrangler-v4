@@ -503,6 +503,82 @@ def dir_survey(path, w, rng, shown):
          f"{w.get('well_name','')} — Directional Survey 2024")
 
 
+def production_pdf(path, w, rng, shown):
+    """Monthly production as a PDF, for the File Catalog path.
+
+    WHY A PDF AS WELL AS A WORKBOOK. .xlsx is in TABULAR_EXTS, which the File
+    Catalog deliberately does not crawl -- spreadsheets belong to the Bulk
+    Tabular Loader. So a corpus whose production exists only as workbooks
+    leaves dv_prod_entity and dv_prod_volume empty no matter how many times the
+    pipeline runs, and the pipeline is not wrong to leave them empty.
+
+    THE TABLE IS THE INTERFACE. pdf_survey_catalog finds production by scanning
+    every table on every page for a header row containing OIL, FLUID or BOE,
+    then picks its columns by name -- DATE/DAY, OIL/BBL, GAS/MCF, WATER/WTR. So
+    this has to be a real reportlab Table with those words in its header, not
+    text laid out to look like one: pdfplumber only reports drawn tables, and a
+    column of numbers separated by spaces is invisible to it.
+
+    load_scout dedupes on (entity, period, fluid), so one row per month becomes
+    one volume per fluid per month rather than a collision.
+    """
+    try:
+        d0 = date.fromisoformat(str(w.get("completion_date"))[:10])
+    except Exception:
+        d0 = date(2019, 1, 1)
+    q = float(w.get("_qi") or rng.uniform(200, 900))
+    n = int(w.get("_months") or rng.randint(18, 48))
+    dec = float(w.get("_decline") or 0.03)
+    if n <= 0:
+        # A dry hole has no production history, and inventing one would put a
+        # producing well on a map where the operator plugged it.
+        n, q = 0, 0.0
+
+    rows, cum_o, cum_g = [], 0.0, 0.0
+    for m in range(n):
+        d = d0 + timedelta(days=30 * m)
+        oil = q * math.exp(-dec * m) * rng.uniform(0.88, 1.12)
+        gas = oil * rng.uniform(1.2, 2.6)
+        wtr = oil * rng.uniform(0.4, 2.4) * (1 + m / max(1, n))
+        days = rng.randint(26, 31) if m < n - 2 else rng.randint(0, 20)
+        cum_o += oil * days / 30.0
+        cum_g += gas * days / 30.0
+        rows.append([d.strftime("%Y-%m"), f"{oil:,.0f}", f"{gas:,.0f}",
+                     f"{wtr:,.0f}", str(days),
+                     "PRODUCING" if days else "SHUT-IN"])
+
+    summary = [
+        ["First Production", d0.isoformat(),
+         "Months Reported", str(n)],
+        ["Cumulative Oil (BBL)", f"{cum_o:,.0f}",
+         "Cumulative Gas (MCF)", f"{cum_g:,.0f}"],
+        ["Initial Rate (BOPD)", f"{q:,.0f}",
+         "Decline (nominal, /mo)", f"{dec:.4f}"],
+    ]
+
+    blocks = [("Production Summary",
+               (["Parameter", "Value", "Parameter", "Value"], summary,
+                [1.7, 1.5, 1.7, 1.5]))]
+    if rows:
+        blocks.append(
+            ("Monthly Production Volumes",
+             (["Date", "Oil (BBL)", "Gas (MCF)", "Water (BBL)", "Days On",
+               "Status"], rows, [0.95, 1.05, 1.05, 1.05, 0.8, 1.1])))
+    else:
+        blocks.append(("Monthly Production Volumes",
+                       "No production reported for this wellbore."))
+
+    _pdf(path, "MONTHLY PRODUCTION REPORT",
+         f"{w.get('field_name') or _field(w, rng)} — "
+         f"{w.get('operator_name', '')}",
+         _ident(w, shown, rng,
+                extra=[("Report Type", "Monthly Production"),
+                       ("Periods", str(n))]),
+         blocks,
+         f"CONFIDENTIAL — {w.get('operator_name','')} — "
+         f"{w.get('well_name','')} — Production Report")
+
+
 def image_only_pdf(path, w, rng):
     """A scan with no text layer — pdftotext returns nothing. The catalog should
     record 'no text extracted', not 'no well found'. Different failures needing
@@ -1290,8 +1366,19 @@ def generate(wells, out_dir, per_well, seed=42, log=print):
                         p = os.path.join(pdf_dir, f"{tag}_{fname_uwi}.pdf")
                         fn(p, ww, rng, shown_txt)
                     elif pick < 0.78 and have["xlsx"]:
-                        p = os.path.join(off_dir, f"PRODUCTION_{fname_uwi}.xlsx")
-                        production_xlsx(p, ww, rng)
+                        # HALF AND HALF. .xlsx is in TABULAR_EXTS and the
+                        # File Catalog does not crawl it, so a corpus whose
+                        # production is only ever a workbook leaves
+                        # dv_prod_volume empty however often the pipeline
+                        # runs. Splitting it exercises both loaders.
+                        if have["pdf"] and rng.random() < 0.5:
+                            p = os.path.join(pdf_dir,
+                                             f"PRODUCTION_{fname_uwi}.pdf")
+                            production_pdf(p, ww, rng, shown_txt)
+                        else:
+                            p = os.path.join(off_dir,
+                                             f"PRODUCTION_{fname_uwi}.xlsx")
+                            production_xlsx(p, ww, rng)
                     elif pick < 0.88 and have["xlsx"]:
                         p = os.path.join(off_dir, f"CORE_ANALYSIS_{fname_uwi}.xlsx")
                         core_xlsx(p, ww, rng)

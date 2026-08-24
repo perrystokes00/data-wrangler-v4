@@ -387,6 +387,10 @@ def classify_pdf(file_path: str) -> dict:
         elif "FORMATION" in text_upper and "TOPS" in text_upper:
             result["report_type"] = RT_FORMATION
             result["confidence"]  = 0.7
+        elif ("PRODUCTION REPORT" in text_upper
+              or "MONTHLY PRODUCTION" in text_upper):
+            result["report_type"] = RT_SCOUT
+            result["confidence"]  = 0.7
         elif "COMPLETION" in text_upper:
             result["report_type"] = RT_COMPLETION
             result["confidence"]  = 0.6
