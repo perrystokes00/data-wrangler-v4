@@ -548,9 +548,46 @@ def _walk(prev, target, step_ft, rng, sd, tightness=0.06):
     return prev + pull + rng.gauss(0, sd)
 
 
+def _hline(mnem, unit, value, descr, version="2.0"):
+    """One ~WELL / ~PARAMETER line, in the field order the declared VERSION
+    actually specifies.
+
+        LAS 2.0    MNEM.UNIT   VALUE : DESCRIPTION
+        LAS 1.2    MNEM.UNIT   DESCRIPTION : VALUE
+
+    THE 1.2 CASE USED TO BE A LIE. Every line was written 2.0-ordered and only
+    the VERS number changed, so the "las_1.2" variant was not a LAS 1.2 file at
+    all. lasio read it exactly as the standard says to and handed back every
+    field as its own label:
+
+        UWI    value='UNIQUE WELL IDENTIFIER'
+        LOG_ID value='LOG ID'
+
+    Four files in the corpus, and all four stuck: their curves staged under
+    log_id 'LOG ID' and their log header never staged, so promote held them on
+    a missing parent forever. The generator's own comment says this case exists
+    because "a parser that only ever meets unwrapped LAS 2.0 with a populated
+    UWI is not a tested parser" — true, and it was testing nothing, because the
+    fixture was malformed rather than merely old.
+
+    The order above was established by writing both bodies under both versions
+    and asking lasio which came back right, not from memory. The matrix is
+    symmetric: each order reads correctly under its own version and swapped
+    under the other.
+    """
+    left, right = ((descr, value) if str(version).startswith("1.2")
+                   else (value, descr))
+    return f" {mnem:<4}.{unit:<17}{str(left):<30}: {right}"
+
+
 def las_file(path, w, rng, shown="full", wrap=False, version="2.0",
              units="FT", null_val=-999.25):
-    """A LAS 2.0 file with lithology-driven, depth-correlated curves."""
+    """A LAS file with lithology-driven, depth-correlated curves.
+
+    `version` governs BOTH the VERS line and the ~WELL/~PARAMETER field order —
+    see _hline. Writing one without the other produces a file no conforming
+    reader can parse.
+    """
     td = float(w.get("final_td") or 9000)
     start = round(td * rng.uniform(0.12, 0.25), 1)
     stop = round(td * rng.uniform(0.90, 0.99), 1)
@@ -583,31 +620,39 @@ def las_file(path, w, rng, shown="full", wrap=False, version="2.0",
         f"{'MULTIPLE LINES PER DEPTH STEP' if wrap else 'ONE LINE PER DEPTH STEP'}",
         "",
         "~WELL INFORMATION",
-        f" UWI .                 {uwi_txt:<30}: UNIQUE WELL IDENTIFIER",
-        f" WELL.                 {w.get('well_name',''):<30}: WELL NAME",
-        f" COMP.                 {w.get('operator_name',''):<30}: COMPANY",
-        f" FLD .                 {_field(w, rng):<30}: FIELD",
-        f" SRVC.                 {rng.choice(SERVICE_COS).upper():<30}: SERVICE COMPANY",
-        f" DATE.                 {w.get('spud_date',''):<30}: LOG DATE",
-        f" STRT.{units:<17}{start:<30}: START DEPTH",
-        f" STOP.{units:<17}{stop:<30}: STOP DEPTH",
-        f" STEP.{units:<17}{step:<30}: STEP",
-        f" NULL.                 {null_val:<30}: NULL VALUE",
-        f" CNTY.                 {w.get('county',''):<30}: COUNTY",
-        f" STAT.                 {_abbr(w):<30}: STATE",
-        " CTRY.                 US                            : COUNTRY",
-        f" API .                 {_dashed(w['uwi']) if shown != 'none' else '':<30}: API NUMBER",
-        f" LOG_ID.               LOG_{w['uwi']}_1{'':<10}: LOG ID",
+        _hline("UWI", "", uwi_txt, "UNIQUE WELL IDENTIFIER", version),
+        _hline("WELL", "", w.get("well_name", ""), "WELL NAME", version),
+        _hline("COMP", "", w.get("operator_name", ""), "COMPANY", version),
+        _hline("FLD", "", _field(w, rng), "FIELD", version),
+        _hline("SRVC", "", rng.choice(SERVICE_COS).upper(), "SERVICE COMPANY",
+               version),
+        _hline("DATE", "", w.get("spud_date", ""), "LOG DATE", version),
+        _hline("STRT", units, start, "START DEPTH", version),
+        _hline("STOP", units, stop, "STOP DEPTH", version),
+        _hline("STEP", units, step, "STEP", version),
+        _hline("NULL", "", null_val, "NULL VALUE", version),
+        _hline("CNTY", "", w.get("county", ""), "COUNTY", version),
+        _hline("STAT", "", _abbr(w), "STATE", version),
+        _hline("CTRY", "", "US", "COUNTRY", version),
+        _hline("API", "", _dashed(w["uwi"]) if shown != "none" else "",
+               "API NUMBER", version),
+        _hline("LOG_ID", "", f"LOG_{w['uwi']}_1", "LOG ID", version),
         "",
         "~PARAMETER INFORMATION",
-        f" RUN .                 {rng.randint(1,3):<30}: RUN NUMBER",
-        f" EKB .{units:<17}{w.get('kb_elevation',''):<30}: KELLY BUSHING ELEVATION",
-        f" EGL .{units:<17}{w.get('ground_elevation',''):<30}: GROUND LEVEL ELEVATION",
-        f" TDD .{units:<17}{td:<30}: DRILLER TOTAL DEPTH",
-        f" BHT .DEGF             {rng.randint(140,240):<30}: BOTTOM HOLE TEMPERATURE",
-        f" MUD .                 {rng.choice(['WBM','OBM','SBM']):<30}: MUD TYPE",
-        f" MDEN.G/CC             {rng.uniform(1.05,1.35):<30.2f}: MUD DENSITY",
-        f" MATR.                 {rng.choice(['SAND','LIME','DOLO']):<30}: MATRIX FOR NEUTRON",
+        _hline("RUN", "", rng.randint(1, 3), "RUN NUMBER", version),
+        _hline("EKB", units, w.get("kb_elevation", ""),
+               "KELLY BUSHING ELEVATION", version),
+        _hline("EGL", units, w.get("ground_elevation", ""),
+               "GROUND LEVEL ELEVATION", version),
+        _hline("TDD", units, td, "DRILLER TOTAL DEPTH", version),
+        _hline("BHT", "DEGF", rng.randint(140, 240),
+               "BOTTOM HOLE TEMPERATURE", version),
+        _hline("MUD", "", rng.choice(["WBM", "OBM", "SBM"]), "MUD TYPE",
+               version),
+        _hline("MDEN", "G/CC", f"{rng.uniform(1.05, 1.35):.2f}", "MUD DENSITY",
+               version),
+        _hline("MATR", "", rng.choice(["SAND", "LIME", "DOLO"]),
+               "MATRIX FOR NEUTRON", version),
         "",
         "~CURVE INFORMATION",
     ]

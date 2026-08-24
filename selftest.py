@@ -1210,6 +1210,61 @@ def tier_units(res, verbose=False):
     check("streamlit: no expander nested inside another",
           _no_nested_expanders)
 
+    # 21. A GENERATED LAS MUST READ BACK. synth_docs wrote every ~WELL line in
+    #     LAS 2.0 order and changed only the VERS number for its "las_1.2"
+    #     case, so the 1.2 fixture was not a 1.2 file. lasio applied 1.2
+    #     semantics exactly as the standard says and handed back every field as
+    #     its own label — UWI='UNIQUE WELL IDENTIFIER', LOG_ID='LOG ID'. Four
+    #     files in the corpus, all four stuck: their curves staged under log_id
+    #     'LOG ID', their log header never staged, and promote held them on a
+    #     missing parent every run.
+    #
+    #     The generator's comment says the 1.2 case exists because "a parser
+    #     that only ever meets unwrapped LAS 2.0 with a populated UWI is not a
+    #     tested parser". Right — and it tested nothing, because a malformed
+    #     fixture exercises the reader's error handling, not its 1.2 support.
+    #
+    #     So the test is a ROUND TRIP, not an inspection of the text: write it
+    #     with the generator, read it with lasio, and require the values back.
+    #     Nothing short of that would have caught this — the file looked
+    #     perfectly well-formed, and the two orders are indistinguishable
+    #     without knowing the declared version.
+    def _las_roundtrips():
+        try:
+            import lasio
+        except ImportError:
+            return                       # imports tier owns a missing lasio
+        import random
+        import tempfile
+        from dataview.migration.synth_docs import las_file
+        w = {"uwi": "15041204660000", "well_name": "BAKER 13-8",
+             "operator_name": "Apache Corporation", "county": "15041",
+             "province_state": "15", "spud_date": "2020-01-28",
+             "final_td": 4200, "kb_elevation": 1210, "ground_elevation": 1198}
+        cases = [("2.0", False), ("2.0", True), ("1.2", False), ("1.2", True)]
+        p = os.path.join(tempfile.gettempdir(), "selftest_roundtrip.las")
+        try:
+            for vers, wrap in cases:
+                las_file(p, w, random.Random(7), version=vers, wrap=wrap)
+                las = lasio.read(p)
+                d = {i.mnemonic.upper(): i for i in las.well}
+                got_uwi = str(getattr(d.get("UWI"), "value", "") or "")
+                got_lid = str(getattr(d.get("LOG_ID"), "value", "") or "")
+                tag = f"VERS {vers}{' wrapped' if wrap else ''}"
+                assert got_uwi == w["uwi"], (
+                    f"{tag}: lasio read UWI as {got_uwi!r} — the ~WELL field "
+                    f"order does not match the declared version, so every "
+                    f"value comes back as its own description")
+                assert got_lid == f"LOG_{w['uwi']}_1", \
+                    f"{tag}: lasio read LOG_ID as {got_lid!r}"
+                assert len(las.curves) == 9, f"{tag}: {len(las.curves)} curves"
+                assert len(las.index) > 100, f"{tag}: {len(las.index)} rows"
+        finally:
+            if os.path.exists(p):
+                os.remove(p)
+    check("synth LAS: every version/wrap variant reads back correctly",
+          _las_roundtrips)
+
     return res
 
 
