@@ -3190,15 +3190,32 @@ def render_fk_resolution(ss, server, database, schema="dataview"):
                 from dataview.import_data import seed_from_master as _sfm
                 with eng.connect() as _cx:
                     _rows = _sfm.master_rows(_cx, seed_uwis)
-                _n = _sfm.seed(eng, _rows)
+                _n, _already = _sfm.seed(eng, _rows)
                 _skipped = len(seed_uwis) - len(_rows)
-                st.success(
-                    f"Seeded {_n} well(s) from {_sfm.MASTER} — name, operator "
-                    f"and location as the master states them, stamped "
-                    f"row_created_by='{_sfm.CREATED_BY}' so they can be found "
-                    f"or undone."
-                    + (f" {_skipped} had no master row and stay held."
-                       if _skipped else ""))
+                _tail = ((f" {_skipped} had no master row and stay held."
+                          if _skipped else ""))
+                # "Seeded 0" alone reads as failure when it means "already
+                # done" -- which is what a second Apply produces, the NOT
+                # EXISTS guard doing exactly its job.
+                if _n:
+                    st.success(
+                        f"Seeded {_n} well(s) from {_sfm.MASTER} — name, "
+                        f"operator and location as the master states them, "
+                        f"stamped row_created_by='{_sfm.CREATED_BY}' so they "
+                        f"can be found or undone."
+                        + (f" {_already} were already present."
+                           if _already else "") + _tail)
+                elif _already:
+                    st.info(
+                        f"Nothing to seed — all {_already} of these wells are "
+                        f"already in dv_well. A previous Apply seeded them; the "
+                        f"NOT EXISTS guard skipped them this time, which is a "
+                        f"clean re-run, not a failure." + _tail)
+                else:
+                    st.warning(
+                        f"Seeded nothing and found nothing already present. "
+                        f"The master describes none of the {len(seed_uwis)} "
+                        f"value(s) ticked." + _tail)
             except Exception as _se:
                 st.error(f"Seed from master failed: {type(_se).__name__}: {_se}")
 

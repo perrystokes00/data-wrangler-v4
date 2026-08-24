@@ -98,9 +98,24 @@ def main(argv=None):
             print("\nDRY RUN -- nothing written. Re-run with --apply to seed.")
             return 0
 
-    n = sfm.seed(eng, rows, source=a.source, created_by=a.created_by)
-    print(f"\nSeeded {n} well(s). Re-run Promote -- the held children lift "
-          f"on their own.")
+    n, already = sfm.seed(eng, rows, source=a.source, created_by=a.created_by)
+    if n:
+        print("")
+        print(f"Seeded {n} well(s)"
+              + (f" ({already} were already present)." if already else ".")
+              + " Re-run Promote -- the held children lift on their own.")
+    elif already:
+        print("")
+        print(f"Nothing to seed -- all {already} are already in dv_well. "
+              f"A clean re-run, not a failure.")
+    else:
+        # Neither inserted nor already present: the master describes
+        # none of what is left. Saying "all 0 are already in dv_well"
+        # here was true and useless.
+        print("")
+        print(f"Nothing to seed -- the reference master describes none "
+              f"of the {len(missing)} remaining well(s). They stay held, "
+              f"which is correct.")
     return 0
 
 

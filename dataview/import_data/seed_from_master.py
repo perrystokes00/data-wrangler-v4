@@ -40,6 +40,16 @@ CHILDREN = [("stg.dv_well_formation_top", "API_NUMBER"),
 CREATED_BY = "SEED_FROM_WELL_REF"
 
 
+# NEVER WRAP THE INDEXED COLUMN. LTRIM(RTRIM(col)) makes a predicate
+# non-sargable, and the master is 4,031,052 rows: measured 31.844s wrapped
+# against 0.029s bare, a factor of 1,100. It broke correctness too, not just
+# speed -- the Phase 4 grid ran this per render, and a lookup that did not
+# finish came back empty, which DISABLED the checkboxes it was meant to enable.
+#
+# Dropping the trim is safe on both sides: the values are already padded to 14
+# by pad_sql, and uwi14 / dv_well.uwi are char(14), which SQL Server compares
+# trailing-space-insensitively. The wrapped and bare forms match the same rows.
+# Trim the VALUE if you must; never the COLUMN.
 def pad_sql(expr):
     """The UWI-14 pad, the transform promote applies at the write point.
 
@@ -58,7 +68,7 @@ def orphan_uwis(conn):
     sql = (f"SELECT x.u FROM ({' UNION '.join(parts)}) x "
            f"WHERE x.u IS NOT NULL "
            f"AND NOT EXISTS (SELECT 1 FROM dataview.dv_well w "
-           f"WHERE LTRIM(RTRIM(w.uwi)) = x.u) ORDER BY x.u")
+           f"WHERE w.uwi = x.u) ORDER BY x.u")
     return [r[0] for r in conn.execute(sa.text(sql))]
 
 
@@ -78,7 +88,7 @@ def master_rows(conn, uwis):
         f"       g.surface_latitude, g.surface_longitude, g.county, "
         f"       g.province_state, g.total_depth, g.spud_date "
         f"  FROM {MASTER} g "
-        f" WHERE LTRIM(RTRIM(g.uwi14)) IN ({inlist})"))
+        f" WHERE g.uwi14 IN ({inlist})"))
     keys = ("uwi", "well_name", "operator", "field", "surface_latitude",
             "surface_longitude", "county", "province_state", "total_depth",
             "spud_date")
@@ -112,14 +122,20 @@ def unblocked_counts(conn, uwis):
 
 
 def seed(engine, rows, source=None, created_by=CREATED_BY):
-    """Insert the given master rows into dv_well. Returns rows written.
+    """Insert the given master rows into dv_well.
+
+    Returns (inserted, already_present). BOTH numbers, because "0" alone is a
+    lie of omission: a second Apply reported "Seeded 0 well(s)" after a first
+    one had seeded all 55, which reads as failure and is success. The loader's
+    own verify panel already draws this distinction -- "0 (already there)"
+    versus a fresh count -- and this owes the operator the same.
 
     NOT EXISTS-guarded per row, so re-running seeds nothing and a well another
-    load already owns is left alone.
+    load already owns is left alone: first one in wins.
     """
     import sqlalchemy as sa
     if not rows:
-        return 0
+        return 0, 0
     with engine.connect() as cx:
         live = {r[0].lower() for r in cx.execute(sa.text(
             "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
@@ -132,6 +148,14 @@ def seed(engine, rows, source=None, created_by=CREATED_BY):
         use.append("source")
     stamp = ", row_created_date" if "row_created_date" in live else ""
     stampv = ", SYSUTCDATETIME()" if "row_created_date" in live else ""
+    # Counted BEFORE the insert: afterwards every row exists and the two
+    # outcomes are indistinguishable.
+    with engine.connect() as cx:
+        present = cx.execute(sa.text(
+            "SELECT COUNT(*) FROM dataview.dv_well WHERE uwi IN ("
+            + ",".join("'" + str(r["uwi"]).replace("'", "''") + "'" for r in rows)
+            + ")")).scalar() or 0
+
     n = 0
     with engine.begin() as cx:
         for r in rows:
@@ -143,7 +167,6 @@ def seed(engine, rows, source=None, created_by=CREATED_BY):
             n += cx.execute(sa.text(
                 f"INSERT INTO dataview.dv_well ({', '.join(use)}{stamp}) "
                 f"SELECT {ph}{stampv} WHERE NOT EXISTS "
-                f"(SELECT 1 FROM dataview.dv_well w "
-                f" WHERE LTRIM(RTRIM(w.uwi)) = :uwi)"),
+                f"(SELECT 1 FROM dataview.dv_well w WHERE w.uwi = :uwi)"),
                 {k: vals.get(k) for k in set(use) | {"uwi"}}).rowcount or 0
-    return n
+    return n, present
