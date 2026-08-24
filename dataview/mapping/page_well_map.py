@@ -3899,6 +3899,29 @@ def _geog_linestring_pts(wkt):
     return pts
 
 
+def _popup_safe(s):
+    r"""Text safe to interpolate into a folium popup.
+
+    FOLIUM PUTS POPUP HTML INSIDE A BACKTICK TEMPLATE LITERAL, so anything
+    the JS template parser treats specially detonates the whole script -- and
+    a script that fails to parse renders no map at all: no basemap, no
+    layers, a white rectangle, with no error in Python and none on the page.
+
+    A WINDOWS PATH IS EXACTLY THAT. "C:\Bulk\Seismic\2D_SEGY" reaches the
+    browser raw, and "\2" is an OCTAL escape, which is illegal in a template
+    string. Node named it in one line -- "Octal escape sequences are not
+    allowed in template strings" -- after every Python-side check had passed:
+    the layer built, the counts were right, the HTML was produced.
+
+    GeoJsonPopup does not need this; its values travel as JSON and are
+    escaped on the way. Only hand-built popup HTML does.
+    """
+    return (str(s or "")
+            .replace("\\", "\\\\")     # backslash FIRST, or it doubles the rest
+            .replace("`", "\\`")
+            .replace("${", "\\${"))
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _seismic_line_paths(_engine, _v: int = 2):
     """Real 2D seismic line paths from dataview.dv_seis_line.geog.
@@ -8831,9 +8854,11 @@ def run(engine=None):
                                 f"<b>{_sl['survey']}</b><br>{_sl['line']}<br>"
                                 f"EPSG {_sl['epsg'] or '—'}<br>"
                                 f"{_sl['traces'] or '?'} traces"
-                                + (f"<br><b>💾 {_sl['file_name']}</b>"
+                                + (f"<br><b>💾 "
+                                   f"{_popup_safe(_sl['file_name'])}</b>"
                                    f"<br><span style='font-size:10px;"
-                                   f"word-break:break-all'>{_sl['file']}</span>"
+                                   f"word-break:break-all'>"
+                                   f"{_popup_safe(_sl['file'])}</span>"
                                    if _sl.get("file") else ""),
                                 max_width=320),
                         ).add_to(m)

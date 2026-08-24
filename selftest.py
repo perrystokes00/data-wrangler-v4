@@ -2155,6 +2155,60 @@ def tier_units(res, verbose=False):
     check("map: prefer_canvas stays off, markercluster needs SVG",
           _map_never_prefers_canvas)
 
+    def _popup_html_survives_a_windows_path():
+        # FOLIUM PUTS POPUP HTML INSIDE A BACKTICK TEMPLATE LITERAL, so a raw
+        # Windows path detonates the whole script: C:\Bulk\Seismic\2D_SEGY\...
+        # contains \2, an OCTAL escape, which is illegal in a template string.
+        # The parser rejects the entire block, Leaflet never initialises, and
+        # the map renders a white rectangle -- no error on the page, no
+        # exception in Python. Node named it in one line: "Octal escape
+        # sequences are not allowed in template strings."
+        #
+        # EVERY PYTHON-SIDE CHECK PASSED while this was broken. The layer
+        # built, the HTML was produced, the counts were right. That is why
+        # this check inspects the EMITTED markup rather than asking whether
+        # the code ran.
+        #
+        # GeoJsonPopup is not affected: its values travel as JSON and are
+        # escaped in transit. Only hand-built popup HTML needs the escaper.
+        import re
+        import folium
+        from dataview.mapping.page_well_map import _popup_safe
+
+        bs = chr(92)
+        path = ("C:" + bs + "Bulk" + bs + "Seismic" + bs + "2D_SEGY" + bs
+                + "085-ZBF" + bs + "x.segy")
+
+        # The escaper itself: a backslash must survive as an escaped pair, and
+        # the backtick and ${ that would close or interpolate the literal must
+        # be neutralised too.
+        out = _popup_safe(path)
+        assert bs + bs in out, "backslashes are no longer escaped for the template literal"
+        assert _popup_safe("a`b") == "a" + bs + "`b", "backtick not escaped"
+        assert _popup_safe("a${b}") == "a" + bs + "${b}", "${ not escaped"
+        # Order matters: escaping the backslash last would double the escapes
+        # it just added.
+        assert _popup_safe(bs + "`") == bs + bs + bs + "`", \
+            "escape order is wrong -- backslash must be escaped FIRST"
+
+        # And the emitted markup must contain no lone backslash-digit, which is
+        # the octal sequence that killed it.
+        m = folium.Map(location=[43, -106], zoom_start=7)
+        folium.PolyLine([[43, -106], [43.1, -106.1]],
+                        popup=folium.Popup(f"<b>line</b><br>{_popup_safe(path)}",
+                                           max_width=320)).add_to(m)
+        html = m._repr_html_()
+        i = html.find("Bulk")
+        assert i > 0, "the path did not reach the emitted popup at all"
+        window = html[i - 40:i + 200]
+        lone_octal = re.search(r"(?<!\\)\\[0-7]", window)
+        assert not lone_octal, (
+            "an unescaped backslash-digit reached the popup template literal "
+            "(" + repr(window[:120]) + ") -- this is the octal escape that "
+            "makes Leaflet fail to parse and the map render blank")
+    check("map: a Windows path in a popup cannot break the JS template",
+          _popup_html_survives_a_windows_path)
+
     def _loader_key_transforms_agree():
         # TWO FAILURES, ONE ROOT: a key transform applied on one side only.
         #
