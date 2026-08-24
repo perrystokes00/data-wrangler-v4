@@ -501,9 +501,10 @@ def _extract_fields(fpath: str, fext: str) -> dict:
             fields["report_type"]   = "WELL_LOG"
             try:
                 import lasio
+                from dataview.file_catalog.las_reader import read_las
                 # header-only: skip the curve-data array (faster, we only need
                 # the ~Well and ~Curve header sections).
-                las = lasio.read(fpath, ignore_data=True)
+                las = read_las(fpath, ignore_data=True)
                 def _wv(m):
                     try:
                         v = str(las.well[m].value).strip()
@@ -1576,7 +1577,8 @@ def _do_extract(fpath: str, fext: str, log=None) -> tuple:
 
         elif fext == ".las":
             import lasio
-            las = lasio.read(fpath)
+            from dataview.file_catalog.las_reader import read_las
+            las = read_las(fpath)
             df  = las.df().reset_index()
             return df.to_dict("records"), "Curve rows"
 
@@ -1928,6 +1930,7 @@ def _load_rows_to_catalog(engine, dialect, fpath, fext, uwi, rows):
             res["rt"] = "WELL_LOG"
             try:
                 import lasio, uuid as _uuid
+                from dataview.file_catalog.las_reader import read_las
                 from datetime import datetime as _dt
                 try:
                     from dataview.file_catalog.catalog_capture import capture as _cap
@@ -1935,7 +1938,7 @@ def _load_rows_to_catalog(engine, dialect, fpath, fext, uwi, rows):
                     from dataview.file_catalog.catalog_capture import capture as _cap
                 _now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
                 inv = well_info.get("inventory_id")
-                las = lasio.read(fpath)
+                las = read_las(fpath)
 
                 def _wv(*keys):
                     for k in keys:

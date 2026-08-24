@@ -164,7 +164,8 @@ def _view_las(file_path: str):
     import pandas as pd
     try:
         import lasio
-        las = lasio.read(file_path)
+        from dataview.file_catalog.las_reader import read_las
+        las = read_las(file_path)
     except Exception as e:
         st.error(f"LAS read failed: {e}")
         _view_text_fallback(file_path)

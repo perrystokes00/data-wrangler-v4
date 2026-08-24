@@ -57,7 +57,8 @@ def _summarize_las(file_path: str) -> dict:
     s = _base(file_path, "LAS")
     try:
         import lasio
-        las = lasio.read(file_path, ignore_header_errors=True)
+        from dataview.file_catalog.las_reader import read_las
+        las = read_las(file_path, ignore_header_errors=True)
 
         well    = las.well
         curves  = las.curves

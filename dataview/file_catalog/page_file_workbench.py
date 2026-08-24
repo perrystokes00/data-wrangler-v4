@@ -199,11 +199,12 @@ def _plot_las_curves(file_path: str, key: str):
     """Interactive multi-track plotly curve plot for LAS files."""
     try:
         import lasio
+        from dataview.file_catalog.las_reader import read_las
         import numpy as np
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
-        las = lasio.read(file_path, ignore_header_errors=True)
+        las = read_las(file_path, ignore_header_errors=True)
         all_curves = [c.mnemonic for c in las.curves
                       if c.mnemonic.upper() not in ("DEPT","DEPTH","MD","TVD")]
         if not all_curves:

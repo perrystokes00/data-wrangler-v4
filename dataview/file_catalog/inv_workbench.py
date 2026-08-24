@@ -447,7 +447,8 @@ def _cataloger_las(engine, dialect, inventory_id, file_path, group_file_id, ukey
         with st.spinner("Reading header…"):
             try:
                 import lasio
-                las = lasio.read(file_path, ignore_header_errors=True)
+                from dataview.file_catalog.las_reader import read_las
+                las = read_las(file_path, ignore_header_errors=True)
                 raw_sections = {}
                 for section_name, items in [
                     ("VERSION", las.version),

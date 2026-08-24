@@ -28,6 +28,7 @@ try:
         promote_las_file,
     )
     import lasio
+    from dataview.file_catalog.las_reader import read_las
     _AVAILABLE = True
 except ImportError as _err:
     _AVAILABLE = False
@@ -105,7 +106,7 @@ def _render_single(engine, source: str, load_values: bool):
         tmp_path = tmp.name
 
     try:
-        las = lasio.read(tmp_path, ignore_header_errors=True)
+        las = read_las(tmp_path, ignore_header_errors=True)
     except Exception as e:
         st.error(f"Could not parse LAS file: {e}")
         return

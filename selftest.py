@@ -1232,6 +1232,7 @@ def tier_units(res, verbose=False):
     def _las_roundtrips():
         try:
             import lasio
+            from dataview.file_catalog.las_reader import read_las
         except ImportError:
             return                       # imports tier owns a missing lasio
         import random
@@ -1241,12 +1242,15 @@ def tier_units(res, verbose=False):
              "operator_name": "Apache Corporation", "county": "15041",
              "province_state": "15", "spud_date": "2020-01-28",
              "final_td": 4200, "kb_elevation": 1210, "ground_elevation": 1198}
-        cases = [("2.0", False), ("2.0", True), ("1.2", False), ("1.2", True)]
+        cases = [("2.0", False), ("2.0", True), ("1.2", False), ("1.2", True),
+                 ("3.0", False)]
         p = os.path.join(tempfile.gettempdir(), "selftest_roundtrip.las")
         try:
             for vers, wrap in cases:
                 las_file(p, w, random.Random(7), version=vers, wrap=wrap)
-                las = lasio.read(p)
+                # Through the REPO's reader — that is what the pipeline uses,
+                # and for 3.0 it is what honours DLM.
+                las = read_las(p)
                 d = {i.mnemonic.upper(): i for i in las.well}
                 got_uwi = str(getattr(d.get("UWI"), "value", "") or "")
                 got_lid = str(getattr(d.get("LOG_ID"), "value", "") or "")
@@ -1259,6 +1263,28 @@ def tier_units(res, verbose=False):
                     f"{tag}: lasio read LOG_ID as {got_lid!r}"
                 assert len(las.curves) == 9, f"{tag}: {len(las.curves)} curves"
                 assert len(las.index) > 100, f"{tag}: {len(las.index)} rows"
+                # The curve data must be DATA, not a column of nulls. A
+                # delimiter the reader ignores does not raise — it returns
+                # nan, which every "did it load" check passes.
+                import numpy as _np
+                _gr = las.data[:, 1]
+                assert not _np.all(_np.isnan(_gr)), \
+                    f"{tag}: every GR sample is nan — the data section parsed " \
+                    f"as one column, which is what an unhonoured delimiter does"
+
+                # AND THE WRAPPER MUST BE LOAD-BEARING FOR 3.0. If raw lasio
+                # ever reads this correctly, las_reader has stopped being the
+                # reason it works and the DLM handling can be reconsidered —
+                # but until then, asserting only the happy path would let the
+                # wrapper be deleted with every test still green.
+                if vers == "3.0":
+                    _raw = lasio.read(p)
+                    _bad = (len(_raw.index) != len(las.index)
+                            or bool(_np.all(_np.isnan(_raw.data[:, 1]))))
+                    assert _bad, (
+                        "raw lasio now reads DLM-delimited 3.0 correctly — "
+                        "las_reader's delimiter handling may be redundant; "
+                        "re-measure before trusting either")
         finally:
             if os.path.exists(p):
                 os.remove(p)

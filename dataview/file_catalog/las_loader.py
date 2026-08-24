@@ -31,6 +31,7 @@ import pandas as pd
 
 try:
     import lasio
+    from dataview.file_catalog.las_reader import read_las
 except ImportError as e:
     raise ImportError("pip install lasio") from e
 
@@ -136,7 +137,7 @@ def scan_las_directory(folder: str) -> pd.DataFrame:
     rows = []
     for las_path in sorted(folder_path.glob("*.las")):
         try:
-            las = lasio.read(str(las_path), ignore_header_errors=True)
+            las = read_las(str(las_path), ignore_header_errors=True)
             las_uwi = extract_las_uwi(las)
         except Exception as e:
             las_uwi = f"ERROR: {e}"
@@ -679,7 +680,7 @@ def promote_las_file(
     }
 
     try:
-        las = lasio.read(str(las_path), ignore_header_errors=True)
+        las = read_las(str(las_path), ignore_header_errors=True)
     except Exception as e:
         result["error"] = f"LAS parse failed: {e}"
         return result

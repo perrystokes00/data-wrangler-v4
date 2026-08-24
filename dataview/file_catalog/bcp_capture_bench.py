@@ -29,7 +29,8 @@ def parse_curves(arg):
     fp, uwi = arg
     try:
         import lasio
-        las = lasio.read(fp, ignore_data=True)
+        from dataview.file_catalog.las_reader import read_las
+        las = read_las(fp, ignore_data=True)
     except Exception:
         return []
     def wv(*keys):

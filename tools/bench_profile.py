@@ -11,6 +11,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "modules")); sys.path.insert(0, HERE)
 from sqlalchemy import create_engine
 
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. Needed since this script started reading LAS through
+# dataview.file_catalog.las_reader. app_v4.py does the same insert.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 CONN = (r"DRIVER={ODBC Driver 18 for SQL Server};SERVER=localhost\SQLEXPRESS;"
         r"DATABASE=DataView_Demo;Trusted_Connection=yes;Encrypt=no")
 
@@ -21,6 +27,7 @@ def main():
     a = ap.parse_args()
 
     import lasio, worker_core
+    from dataview.file_catalog.las_reader import read_las
     eng = create_engine("mssql+pyodbc:///?odbc_connect=" + _u.quote_plus(CONN),
                         fast_executemany=True)
     files = [str(p) for p in Path(a.src).rglob("*.las")][:a.n]
@@ -36,7 +43,7 @@ def main():
         # PARSE: header-only read (what capture should be doing)
         p0 = time.time()
         try:
-            las = lasio.read(fp, ignore_data=True)
+            las = read_las(fp, ignore_data=True)
             ncurves += len(las.curves)
         except Exception:
             pass

@@ -51,7 +51,8 @@ def parse_las_rows(arg):
     _force = bool(_rest[0]) if _rest else False
     try:
         import lasio
-        las = lasio.read(fpath, ignore_data=True)
+        from dataview.file_catalog.las_reader import read_las
+        las = read_las(fpath, ignore_data=True)
     except Exception:
         return {"cat_well": [], "cat_well_log": [], "cat_well_log_curve": []}
 

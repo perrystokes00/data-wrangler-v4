@@ -12,6 +12,13 @@ import os, re, csv, argparse
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 
+import sys
+# The REPO ROOT, not tools/. Python puts the SCRIPT's own directory on
+# sys.path[0], so `python tools/<name>.py` cannot import dataview without
+# this. Needed since this script started reading LAS through
+# dataview.file_catalog.las_reader. app_v4.py does the same insert.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 API_RE = re.compile(r"\d{10,14}")
 
 def valid_uwi(uwi):
@@ -57,7 +64,8 @@ def extract(path):
     fn = os.path.basename(path)
     try:
         import lasio
-        las = lasio.read(path, ignore_data=True)
+        from dataview.file_catalog.las_reader import read_las
+        las = read_las(path, ignore_data=True)
     except Exception as e:
         return (fn, "", "", (str(e).splitlines()[0] if str(e) else "unreadable")[:90])
     try:

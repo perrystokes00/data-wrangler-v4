@@ -158,8 +158,9 @@ def store_las_headers(engine, file_path: str, inventory_id: str = None,
     """Parse LAS ~W section and store every mnemonic in FILE_WELL_HEADER."""
     try:
         import lasio
+        from dataview.file_catalog.las_reader import read_las
         from pathlib import Path
-        las = lasio.read(file_path, ignore_header_errors=True)
+        las = read_las(file_path, ignore_header_errors=True)
         rows = []
         for item in las.well:
             rows.append({

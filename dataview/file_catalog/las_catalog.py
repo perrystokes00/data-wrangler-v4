@@ -26,6 +26,7 @@ import pandas as pd
 
 try:
     import lasio
+    from dataview.file_catalog.las_reader import read_las
     import logging as _logging
     # Suppress lasio warnings (wrapped files, missing curve data, etc.)
     _logging.getLogger("lasio").setLevel(_logging.ERROR)
@@ -355,7 +356,7 @@ def parse_las_header(las_path: str) -> dict:
     Read a LAS file header only (fast — does not load curve data arrays).
     Returns a dict of all extracted metadata.
     """
-    las = lasio.read(str(las_path), ignore_header_errors=True)
+    las = read_las(str(las_path), ignore_header_errors=True)
 
     def _get(section, mnemonic, fallback=""):
         try:
@@ -918,7 +919,7 @@ def _apply_ppdm_header(src_path: str, dst_path: str,
       - ~V, ~C, ~P, ~A sections are written back exactly as read
     Writes LAS 2.0. Returns list of change descriptions for audit log.
     """
-    las = lasio.read(src_path, ignore_header_errors=True)
+    las = read_las(src_path, ignore_header_errors=True)
     changed = []
 
     # Determine which identifier mnemonic this file uses

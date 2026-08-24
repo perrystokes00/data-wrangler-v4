@@ -396,13 +396,14 @@ def _do_las(engine, fpath, uwi, inv, say) -> FileResult:
     arrays retained (inventory grain).
     """
     import lasio, uuid as _uuid
+    from dataview.file_catalog.las_reader import read_las
     from datetime import datetime as _dt
     capture, reset_replace_state = _capture()
     reset_replace_state()
     _now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
     res = FileResult("done", rt="WELL_LOG")
 
-    las = lasio.read(fpath, ignore_data=True)   # header + curve defs only (skip samples)
+    las = read_las(fpath, ignore_data=True)   # header + curve defs only (skip samples)
 
     def _wv(*keys):
         for k in keys:

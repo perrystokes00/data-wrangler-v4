@@ -613,11 +613,18 @@ def las_file(path, w, rng, shown="full", wrap=False, version="2.0",
         d += thick
         i += 1
 
+    _v3 = str(version).startswith("3")
     hdr = [
         "~VERSION INFORMATION",
         f" VERS.                 {version}   : CWLS Log ASCII Standard - VERSION {version}",
         f" WRAP.                 {'YES' if wrap else 'NO'}    : "
         f"{'MULTIPLE LINES PER DEPTH STEP' if wrap else 'ONE LINE PER DEPTH STEP'}",
+    ] + ([
+        # 3.0 declares its delimiter. lasio ignores DLM, which is why
+        # las_reader honours it before handing the data over — a 3.0 file with
+        # DLM. COMMA read as 8 rows of nan instead of 4 rows of data.
+        " DLM .                 COMMA : DELIMITING CHARACTER",
+    ] if _v3 else []) + [
         "",
         "~WELL INFORMATION",
         _hline("UWI", "", uwi_txt, "UNIQUE WELL IDENTIFIER", version),
@@ -658,7 +665,20 @@ def las_file(path, w, rng, shown="full", wrap=False, version="2.0",
     ]
     for m, u, d_ in curves:
         hdr.append(f" {m:<5}.{u:<16}: {d_}")
-    hdr += ["", "~A  " + "  ".join(m for m, _u, _d in curves)]
+    # LAS 3.0 names the data section ~Ascii and may delimit it with something
+    # other than whitespace. Comma is the common choice and the one that was
+    # silently misread until las_reader honoured DLM, so the fixture uses it
+    # deliberately — a 3.0 variant written with spaces would pass without
+    # exercising the thing that was broken.
+    if str(version).startswith("3"):
+        # ~Ascii is the section header and NOTHING ELSE. LAS 2.0 puts the
+        # curve mnemonics on the ~A line itself; 3.0 does not, and emitting
+        # them anyway makes the first data row a row of TEXT — which turns the
+        # whole array to <U32 and silently gives 56,826 string rows instead of
+        # 6,313 numeric ones. Caught by the round-trip check, not by reading.
+        hdr += ["", "~Ascii"]
+    else:
+        hdr += ["", "~A  " + "  ".join(m for m, _u, _d in curves)]
 
     # Curve state, seeded at the first bed's characteristics
     b0 = BEDS[bounds[0][2]]
@@ -689,7 +709,13 @@ def las_file(path, w, rng, shown="full", wrap=False, version="2.0",
         if rng.random() < 0.004:
             k = rng.randint(1, len(vals) - 1)
             vals[k] = null_val
-        if wrap:
+        if _v3:
+            # Comma-delimited, matching the DLM this file declares. Written
+            # unpadded because a delimited format does not use column
+            # alignment — and because a reader that only ever meets padded
+            # columns will pass on a file that happens to line up.
+            lines.append(",".join(f"{v:.4f}" for v in vals))
+        elif wrap:
             lines.append(f"{vals[0]:>10.4f}")
             lines.append("   " + "".join(f"{v:>12.4f}" for v in vals[1:]))
         else:
@@ -1008,6 +1034,12 @@ def generate(wells, out_dir, per_well, seed=42, log=print):
                 case, units = "metric", "M"
             elif r < 0.46:
                 case, nullv = "null_9999", -9999.00
+            elif r < 0.52:
+                # 3.0: ~Ascii, comma-delimited, DLM declared. lasio parses the
+                # header fine and ignores DLM, so this variant reads as nan
+                # columns unless it goes through las_reader — which is the
+                # point of having it in the corpus.
+                case, ver = "las_3.0", "3.0"
             p = os.path.join(las_dir, f"{w['uwi']}_{run}.las")
             try:
                 las_file(p, w, rng, shown, wrap, ver, units, nullv)
