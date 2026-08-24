@@ -2053,6 +2053,59 @@ def tier_units(res, verbose=False):
     check("reject: prunes an empty catalog row, never one with provenance",
           _reject_prunes_only_empty_rows)
 
+    def _well_path_offset_gate():
+        # A VERTICAL WELL HAS NO MAP EXTENT. Its path renders as a smudge on
+        # the surface dot already drawn there, and still costs a geography
+        # write, a layer row and a polyline. Measured 24 Aug: 41 of 96 computed
+        # paths closed less than 50 m, several under 5 m.
+        #
+        # The gate is CLOSURE, not measured depth -- a 10,000 ft vertical hole
+        # travels nowhere horizontally, which is all a map shows.
+        import inspect
+        import math
+        from dataview.mapping import well_path as _wp
+
+        assert hasattr(_wp, "MIN_CLOSURE_M"), \
+            "the map-visibility threshold is gone; vertical wells are drawn again"
+        assert 1.0 <= _wp.MIN_CLOSURE_M <= 500.0, \
+            f"MIN_CLOSURE_M = {_wp.MIN_CLOSURE_M} is not a plausible map scale"
+
+        # ONE FUNCTION COMPUTES IT, so the gate and the reported figure cannot
+        # drift apart. Unit-safety is the whole point: minimum_curvature works
+        # in whatever the survey was recorded in, so a metre threshold compared
+        # against feet would pass wells three times shorter than intended.
+        path = [(0.0, 0.0, 0.0, 0.0, 0.0), (1000.0, 300.0, 400.0, 900.0, 0.0)]
+        m_ft = _wp._closure_m(path, "ft")
+        m_m = _wp._closure_m(path, "m")
+        assert abs(m_m - 500.0) < 1e-6, \
+            f"closure in metres misread as {m_m}; a metre survey must not be converted"
+        assert abs(m_ft - 500.0 * _wp.FT_TO_M) < 1e-6, (
+            f"closure of a FOOT survey came back {m_ft:.3f} m, expected "
+            f"{500.0 * _wp.FT_TO_M:.3f} -- feet are being compared against a "
+            f"metre threshold, so wells 3.3x shorter than intended pass it")
+
+        # compute_paths must publish both, and take an override so a caller who
+        # genuinely wants every path can have one.
+        sig = inspect.signature(_wp.compute_paths)
+        assert "min_closure_m" in sig.parameters, \
+            "compute_paths no longer accepts min_closure_m"
+        src = inspect.getsource(_wp.compute_paths)
+        assert '"drawable"' in src and '"closure_m"' in src, \
+            "compute_paths no longer reports closure_m / drawable"
+
+        # AND EVERY CONSUMER THAT PUTS A LINE ON A MAP MUST HONOUR IT. A flag
+        # nothing reads is decoration; this is the four-lists shape, so assert
+        # the consumers rather than trusting them. add_well_paths is NOT in
+        # this list on purpose: it reads back stored geography, so the gate at
+        # write_paths already decided what it can see.
+        for fn in (_wp.write_paths, _wp.add_well_paths_live):
+            s = inspect.getsource(fn)
+            assert 'drawable' in s, (
+                f"{fn.__name__} ignores `drawable`, so a path too short to see "
+                f"is stored or drawn anyway and the threshold does nothing")
+    check("well paths: only computed where the offset would show on a map",
+          _well_path_offset_gate)
+
     return res
 
 

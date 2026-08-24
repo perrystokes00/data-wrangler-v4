@@ -56,6 +56,22 @@ for _p in (_HERE, os.path.dirname(_HERE), os.path.dirname(os.path.dirname(_HERE)
 
 FT_TO_M = 0.3048
 
+# A PATH SHORTER THAN THIS CANNOT BE SEEN, so drawing it is a lie of detail: a
+# vertical well renders as a smudge on its own surface dot, indistinguishable
+# from the marker already there, and each one still costs a geography write, a
+# row in the layer, and a polyline for the browser to draw.
+#
+# Web Mercator resolution is 156543 * cos(lat) / 2^z metres per pixel. At 43 N
+# (Teapot):  z12 ~28 m/px,  z13 ~14 m/px,  z14 ~7 m/px. A polyline needs about
+# four pixels of travel before it reads as a line rather than a dot, so at the
+# zoom where a field fills the screen (z13) the crossover is ~55 m. 50 is that,
+# rounded down so the gate errs toward drawing.
+#
+# CLOSURE, NOT MEASURED DEPTH: a 10,000 ft vertical hole has no map extent at
+# all. Closure is the horizontal distance from surface to bottom, which is
+# exactly what the map would show.
+MIN_CLOSURE_M = 50.0
+
 
 # ═════════════════════════════════════════════════════════════════════════ #
 # 1 · GEOMETRY — minimum curvature
@@ -256,6 +272,16 @@ def simplify(points, tol_deg=1e-4, keep=()):
 def high_dogleg_indices(path, top=8, min_dls=1.0):
     ranked = sorted(range(len(path)), key=lambda i: -path[i][4])
     return [i for i in ranked[:top] if path[i][4] >= min_dls]
+
+
+def _closure_m(path, unit):
+    """Horizontal surface-to-bottom distance, in METRES whatever was surveyed.
+
+    One place computes this, so the gate and the reported figure cannot drift
+    apart -- the shape that made an FK clause silently inert for six weeks.
+    """
+    c = math.hypot(path[-1][1], path[-1][2])
+    return c * (FT_TO_M if str(unit).lower().startswith("f") else 1.0)
 
 
 def wkt_linestring(lonlat):
@@ -519,8 +545,15 @@ def read_surface(engine, schema="dataview", well="dv_well", uwi=None,
 def compute_paths(engine, schema="dataview", uwi=None, unit="ft",
                   simplify_tol=1e-4, like=None, cols_override=None,
                   show_sql=False, limit=None, max_dls=30.0,
-                  drop_spikes=False, log=print):
-    """Everything except the write. Returns (results, problems)."""
+                  drop_spikes=False, min_closure_m=MIN_CLOSURE_M, log=print):
+    """Everything except the write. Returns (results, problems).
+
+    Every survey is still COMPUTED -- the TVD cross-check and the dogleg
+    figures are worth having whether or not the path is worth drawing -- but
+    each result carries `closure_m` and `drawable`, and the consumers that put
+    a line on a map (write_paths, add_well_paths_live) honour `drawable`.
+    Pass min_closure_m=0 to keep every path.
+    """
     surveys = read_surveys(engine, schema, uwi=uwi, like=like,
                            cols_override=cols_override, show_sql=show_sql,
                            limit=limit, log=log)
@@ -555,7 +588,13 @@ def compute_paths(engine, schema="dataview", uwi=None, unit="ft",
             "spikes": spikes, "used": len(use),
             "points": len(thin), "md_max": path[-1][0],
             "tvd_max": path[-1][3],
+            # NOTE THE NAME: this is closure in the SOURCE unit, feet or
+            # metres, because minimum_curvature works in whatever the survey
+            # was recorded in. closure_m is the one a metre threshold may be
+            # compared against, and the only one that is unit-safe.
             "closure_ft": math.hypot(path[-1][1], path[-1][2]),
+            "closure_m": _closure_m(path, unit),
+            "drawable": _closure_m(path, unit) >= float(min_closure_m or 0.0),
             "max_dls": max(p[4] for p in path),
             "tvd_diff_max": mx, "tvd_diff_mean": mean, "tvd_checked": n,
             "wkt": wkt_linestring(thin),
@@ -574,15 +613,24 @@ def write_paths(engine, results, schema="dataview",
     sql = (f"UPDATE {schema}.{hdr} SET {col} = "
            f"geography::STGeomFromText(:wkt, 4326).MakeValid() "
            f"WHERE uwi = :u" + (f" AND {key} = :s" if key else ""))
-    n = 0
+    n = skipped = 0
     with engine.begin() as cx:
         for r in results:
             if not r["wkt"]:
+                continue
+            # THE GATE LIVES AT EVERY CONSUMER, not just at compute: a caller
+            # that builds results itself, or one written later, must not be
+            # able to store a path the map cannot show.
+            if not r.get("drawable", True):
+                skipped += 1
                 continue
             p = {"wkt": r["wkt"], "u": r["uwi"]}
             if key:
                 p["s"] = r["survey_id"]
             n += cx.execute(text(sql), p).rowcount or 0
+    if skipped:
+        log(f"  {skipped} path(s) not written - closure below "
+            f"{MIN_CLOSURE_M:.0f} m, nothing a map could show")
     return n
 
 
@@ -609,6 +657,8 @@ def add_well_paths_live(m, engine, schema="dataview", like=None, uwi=None,
         wkt = r.get("wkt")
         if not wkt:
             continue
+        if not r.get("drawable", True):        # see write_paths
+            continue
         inner = wkt[wkt.find("(") + 1:wkt.rfind(")")]
         pts = []
         for pair in inner.split(","):
@@ -618,8 +668,8 @@ def add_well_paths_live(m, engine, schema="dataview", like=None, uwi=None,
         if len(pts) >= 2:
             folium.PolyLine(
                 pts, weight=2, color=color, opacity=0.85,
-                tooltip=f"{r['uwi']} · MD {r['md_max']:,.0f} · "
-                        f"closure {r['closure_ft']:,.0f}").add_to(fg)
+                tooltip=f"{r['uwi']} · MD {r['md_max']:,.0f} {unit} · "
+                        f"closure {r['closure_m']:,.0f} m").add_to(fg)
             n += 1
     fg.add_to(m)
     return n
