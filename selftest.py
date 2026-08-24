@@ -2746,6 +2746,107 @@ def tier_units(res, verbose=False):
     check("segy: a written 2D line reads back, and crossing lines tie",
           _written_segy_reads_back_and_ties)
 
+    def _horizons_tie_to_their_reflectors():
+        # THE ONE PROPERTY THAT MATTERS. A horizon that floats off its
+        # reflector is worse than no horizon: it looks like an interpretation,
+        # it plots, it exports, and it is wrong everywhere at once. The
+        # horizons and the seismic are generated from ONE model for exactly
+        # this reason, and this is the check that keeps them there -- it writes
+        # a real SEG-Y, samples the horizon surface at that line's own trace
+        # positions, and looks for the reflector at the time the surface says.
+        import math
+        import os
+        import random
+        import tempfile
+        import numpy as np
+        from dataview.migration.synth_seismic import (
+            TEAPOT_HORIZONS, teapot_model, write_line)
+        from dataview.migration.synth_horizons import build_grid, contours, sample
+
+        try:
+            dome, to_utm, to_ll = teapot_model()
+        except ImportError:
+            return                      # pyproj absent; nothing to check
+
+        # A short line straight over the crest, where the structure is
+        # strongest and a mis-tie would show most.
+        cx, cy = to_utm.transform(-106.212, 43.290)
+        n, sp = 60, 50.0
+        az = math.radians(75)
+        half = (n - 1) / 2.0
+        xs = [cx + (i - half) * sp * math.cos(az) for i in range(n)]
+        ys = [cy + (i - half) * sp * math.sin(az) for i in range(n)]
+
+        tmp = tempfile.mkdtemp(prefix="hz_tie_")
+        path = os.path.join(tmp, "tie.segy")
+        try:
+            write_line(path, xs, ys, dome, random.Random(3), n_samples=500,
+                       dt_us=2000, survey="TIE", line_name="TIE-001")
+            from dataview.file_catalog.segy_header import read_trace_samples
+            data, times = read_trace_samples(path, 0, n, skip_blank=False)
+            assert data is not None, "the written line has no readable traces"
+            dt = float(times[1] - times[0])
+
+            # A COARSE GRID ON PURPOSE. If the tie only survives at production
+            # resolution it is not a tie, it is a coincidence.
+            lats, lons, vals = build_grid(dome, to_utm, TEAPOT_HORIZONS[0][1],
+                                          nrow=40, ncol=30)
+            worst = 0.0
+            for j in range(0, data.shape[1], 7):
+                lo, la = to_ll.transform(xs[j], ys[j])
+                t = sample(lats, lons, vals, la, lo)
+                assert t is not None, (
+                    "the horizon grid does not cover its own survey at "
+                    + format(la, ".4f") + ", " + format(lo, ".4f"))
+                k = int(round(t / dt))
+                w = 12
+                lo_i = max(0, k - w)
+                seg = np.abs(data[lo_i:k + w, j])
+                assert seg.size, "the horizon time falls outside the section"
+                k_ref = lo_i + int(np.argmax(seg))
+                worst = max(worst, abs(times[k_ref] - t))
+            # The wavelet peak is what is being found, so a couple of samples
+            # is the honest tolerance; anything more means the surface and the
+            # reflectors have drifted apart.
+            assert worst <= 3 * dt, (
+                "the horizon misses its reflector by up to "
+                + format(worst, ".1f") + " ms (sample interval "
+                + format(dt, ".0f") + " ms) -- the surface and the seismic are "
+                "no longer the same model")
+
+            # OUTSIDE THE GRID IS NOTHING. Clamping to the nearest edge would
+            # run a Teapot horizon flat across Wyoming and draw it on a section
+            # that has never seen it.
+            assert sample(lats, lons, vals, 44.9, -106.2) is None, \
+                "a position north of the grid returned a value"
+            assert sample(lats, lons, vals, 43.29, -120.0) is None, \
+                "a position west of the grid returned a value"
+
+            # CONTOURS CARRY (lat, lon) IN THAT ORDER. The loader writes WKT as
+            # "lon lat" because geography 4326 wants longitude first; getting
+            # the pair the wrong way round here puts Wyoming in the Indian
+            # Ocean, silently, because both numbers are valid coordinates.
+            segs = contours(lats, lons, vals, step=20.0)
+            assert segs, "the surface produced no contours at all"
+            for value, pts in segs:
+                for la, lo in pts:
+                    assert 40.0 < la < 46.0 and -110.0 < lo < -103.0, (
+                        "a contour point is at " + format(la, ".3f") + ", "
+                        + format(lo, ".3f") + " -- that is not Wyoming, so the "
+                        "latitude and longitude are the wrong way round")
+        finally:
+            for f in os.listdir(tmp):
+                try:
+                    os.remove(os.path.join(tmp, f))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(tmp)
+            except OSError:
+                pass
+    check("horizons: a horizon lands on its reflector, and stays in Wyoming",
+          _horizons_tie_to_their_reflectors)
+
     def _loader_key_transforms_agree():
         # TWO FAILURES, ONE ROOT: a key transform applied on one side only.
         #

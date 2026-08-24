@@ -35,7 +35,8 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-from dataview.migration.synth_seismic import Dome, write_line    # noqa: E402
+from dataview.migration.synth_seismic import (               # noqa: E402
+    write_line, teapot_model, TEAPOT_CREST, TEAPOT_AREA, TEAPOT_EPSG)
 
 DEFAULT_DIR = (r"C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai"
                r"\data_wrangler\training\Teapot_Dome\DataSets\Seismic"
@@ -44,9 +45,9 @@ DEFAULT_DIR = (r"C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai"
 # Teapot Dome. The 3D survey covers 43.238-43.342 N, -106.251 to -106.173 W and
 # the 1,372 Natrona wells spread a little wider; the grid is laid over the
 # wells' extent so lines and wells share a map.
-CREST_LON, CREST_LAT = -106.212, 43.290
-AREA = dict(min_lat=43.205, max_lat=43.455, min_lon=-106.345, max_lon=-106.135)
-EPSG = 32613                       # WGS84 / UTM 13N -- Wyoming, metres
+CREST_LON, CREST_LAT = TEAPOT_CREST
+AREA = TEAPOT_AREA
+EPSG = TEAPOT_EPSG
 
 # Vintages, each a survey with its own acquisition azimuth. Real 2D coverage
 # accumulates in campaigns like this, which is also why one line has several
@@ -94,14 +95,11 @@ def main(argv=None):
         print("REFUSED: pyproj is needed to place the grid in UTM.")
         return 2
 
-    to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{EPSG}", always_xy=True)
+    dome, to_utm, _to_ll = teapot_model(a.seed, EPSG)
     cx, cy = to_utm.transform(CREST_LON, CREST_LAT)
     x0, y0 = to_utm.transform(AREA["min_lon"], AREA["min_lat"])
     x1, y1 = to_utm.transform(AREA["max_lon"], AREA["max_lat"])
-
-    rng = random.Random(a.seed)
-    dome = Dome(cx, cy, relief_ms=145, radius_m=3900,
-                horizons_ms=[360, 505, 660, 830], rng=rng)
+    rng = random.Random(a.seed + 1)
 
     n_lines = max(1, a.count // max(1, a.variants))
     per_vintage = max(1, n_lines // len(VINTAGES))

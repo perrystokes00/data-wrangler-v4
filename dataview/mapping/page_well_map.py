@@ -8162,6 +8162,7 @@ def run(engine=None):
             ("geo_boundaries", "🟪 Boundaries"),
             ("geo_pipelines",  "➖ Pipelines"),
             ("geo_seismic",    "🟪 Seismic"),
+            ("geo_horizons",   "〰️ Horizons"),
             ("geo_wellpts",    "⚫ Well points"),
             ("geo_wellpath",   "🌀 Well paths"),
             ("geo_refwells",   "🔵 Reference wells"),
@@ -9290,7 +9291,8 @@ def run(engine=None):
         # whose only trigger is missing here renders ONLY when some other
         # layer happens to be on — which looks exactly like a broken layer.
         if _geo_on or "geo_wellpts" in active_db \
-                or "geo_wellpath" in active_db:
+                or "geo_wellpath" in active_db \
+                or "geo_horizons" in active_db:
             try:
                 from dataview.mapping.geography_layers import add_geography_layer, add_well_points
                 for _ak in _geo_on:
@@ -9299,6 +9301,14 @@ def run(engine=None):
                 # geog layer above holds SURVEY footprints; these are the
                 # individual LINES inside them, which is the thing you
                 # actually pick when you want a section.
+                # Time-structure contours get their OWN chip rather than
+                # riding on Seismic: a horizon is an interpretation over
+                # a survey, and someone looking at line geometry does not
+                # necessarily want a structure map drawn over it.
+                if "geo_horizons" in active_db:
+                    from dataview.mapping.geography_layers import (
+                        add_horizon_contours)
+                    add_horizon_contours(m, engine, show=True)
                 if "geo_seismic" in active_db:
                     for _sl in _seismic_line_paths(engine):
                         folium.PolyLine(

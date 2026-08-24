@@ -207,3 +207,52 @@ def write_line(path, xs, ys, dome, rng, *, n_samples=500, dt_us=2000,
             f.write(bytes(th))
             f.write(enc[:, j].astype(">u4").tobytes())
     return n_tr
+
+
+# --------------------------------------------------------------------------- #
+# The Teapot Dome model, defined ONCE
+# --------------------------------------------------------------------------- #
+#
+# THE HORIZONS AND THE SEISMIC MUST BE THE SAME SURFACE. A horizon that does
+# not sit on its reflector is worse than no horizon: it looks like an
+# interpretation, it plots, it exports, and it is wrong everywhere at once.
+# Both the SEG-Y writer and the horizon generator therefore build the dome from
+# THIS function and nothing else -- duplicating the parameters in two tools is
+# how they drift apart by one edit.
+#
+# Dome.__init__ draws eccentricity, rotation and regional dip from the rng, so
+# the SEED IS PART OF THE MODEL. Same seed, same surface, in either tool.
+
+TEAPOT_CREST = (-106.212, 43.290)          # lon, lat -- the dome crest
+TEAPOT_AREA = dict(min_lat=43.205, max_lat=43.455,
+                   min_lon=-106.345, max_lon=-106.135)
+TEAPOT_EPSG = 32613                        # WGS84 / UTM 13N, metres
+TEAPOT_SEED = 4317
+
+# name, two-way time at the regional level (ms), display colour, the
+# stratigraphy it stands for. The times are what the reflectors are generated
+# at, so a pick on the section IS this number plus the structure.
+TEAPOT_HORIZONS = [
+    ("Steele Shale",     360.0, "#E4572E", "STEELE SHALE"),
+    ("Niobrara",         505.0, "#17BEBB", "NIOBRARA FORMATION"),
+    ("Frontier 2nd Wall Creek", 660.0, "#FFC914", "FRONTIER FORMATION"),
+    ("Tensleep",         830.0, "#4C6EF5", "TENSLEEP SANDSTONE"),
+]
+
+
+def teapot_model(seed=TEAPOT_SEED, epsg=TEAPOT_EPSG):
+    """(dome, to_utm, to_ll) for Teapot Dome. The single source of the surface.
+
+    Raises ImportError if pyproj is absent -- the model is defined in ground
+    coordinates and there is no honest way to place it without a projection.
+    """
+    import random
+    from pyproj import Transformer
+
+    to_utm = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
+    to_ll = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
+    cx, cy = to_utm.transform(*TEAPOT_CREST)
+    rng = random.Random(seed)
+    dome = Dome(cx, cy, relief_ms=145, radius_m=3900,
+                horizons_ms=[h[1] for h in TEAPOT_HORIZONS], rng=rng)
+    return dome, to_utm, to_ll

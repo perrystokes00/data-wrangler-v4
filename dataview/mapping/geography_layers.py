@@ -420,3 +420,106 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
 def add_all_geography_layers(m, engine) -> int:
     """Back-compat convenience: every configured layer at once."""
     return sum(add_geography_layer(m, engine, k) for k in _LAYER_KEYS)
+
+
+def _qry_horizon_contours(engine):
+    """[{horizon_id, name, colour, value, wkt}] -- every horizon contour.
+
+    Returns [] and says why on any failure rather than raising: a database
+    that has never loaded a horizon must not take the map down with it, and a
+    swallowed diagnostic is what makes the next failure undiagnosable.
+    """
+    try:
+        with engine.connect() as con:
+            if con.execute(text(
+                    "SELECT OBJECT_ID('dataview.dv_seis_horizon_contour','U')"
+            )).scalar() is None:
+                return []
+            rows = con.execute(text("""
+                SELECT h.horizon_id, h.horizon_name, h.display_colour,
+                       h.seq_no, c.contour_value, c.geog.STAsText() AS wkt
+                  FROM dataview.dv_seis_horizon_contour c
+                  JOIN dataview.dv_seis_horizon h
+                    ON h.horizon_id = c.horizon_id
+                 WHERE c.geog IS NOT NULL
+                   AND ISNULL(c.active_ind,'Y') = 'Y'
+                   AND ISNULL(h.active_ind,'Y') = 'Y'
+                 ORDER BY h.seq_no, c.contour_value
+            """)).fetchall()
+    except Exception as exc:
+        print(f"[horizons] contour query failed: {exc}")
+        return []
+    return [{"horizon_id": r[0], "name": r[1] or r[0],
+             "colour": r[2] or "#E4572E", "seq": r[3] or 0,
+             "value": float(r[4]), "wkt": r[5]} for r in rows]
+
+
+def _linestring_coords(wkt):
+    """[[lon, lat], ...] from a LINESTRING WKT, GeoJSON order."""
+    if not wkt or "(" not in wkt:
+        return []
+    body = wkt[wkt.find("(") + 1: wkt.rfind(")")]
+    out = []
+    for pair in body.split(","):
+        bits = pair.split()
+        if len(bits) < 2:
+            continue
+        try:
+            out.append([float(bits[0]), float(bits[1])])
+        except ValueError:
+            continue
+    return out
+
+
+def add_horizon_contours(m, engine, show=False):
+    """Time-structure contours, one toggleable group per horizon.
+
+    ONE GeoJson PER HORIZON, not one per contour. folium serialises each
+    object it is given separately, which is what made 14,727 hexagons take 28
+    seconds before the H3 layer was rewritten the same way. There are only 62
+    contours here, but the pattern is the one that survives someone loading a
+    real interpretation with thousands.
+
+    Returns the number of horizons drawn.
+    """
+    rows = _qry_horizon_contours(engine)
+    if not rows:
+        return 0
+
+    by_h = {}
+    for r in rows:
+        by_h.setdefault(r["horizon_id"], []).append(r)
+
+    drawn = 0
+    for hid in sorted(by_h, key=lambda k: by_h[k][0]["seq"]):
+        group = by_h[hid]
+        colour = group[0]["colour"]
+        feats = []
+        for r in group:
+            coords = _linestring_coords(r["wkt"])
+            if len(coords) < 2:
+                continue
+            feats.append({
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": coords},
+                "properties": {"hz": r["name"],
+                               # Pre-formatted: a GeoJsonTooltip prints the
+                               # property as-is, and "289.99999999" is what a
+                               # raw contour level looks like.
+                               "t": f"{r['value']:,.0f} ms"},
+            })
+        if not feats:
+            continue
+        fg = folium.FeatureGroup(
+            name=f"〰️ {group[0]['name']} ({len(feats)})", show=show)
+        folium.GeoJson(
+            {"type": "FeatureCollection", "features": feats},
+            style_function=lambda _f, _c=colour: {
+                "color": _c, "weight": 1.6, "opacity": 0.9, "fillOpacity": 0},
+            tooltip=folium.GeoJsonTooltip(fields=["hz", "t"],
+                                          aliases=["Horizon", "TWT"],
+                                          sticky=True),
+        ).add_to(fg)
+        fg.add_to(m)
+        drawn += 1
+    return drawn

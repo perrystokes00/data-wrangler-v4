@@ -603,7 +603,26 @@ def _view_segy_tolerant(file_path: str, why: str = ""):
                 "its samples are not.")
         else:
             stats = getattr(read_trace_samples, "last_stats", {}) or {}
-            _segy_plot(data, times, data.shape[1], file_path)
+            # Horizons are sampled at the LINE's own trace positions --
+            # the file states its CRS and carries a coordinate per trace,
+            # so nothing has to be supplied alongside it. A line outside
+            # every horizon's extent gets an empty list and no overlay.
+            try:
+                from dataview.file_catalog.horizon_overlay import for_segy
+                _hz = for_segy(file_path, max_traces=data.shape[1])
+            except Exception as _he:
+                print(f"[horizons] {_he}")
+                _hz = []
+            _segy_plot(data, times, data.shape[1], file_path, horizons=_hz)
+            if _hz:
+                _appr = ((stats.get("blank_skipped") or 0)
+                         + (stats.get("resyncs") or 0))
+                st.caption(
+                    "Horizons: " + " · ".join(h["name"] for h in _hz)
+                    + (" — approximate: the reader skipped or resynced "
+                       "traces, so horizon positions along this section "
+                       "are interpolated rather than trace-for-trace."
+                       if _appr else ""))
             st.caption(
                 f"{stats.get('plotted', 0)} trace(s) plotted · "
                 f"{stats.get('blank_skipped', 0)} blank skipped · "
@@ -611,7 +630,7 @@ def _view_segy_tolerant(file_path: str, why: str = ""):
                 f"{stats.get('unreadable', 0)} unreadable")
 
 
-def _segy_plot(data, samples, n_traces, file_path):
+def _segy_plot(data, samples, n_traces, file_path, horizons=None):
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -630,9 +649,31 @@ def _segy_plot(data, samples, n_traces, file_path):
                    vmin=-vmax, vmax=vmax, extent=extent)
         ax1.set_title("Density (variable area)", color="white")
         ax1.set_xlabel("Trace", color="white")
-        ax1.set_ylabel("Sample", color="white")
+        ax1.set_ylabel("TWT (ms)", color="white")
         ax1.tick_params(colors="white")
         ax1.set_facecolor("#1A2B4A")
+
+        # HORIZONS ON THE SECTION. Drawn on the density panel only --
+        # the wiggle shows 30 traces of a section that may be hundreds
+        # wide, so a horizon there would span a twentieth of the line
+        # and read as a pick across all of it.
+        #
+        # The times arrive one per PLOTTED trace. That ties exactly when
+        # the reader plotted every trace it walked; on a file where it
+        # skipped blanks or resynced, the tie is approximate and the
+        # caption below says so rather than implying a pick.
+        for _hz in (horizons or []):
+            _t = np.array([np.nan if v is None else float(v)
+                           for v in _hz.get('times') or []], dtype=float)
+            if not _t.size or not np.isfinite(_t).any():
+                continue
+            _x = np.linspace(0, n_traces, _t.size)
+            ax1.plot(_x, _t, color=_hz.get('colour', '#E4572E'),
+                     linewidth=1.7, alpha=0.95, label=_hz.get('name'))
+        if horizons:
+            _lg = ax1.legend(loc='upper right', fontsize=8, framealpha=0.85)
+            for _txt in _lg.get_texts():
+                _txt.set_color('#111111')
 
         # Wiggle (first 30 traces max)
         #
@@ -660,7 +701,7 @@ def _segy_plot(data, samples, n_traces, file_path):
         ax2.invert_yaxis()
         ax2.set_title(f"Wiggle (first {n_wig} traces)", color="white")
         ax2.set_xlabel("Trace", color="white")
-        ax2.set_ylabel("Sample", color="white")
+        ax2.set_ylabel("TWT (ms)", color="white")
         # Ticks and labels sit OUTSIDE the axes, on a figure patch that is
         # transparent, so they stay white against the dark page. Only the plot
         # INTERIOR goes pale -- setting the figure light would strand them.
