@@ -884,6 +884,48 @@ def tier_units(res, verbose=False):
     check("a load that cannot register its file reports it",
           _load_reports_provenance)
 
+    # 13b. APPLY IS ONE CLICK, AND STILL VALIDATES. The two-step (Preview then
+    #      Apply) was serving "sample before apply" twice: the grid above IS
+    #      the sample — every value on screen, editable, with a column saying
+    #      whether a UWI came from the filename or a folder. What Preview
+    #      genuinely added was plan_fix's validation, and that is now inside
+    #      Apply, over the CURRENT edits.
+    #
+    #      Two properties must survive that simplification, and neither is
+    #      obvious from reading the button:
+    #        * nothing invalid is ever written — plan_fix runs first and a
+    #          single bad row stops the whole batch
+    #        * what is written is what is ON SCREEN — the old code applied
+    #          sb_plan_edits, the values as they were when previewed, so an
+    #          edit made afterwards wrote the stale value while the grid
+    #          showed the new one
+    def _apply_validates_current_edits():
+        import inspect
+        from dataview.file_catalog import page_workbench as _pw
+        src = inspect.getsource(_pw._tab_status)
+        i = src.find('key="sb_apply"')
+        assert i > 0, "the Apply button has moved or been renamed"
+        body = src[i:i + 2600]
+        assert "plan_fix(" in body, (
+            "Apply no longer validates before writing — the Preview step was "
+            "removed and its plan_fix check went with it, so an unnormalisable "
+            "UWI would reach apply_fix")
+        assert "st.stop()" in body, \
+            "Apply no longer aborts on a bad row; a half-applied repair leaves " \
+            "rows carrying a UWI whose header was never minted"
+        assert "sb_plan_edits" not in body, (
+            "Apply reads the PREVIEWED edits again — it must use the current "
+            "ones, or editing a cell after previewing writes the stale value "
+            "while the screen shows the new one")
+        assert "for _e in _edits:" in body, \
+            "Apply no longer iterates the current edits"
+        # and it must not be gated on having previewed
+        assert "disabled=not _edits" in body, \
+            "Apply is gated on something other than there being edits — the " \
+            "two-step is back"
+    check("status: Apply validates the edits on screen, in one click",
+          _apply_validates_current_edits)
+
     # 14. HELD IS NOT NOTHING. promote_seismic counted held surveys with a
     #     query filtered on _NAMED, so a file with NO survey name failed that
     #     predicate and fell out of BOTH `eligible` and `held` — reported as

@@ -3781,9 +3781,12 @@ def _tab_status(engine, dialect):
                     for _nte in _p["notes"]:
                         _plan.append({"file": _e["file"], "will write": "",
                                       "⚠": _nte})
+            # Preview is now INFORMATIONAL ONLY — Apply validates the current
+            # edits itself, so nothing downstream reads sb_plan_ok or
+            # sb_plan_edits to decide whether a write may happen. Kept so the
+            # table renders and the flagged-row warning still shows.
             st.session_state["sb_plan"] = _plan
             st.session_state["sb_plan_ok"] = (not _bad) and bool(_plan)
-            st.session_state["sb_plan_edits"] = _edits
 
         _plan = st.session_state.get("sb_plan")
         if _plan:
@@ -3794,45 +3797,67 @@ def _tab_status(engine, dialect):
                 st.warning("Fix the flagged rows, then preview again. "
                            "Nothing has been written.")
         elif _edits:
-            # The two-step is deliberate, but an un-explained disabled button
-            # reads as a broken one. Say which step is outstanding.
-            st.caption(f"**{len(_edits)} edit(s) ready.** Press **Preview** to "
-                       f"see exactly what would be written — *Apply* stays "
-                       f"disabled until you have looked at it.")
+            st.caption(f"**{len(_edits)} edit(s) ready.** Apply writes them; "
+                       f"Preview first if you want to see the exact statements.")
 
-        # THE PREVIEW MUST DESCRIBE WHAT WILL ACTUALLY BE WRITTEN. Apply writes
-        # sb_plan_edits — the values as they were WHEN PREVIEWED — so changing a
-        # cell afterwards and pressing Apply wrote the old values while the
-        # screen showed the new ones. That is the precise failure "sample before
-        # apply" exists to prevent, reintroduced one step later. If the edits
-        # have moved since the preview, the plan is stale and Apply closes.
-        if (st.session_state.get("sb_plan_ok")
-                and _edits != st.session_state.get("sb_plan_edits")):
-            st.session_state["sb_plan_ok"] = False
-            st.session_state["sb_plan"] = None
-            st.info("Edits changed since the preview — preview again so the "
-                    "plan matches what you are about to write.")
-
-        # SAY WHY IT IS GREYED OUT. Disabled with no explanation reads as
-        # broken; Perry reported this button as "not activating" when it was
-        # correctly waiting for a preview that had never been run.
-        _ready = bool(st.session_state.get("sb_plan_ok"))
+        # APPLY IS ONE CLICK, AND VALIDATES ITSELF.
+        #
+        # It used to require a Preview first, on the "sample before apply"
+        # rule that a coordinate backfill once came within twenty rows of
+        # writing 1,436 confidently wrong positions. That rule is right, but
+        # it was being served twice: THE GRID ABOVE IS THE SAMPLE. Every value
+        # is on screen, editable, with a "read from" column saying whether a
+        # UWI came from the filename or a folder. Making the operator press
+        # Preview to be shown the same numbers again is ceremony, not a
+        # decision — and Perry rejects files and keys wells all day.
+        #
+        # What Preview genuinely added was VALIDATION: plan_fix refuses a UWI
+        # that does not normalise to 14, and reports it instead of writing.
+        # That is kept — Apply runs the same plan_fix over the CURRENT edits
+        # and writes nothing at all if any row fails. So the guarantee is
+        # unchanged (nothing invalid is ever written) while the click is not.
+        #
+        # It also removes the staleness bug this block used to carry: Apply
+        # wrote sb_plan_edits, the values as they were WHEN PREVIEWED, so
+        # editing a cell afterwards wrote the old value while the screen
+        # showed the new one. Validating the current edits at the moment of
+        # the write makes that impossible rather than guarded against.
         if p2.button("✅ Apply these fixes", key="sb_apply", type="primary",
-                     use_container_width=True, disabled=not _ready,
-                     help=None if _ready else
-                     ("Press Preview first. Nothing is written until the exact "
-                      "list of writes has been shown — and if the preview found "
-                      "a problem, fix the flagged rows and preview again.")):
+                     use_container_width=True, disabled=not _edits,
+                     help="Validates every row first. If any is bad, nothing "
+                          "is written and the problems are listed."):
             from dataview.file_catalog import catalog_status as _cs2
             _tot = {"uwi_rows": 0, "coord_rows": 0, "headers": 0}
             _fail = []
             _paths = dict(zip(_heldv["inventory_id"], _heldv["path"]))
+
+            # VALIDATE EVERYTHING BEFORE WRITING ANYTHING. Same plan_fix the
+            # Preview button runs, over the edits as they are RIGHT NOW. A
+            # single bad row stops the whole batch: a half-applied repair
+            # leaves rows carrying a UWI whose header was never minted, which
+            # is worse than not having started.
+            _bad, _plan_now = [], []
+            with engine.connect() as _vcon:
+                for _e in _edits:
+                    _p = _cs2.plan_fix(_vcon, _e["inventory_id"], _e["uwi"],
+                                       _e["lat"], _e["lon"])
+                    for _err in _p["errors"]:
+                        _bad.append(f"{_e['file']}: {_err}")
+                    for _act in _p["actions"]:
+                        _plan_now.append({"file": _e["file"], "will write": _act})
+            if _bad:
+                st.error("Nothing was written — these rows are not valid:")
+                for _b in _bad[:20]:
+                    st.write(f"• {_b}")
+                st.stop()
+            if not _plan_now:
+                st.warning("Nothing to write — the values given change nothing.")
+                st.stop()
+
             try:
-                # ONE transaction for the whole batch: a half-applied repair
-                # leaves rows carrying a UWI whose header was never minted,
-                # which is a worse state than not having started.
+                # ONE transaction for the whole batch, for the same reason.
                 with engine.begin() as _con:
-                    for _e in st.session_state.get("sb_plan_edits") or []:
+                    for _e in _edits:
                         try:
                             _d = _cs2.apply_fix(
                                 _con, _e["inventory_id"], _e["uwi"],
