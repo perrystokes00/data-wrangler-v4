@@ -8837,7 +8837,9 @@ def run(engine=None):
                         _msg.info(
                             f"🔵 Drew {_rn:,} reference well(s)"
                             + ("" if _rscope is not None else
-                               " — capped; zoom in or draw an area for the rest"))
+                               " — a spread sample across the whole view. "
+                               "Draw a box or pick an area to see every well "
+                               "in it."))
                     except Exception as _re:
                         _msg.warning(f"Reference wells skipped: {_re}")
             except Exception as _ge:
@@ -8879,7 +8881,13 @@ def run(engine=None):
             _msg.info(f"🗂 Loading {lay.get('layer_name','layer')}…")
             _add_shapefile_layer(m, engine, lay)
 
-        folium.LayerControl(collapsed=False).add_to(m)
+        # COLLAPSED. Pinned open, the control grew with the map: eight layers
+        # of ~40 characters covered a third of the canvas, and the layer whose
+        # name explained itself ("50,000 shown, capped - zoom in to see the
+        # rest") was the widest thing on screen. Leaflet expands it on hover,
+        # so nothing is hidden, and the names are short now because the
+        # explanation belongs in the status line, not in a legend entry.
+        folium.LayerControl(collapsed=True).add_to(m)
 
         # Draw toolbar — circle + rectangle. Both are bulk cell-selectors
         # for grid mode: drawing one selects every cell whose bbox intersects

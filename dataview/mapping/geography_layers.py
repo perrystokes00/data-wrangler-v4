@@ -318,11 +318,8 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
     if not rows:
         return 0, 0
     in_scope = None if sampled else len(rows)
-    if sampled:
-        label = (f"🔵 Reference wells ({len(rows):,} spread sample "
-                 f"— draw a smaller area to see every well in it)")
-    else:
-        label = (f"🔵 Reference wells ({len(rows):,} in this area)")
+    label = (f"🔵 Reference wells ({len(rows):,}"
+             + (" sample)" if sampled else ")"))
     n_drawn = points_layer(m, ((la, lo, nm) for nm, la, lo in rows),
                            name=label, color="#1d4ed8", fill="#60a5fa",
                            radius=2, show=show, opacity=0.7)
