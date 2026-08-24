@@ -7675,6 +7675,7 @@ def run(engine=None):
             ("geo_seismic",    "🟪 Seismic"),
             ("geo_wellpts",    "⚫ Well points"),
             ("geo_wellpath",   "🌀 Well paths"),
+            ("geo_refwells",   "🔵 Reference wells"),
         ]
         _label_to_flag = {lbl: flag for flag, lbl in _geo_defs}
         if hasattr(st, "pills"):
@@ -8807,6 +8808,27 @@ def run(engine=None):
                         _msg.warning(f"Well paths skipped: {_pe}")
                 if "geo_wellpts" in active_db:
                     add_well_points(m, engine, show=True)
+                if "geo_refwells" in active_db:
+                    # INDIVIDUAL reference wells, which the density layer
+                    # cannot give: v_well_density_r* answers "where are wells"
+                    # for 3.9M rows, never "which wells are these".
+                    #
+                    # Bounded by _drawn_bounds when the app has set one. Python
+                    # never learns about a pan, so this reads a value the app
+                    # itself wrote rather than pretending to know the viewport;
+                    # with no bounds it draws the cap and SAYS it is capped.
+                    try:
+                        from dataview.mapping.geography_layers import (
+                            add_reference_wells)
+                        _rb = st.session_state.get("_drawn_bounds")
+                        _rn, _rscope = add_reference_wells(
+                            m, engine, bounds=_rb, show=True)
+                        _msg.info(
+                            f"🔵 Drew {_rn:,} reference well(s)"
+                            + ("" if _rscope is not None else
+                               " — capped; zoom in or draw an area for the rest"))
+                    except Exception as _re:
+                        _msg.warning(f"Reference wells skipped: {_re}")
             except Exception as _ge:
                 _msg.warning(f"Geography layers skipped: {_ge}")
 

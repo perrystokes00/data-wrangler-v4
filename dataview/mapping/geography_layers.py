@@ -152,7 +152,52 @@ def add_geography_layer(m, engine, key: str, show: bool = True) -> int:
     return len(gj["features"])
 
 
-def add_well_points(m, engine, show: bool = True, limit: int = 5000) -> int:
+def points_layer(m, points, name, *, color="#222", fill="#555",
+                 radius=3, show=True, opacity=0.9):
+    """N points as ONE GeoJson layer. Returns the number drawn.
+
+    ONE LAYER, NOT N MARKERS. A CircleMarker per point makes folium serialise
+    one JS object each, and serialisation -- not the query, not the build -- is
+    what the map actually spends its time on, because the whole map is
+    re-serialised and shipped to the browser on EVERY rerun. Measured at 50,000
+    points:
+
+        CircleMarker each   34.90s   46.1 MB
+        one GeoJson          0.81s   11.7 MB     43x faster, 4x smaller
+
+    Coordinates are rounded to 5 decimals (~1 m). Beyond that the digits are
+    noise in a well header and cost payload on every redraw.
+
+    A tooltip, never a popup. The map's click handler tells a well marker from
+    a density cell by "markers have popups, cells don't", so giving these
+    popups would make every point look like a marker click to that code.
+    """
+    feats = []
+    for la, lo, label in points:
+        try:
+            la, lo = float(la), float(lo)
+        except (TypeError, ValueError):
+            continue
+        feats.append({
+            "type": "Feature",
+            "properties": {"nm": str(label or "")},
+            "geometry": {"type": "Point",
+                         "coordinates": [round(lo, 5), round(la, 5)]},
+        })
+    if not feats:
+        return 0
+    folium.GeoJson(
+        {"type": "FeatureCollection", "features": feats},
+        name=name, show=show,
+        marker=folium.CircleMarker(radius=radius, color=color, weight=1,
+                                   fill=True, fill_color=fill,
+                                   fill_opacity=opacity),
+        tooltip=folium.GeoJsonTooltip(fields=["nm"], labels=False),
+    ).add_to(m)
+    return len(feats)
+
+
+def add_well_points(m, engine, show: bool = True, limit: int = 50000) -> int:
     """dv_well.geog as plain CircleMarkers — the native-geography view of the
     well set, independent of the lat/lon columns the main markers use.
     geography .Lat/.Long avoids WKT parsing entirely."""
@@ -174,20 +219,80 @@ def add_well_points(m, engine, show: bool = True, limit: int = 5000) -> int:
         return 0
     if not rows:
         return 0
-    fg = folium.FeatureGroup(name=f"⚫ Well points (geog) ({len(rows):,})",
-                             show=show)
-    for nm_v, la, lo in rows:
+    return points_layer(
+        m, ((la, lo, nm_v) for nm_v, la, lo in rows),
+        name=f"⚫ Well points (geog) ({len(rows):,})", show=show)
+
+
+REFERENCE_MASTER = "WELL_REF.well_ref.well_master_gold"
+
+
+def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
+                        show: bool = True):
+    """Individual reference wells as ONE GeoJson layer. (drawn, in_scope).
+
+    THE DENSITY VIEW IS NOT A SUBSTITUTE, and this is not the layer that was
+    deleted. v_well_density_r* answers "where are wells" for 3.9M rows at
+    continental zoom; it cannot answer "which wells are these" when you are
+    looking at one field. That needs the points, and the points only became
+    affordable once a layer stopped meaning N marker objects.
+
+    BOUNDED AND CAPPED, in that order. The master is 4,031,052 rows, so a
+    bounds-less pull is 50,000 arbitrary wells dressed up as an answer -- the
+    layer name says exactly what it is showing and out of how many, because a
+    silent truncation reads as completeness.
+
+    bounds -- ((south, west), (north, east)) as st_folium reports them, or
+              None for the whole master.
+    """
+    # BETWEEN ALREADY EXCLUDES NULL, so adding IS NOT NULL beside it is
+    # redundant -- and expensive: measured 1.37s against 0.04s for the same
+    # 11,291 rows, 34x, because the extra predicates spoil the seek on
+    # IX_wmg_latlon. The NULL guards are kept ONLY for the unbounded case,
+    # where there is no BETWEEN to imply them.
+    params = {}
+    if bounds:
         try:
-            la, lo = float(la), float(lo)
-        except (TypeError, ValueError):
-            continue
-        folium.CircleMarker(
-            location=[la, lo], radius=3, color="#222", weight=1,
-            fill=True, fill_color="#555", fill_opacity=0.9,
-            tooltip=str(nm_v or ""),
-        ).add_to(fg)
-    fg.add_to(m)
-    return len(rows)
+            (s, w), (n, e) = bounds
+            where = ["surface_latitude BETWEEN :s AND :n",
+                     "surface_longitude BETWEEN :w AND :e"]
+            params = {"s": float(s), "n": float(n),
+                      "w": float(w), "e": float(e)}
+        except Exception:
+            where = ["surface_latitude IS NOT NULL",
+                     "surface_longitude IS NOT NULL"]
+    else:
+        where = ["surface_latitude IS NOT NULL",
+                 "surface_longitude IS NOT NULL"]
+    clause = " AND ".join(where)
+    # ROWS FIRST, AND COUNT ONLY IF IT TELLS US SOMETHING. Under the cap the
+    # fetch IS the count -- asking the server twice is free information at a
+    # real price: COUNT(*) over a 2M-row bbox measured 5.90s, longer than
+    # everything else on the map put together, purely to print an exact total
+    # that reads "lots". Over the cap, the honest statement is that it is
+    # capped, which needs no count at all.
+    try:
+        with engine.connect() as con:
+            rows = con.execute(text(
+                f"SELECT TOP {int(limit)} well_name, surface_latitude, "
+                f"surface_longitude FROM {REFERENCE_MASTER} WHERE {clause}"),
+                params).fetchall()
+    except Exception as exc:
+        print(f"[geography_layers] reference wells query failed: {exc}")
+        return 0, 0
+    capped = len(rows) >= int(limit)
+    in_scope = None if capped else len(rows)
+    if not rows:
+        return 0, 0
+    label = (f"🔵 Reference wells ({len(rows):,}"
+             + (" shown, capped — zoom in to see the rest"
+                if capped else "") + ")")
+    n_drawn = points_layer(m, ((la, lo, nm) for nm, la, lo in rows),
+                           name=label, color="#1d4ed8", fill="#60a5fa",
+                           radius=2, show=show, opacity=0.7)
+    # in_scope is None when capped: "we do not know, and finding out costs
+    # more than the answer is worth". Never 0, which would read as "none here".
+    return n_drawn, in_scope
 
 
 def add_all_geography_layers(m, engine) -> int:
