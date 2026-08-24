@@ -1545,6 +1545,35 @@ def tier_units(res, verbose=False):
             "is not '~Curve'")
         assert b.sets["Log"].rows == [[540.5, 61.2], [541.0, 62.7]], \
             b.sets["Log"].rows
+
+        # CAPTURE DOES NOT WANT THE SAMPLES. The catalog stores curve METADATA
+        # and never the bulk arrays, so parsing a Log set of 8,000-13,000 rows
+        # on every capture is work thrown away. curve_data=False keeps the
+        # COLUMNS — a set with no columns cannot be mapped — and drops only the
+        # rows.
+        c = split_las3(_io.StringIO(bare), curve_data=False)
+        assert c.sets["Log"].rows == [], c.sets["Log"].rows
+        assert len(c.sets["Log"].columns) == 2, \
+            "the skip dropped the column definitions too, so the set is unusable"
+
+        # ...and it must not touch any OTHER set. Inclinometry is the whole
+        # point of reading a 3.0 file here; a skip that silently emptied it
+        # would look exactly like a file with no survey.
+        full = split_las3(_io.StringIO(las3))
+        cheap = split_las3(_io.StringIO(las3), curve_data=False)
+        for _n in full.sets:
+            if _n == "Log":
+                continue
+            assert full.sets[_n].rows == cheap.sets[_n].rows, \
+                f"curve_data=False changed the {_n} set"
+
+        # and the capture path must actually ask for the cheap read
+        import inspect
+        from dataview.file_catalog import extract_core as _ec
+        _src = inspect.getsource(_ec)
+        assert "split_las3(fpath, curve_data=False)" in _src, \
+            "capture parses the Log samples again — thousands of rows per " \
+            "file materialised and dropped on the floor"
     check("LAS 3.0: ~Inclinometry maps to the survey mirrors, parent included",
           _las3_inclinometry)
 

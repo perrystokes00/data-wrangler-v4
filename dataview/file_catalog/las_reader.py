@@ -307,8 +307,21 @@ def _coerce(raw, fmt, null_value):
     return v
 
 
-def split_las3(source):
+def split_las3(source, curve_data=True):
     """Parse a LAS 3.0 file into its named data sets. Returns Las3File.
+
+    curve_data=False parses the Log set's COLUMNS but not its ROWS.
+
+    THE CATALOG STAGE DOES NOT WANT THE SAMPLES. It stores curve METADATA —
+    mnemonic, unit, description, depth frame — and never the bulk arrays;
+    that is the deep stage's job, and the comment in extract_core has said so
+    since long before 3.0 arrived. Parsing them anyway costs real work: the
+    generated 3.0 files carry 8,568-13,084 rows x 15 columns each, materialised
+    on every capture and then dropped on the floor.
+
+    The VIEWER does want them, so this is a parameter rather than a rule. Same
+    split as everywhere else here: the pipeline takes the cheap path, the
+    screen takes the expensive one, and neither decides for the other.
 
     Raises ValueError if the file does not declare VERS 3.x — this reader is
     not a general LAS parser and must not be pointed at a 2.0 file that lasio
@@ -404,6 +417,12 @@ def split_las3(source):
         cols = [Las3Column(m, u, d, f)
                 for m, u, _v, d, f in _parse_header_lines(by_name[defname])]
         rows = []
+        # The columns are always parsed — they are the definition, they are
+        # cheap, and a set with no columns cannot be mapped to anything. Only
+        # the SAMPLES are skipped.
+        if base == "Log" and not curve_data:
+            sets[base] = Las3Set(base, cols, rows)
+            continue
         for line in body:
             if not line.strip():
                 continue

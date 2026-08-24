@@ -1957,7 +1957,11 @@ def _load_rows_to_catalog(engine, dialect, fpath, fext, uwi, rows):
                 try:
                     from dataview.file_catalog.las_reader import split_las3
                     from dataview.file_catalog.las3_capture import all_sets
-                    _l3 = split_las3(fpath)
+                    # curve_data=False: the catalog stores curve METADATA, not
+                    # sample arrays, so parsing the Log set's rows here is
+                    # 8,000-13,000 rows per file of work thrown away. The
+                    # viewer asks for them; capture does not.
+                    _l3 = split_las3(fpath, curve_data=False)
                     _l3rows = all_sets(_l3, uwi=uwi, inventory_id=inv,
                                        source_path=fpath)
                     for _t3, _r3 in _l3rows.items():
