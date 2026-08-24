@@ -612,7 +612,7 @@ def _ex_report(log, files=0):
 
 def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
                    exts=None, per_type_cap=None, parse_mode="thread",
-                   root=None):
+                   root=None, should_abort=None):
     """Reuse extract_core._extract_fields + _write_enrichment_on on every
     pending file, parallel parse + sequential write, chunked.
 
@@ -715,7 +715,22 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
                                (r[0], r[1], (r[2] or "").lower()))
         return pool.submit(_worker, r)
 
+    # EVERY FILE THIS STAGE HAS ALREADY TRIED. A claim that comes back
+    # holding nothing new means the previous attempt cleared no pending
+    # flag, so the next claim returns the same rows and this loop never
+    # ends. That is not hypothetical: 7 LAS files whose header write
+    # failed (nvarchar -> numeric) were re-parsed ~570 times each, wrote
+    # 117,640 log lines, and reported "ok 3,995" for 7 files.
+    attempted = set()
+
     while True:
+        # The abort hook was reaching only _go(), which runs BETWEEN
+        # stages - so the UI's stop file could not interrupt a stage
+        # already looping and the process tree had to be killed.
+        if should_abort and should_abort():
+            log("[extract] abort requested - stopping between chunks "
+                f"({processed:,} file(s) processed; the rest stay pending).")
+            break
         remaining = None if max_files is None else max_files - processed
         if remaining is not None and remaining <= 0:
             log(f"[extract] reached cap of {max_files:,} — stopping "
@@ -758,6 +773,24 @@ def _stage_extract(engine, workers, log, max_files=None, stall_timeout=180,
 
         if not rows:
             break
+
+        # NO PROGRESS = STOP, AND SAY WHICH FILES. A file whose write
+        # failed keeps its pending flag, so it is claimed again next
+        # chunk. Only break when EVERY claimed row was already tried:
+        # a chunk that still carries new work must run, or a single bad
+        # file would halt a queue of thousands.
+        claimed = [r[0] for r in rows]
+        if all(i in attempted for i in claimed):
+            _stuck = ", ".join(str(i)[:12] for i in claimed[:5])
+            if len(claimed) > 5:
+                _stuck += f", +{len(claimed) - 5} more"
+            log(f"[extract] no progress - {len(claimed):,} file(s) came "
+                f"back pending after being processed, so the write is "
+                f"failing and re-running will not clear them. Stopping "
+                f"instead of looping. Stuck: {_stuck}. The reason is "
+                f"in the [x] write lines above.")
+            break
+        attempted.update(claimed)
 
         results = []
         _t_parse = time.perf_counter()
@@ -2386,7 +2419,8 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
                                             stall_timeout=stall_timeout,
                                             exts=exts, per_type_cap=per_type_cap,
                                             parse_mode=parse_mode,
-                                            root=_scope_root))
+                                            root=_scope_root,
+                                            should_abort=should_abort))
                 except Exception as e:
                     s["errors"]["extract"] = str(e)
                     log(f"[extract] FAILED: {e}")

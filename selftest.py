@@ -1577,6 +1577,68 @@ def tier_units(res, verbose=False):
     check("LAS 3.0: ~Inclinometry maps to the survey mirrors, parent included",
           _las3_inclinometry)
 
+    def _extract_cannot_loop():
+        # A FILE WHOSE WRITE FAILS KEEPS ITS PENDING FLAG, so the next claim
+        # returns it again and _stage_extract never leaves its `while True`.
+        # Seven LAS files did exactly that on 23 Aug 2026: ~570 passes each,
+        # 117,640 log lines, "ok 3,995" reported for 7 files, and the UI Stop
+        # button could not reach it because should_abort was consulted only
+        # BETWEEN stages. The process tree had to be killed.
+        #
+        # THIS IS STRUCTURAL, NOT TEXTUAL. A grep for "attempted" passes on a
+        # variable that is assigned and never read — the same shape as the
+        # invariant keyed on FILE_NAME that could never fail. So walk the AST:
+        # the guard and the abort check must both sit INSIDE the loop, and each
+        # must be able to leave it.
+        import ast
+        import inspect
+        from dataview.import_data import pipeline_run as _pr
+
+        sig = inspect.signature(_pr._stage_extract)
+        assert "should_abort" in sig.parameters, (
+            "_stage_extract no longer takes should_abort — the Stop button "
+            "cannot interrupt a stage that is already looping")
+
+        tree = ast.parse(inspect.getsource(_pr).replace("\r\n", "\n"))
+        tgt = next(n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "_stage_extract")
+        loops = [n for n in ast.walk(tgt) if isinstance(n, ast.While)]
+        assert loops, "_stage_extract has no loop to guard"
+
+        def _breaks_on(loop, want):
+            """Is there an `if <… want …>: … break` directly in this loop?"""
+            for node in loop.body:
+                if not isinstance(node, ast.If):
+                    continue
+                names = {m.id for m in ast.walk(node.test)
+                         if isinstance(m, ast.Name)}
+                if want in names and any(isinstance(b, ast.Break)
+                                         for b in ast.walk(node)):
+                    return True
+            return False
+
+        assert any(_breaks_on(lp, "attempted") for lp in loops), (
+            "the extract loop no longer breaks when a claim comes back holding "
+            "only files it already tried — a failed write makes it spin forever")
+        assert any(_breaks_on(lp, "should_abort") for lp in loops), (
+            "the extract loop no longer checks should_abort, so the Stop button "
+            "cannot end a run once this stage has started")
+
+        # and the caller must actually hand the hook over: run_pipeline already
+        # has it, and a parameter nobody passes is not a guard
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name)
+                 and n.func.id == "_stage_extract"]
+        assert calls, "no call to _stage_extract found"
+        for c in calls:
+            assert any(k.arg == "should_abort" for k in c.keywords), (
+                "a _stage_extract call does not pass should_abort, so that run "
+                "cannot be stopped once it starts")
+    check("extract: a failed write stops the stage instead of looping",
+          _extract_cannot_loop)
+
     return res
 
 
