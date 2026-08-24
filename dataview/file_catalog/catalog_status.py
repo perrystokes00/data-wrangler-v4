@@ -116,6 +116,11 @@ _HOLD_NO_COORDS = "no coords"
 _HOLD_NO_WELL_UWI = "no UWI on detail row"
 _HOLD_WELL_HELD = "well header held"
 
+# Parameterised by the parent, because "missing parent" without saying WHICH
+# parent is the same non-answer as "well header held" without saying which
+# reason. The label carries e.g. dv_well_log(uwi,log_id).
+_HOLD_PARENT_MISSING = "parent row missing: {parent}"
+
 # "Clear the header's reason" is true and useless if the report will not say
 # WHICH reason. Measured 23 Aug: three files each showed
 # {'no coords': 1, 'well header held': 30} — the blocker was the OTHER reason
@@ -178,6 +183,14 @@ CLEAR_ROUTE = {
 }
 CLEAR_ROUTE_REF = ("Seed the code into its dv_r_* table, or map it to an "
                    "existing code, in Promote -> reference FK review.")
+
+# Parameterised label, so it needs a prefix route the way 'unresolved ' does.
+CLEAR_ROUTE_PARENT = (
+    "These rows name a parent row that does not exist, so promote holds them "
+    "rather than failing the whole table on a FK violation. The parent is "
+    "usually staged by the SAME file: re-run capture (2) so it is written, "
+    "then promote. If the parent genuinely belongs to another document, "
+    "catalog that document first.")
 
 
 @dataclass
@@ -363,6 +376,34 @@ def _mirror_holds(con, cat: str, dv: str, notes: list):
             _add(_HOLD_NO_COORDS,
                  "(NULLIF(LTRIM(RTRIM(m.UWI)),'') IS NOT NULL "
                  "AND " + _COORD_MISSING.format(a="m") + ")")
+
+    # --- gate 2b: the parent row does not exist ----------------------------- #
+    # promote_catalog gained this gate on 23 Aug and this report did not, so
+    # four LAS files sat at STAGED with NO REASON while promote refused them
+    # every run: "36 waiting on a parent row that does not exist:
+    # dv_well_log(uwi,log_id)". The page said the rows were fine and promote
+    # said they were not, which is the worst of the four states — it is not
+    # even wrong in a way anyone can act on.
+    #
+    # DISCOVERY AND PREDICATE BOTH COME FROM promote_catalog. The executor has
+    # to differ (SQLAlchemy here, pyodbc there) but the QUESTION and the SQL
+    # must not: a second spelling is precisely how a gate and its explanation
+    # drift apart, which is the bug this block exists to close.
+    try:
+        from dataview.file_catalog.promote_catalog import (
+            PARENT_FK_SQL as _PFK_SQL, parent_fk_sql as _pfk)
+        _rows = con.execute(_t(_PFK_SQL.format(p0=":s", p1=":t")),
+                            {"s": DV_SCHEMA, "t": dv}).fetchall()
+        _by_fk: dict = {}
+        for _fk, _ref, _lc, _rc in _rows:
+            _by_fk.setdefault(_fk, {"ref": _ref, "cols": []})
+            _by_fk[_fk]["cols"].append((_lc, _rc))
+        _sql, _labels, _bodies = _pfk(_by_fk, cat_cols, "m")
+        for _lbl, _body in zip(_labels, _bodies):
+            _add(_HOLD_PARENT_MISSING.format(parent=_lbl), f"NOT {_body}")
+    except Exception as _pe:                       # pragma: no cover
+        notes.append(f"parent-FK holds not computed for {cat}: "
+                     f"{type(_pe).__name__}: {_pe}")
 
     # --- gate 3: unresolved reference vocabulary ---------------------------- #
     # Guarded only where the column exists on BOTH sides, which is promote's
@@ -638,9 +679,15 @@ def reason_summary(res: StatusResult):
             a = agg.setdefault(label, {"files": 0, "rows": 0})
             a["files"] += 1
             a["rows"] += n
+    def _route(k):
+        if k.startswith("unresolved "):
+            return CLEAR_ROUTE_REF
+        if k.startswith("parent row missing:"):
+            return CLEAR_ROUTE_PARENT
+        return CLEAR_ROUTE.get(k, "")
+
     out = [{"reason": k, "files": v["files"], "rows": v["rows"],
-            "clears_by": (CLEAR_ROUTE_REF if k.startswith("unresolved ")
-                          else CLEAR_ROUTE.get(k, ""))}
+            "clears_by": _route(k)}
            for k, v in agg.items()]
     return (pd.DataFrame(out).sort_values(["rows", "files"], ascending=False)
             .reset_index(drop=True)

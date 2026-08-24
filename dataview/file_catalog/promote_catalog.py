@@ -349,6 +349,54 @@ def _reference_fk_predicates(cur, dv_table, shared, alias="m"):
     return "".join(preds), cols
 
 
+# The discovery half, as ONE query text. catalog_status runs it through
+# SQLAlchemy and promote runs it through pyodbc, so the executor differs; the
+# QUESTION must not. Two spellings of "which parent FKs does this table have"
+# is how the report and the gate come to disagree about the same rows — which
+# is exactly what happened when the gate was added here and nowhere else.
+PARENT_FK_SQL = (
+    "SELECT fk.name, rt.name, cpa.name, cref.name "
+    "FROM sys.foreign_keys fk "
+    "JOIN sys.foreign_key_columns fkc "
+    "       ON fkc.constraint_object_id = fk.object_id "
+    "JOIN sys.tables  pt  ON pt.object_id = fk.parent_object_id "
+    "JOIN sys.schemas ps  ON ps.schema_id = pt.schema_id "
+    "JOIN sys.tables  rt  ON rt.object_id = fk.referenced_object_id "
+    "JOIN sys.columns cpa ON cpa.object_id = fkc.parent_object_id "
+    "                    AND cpa.column_id = fkc.parent_column_id "
+    "JOIN sys.columns cref ON cref.object_id = fkc.referenced_object_id "
+    "                     AND cref.column_id = fkc.referenced_column_id "
+    "WHERE ps.name = {p0} AND pt.name = {p1} "
+    "  AND rt.name NOT LIKE 'dv[_]r[_]%' "
+    "  AND rt.name <> 'dv_well' "
+    "  AND rt.object_id <> pt.object_id "
+    "ORDER BY fk.name, fkc.constraint_column_id")
+
+
+def parent_fk_sql(by_fk, shared, alias="m"):
+    """Build the hold predicates from discovered FK metadata.
+
+    THE ONE DEFINITION, called by promote (to gate) and by catalog_status (to
+    explain). `by_fk` is {fk_name: {"ref": table, "cols": [(child, parent)...]}}.
+    Returns (sql, labels, bodies) — see _parent_fk_predicates for the reasoning
+    about NULL semantics and partially-shared keys.
+    """
+    shared_lower = {s.lower() for s in shared}
+    preds, labels, bodies = [], [], []
+    for _fk, d in by_fk.items():
+        cols = d["cols"]
+        if not all(lc.lower() in shared_lower for lc, _ in cols):
+            continue
+        nulls = " OR ".join(f"{alias}.[{lc}] IS NULL" for lc, _ in cols)
+        join = " AND ".join(f"r.[{rc}] = {alias}.[{lc}]" for lc, rc in cols)
+        body = (f"({nulls} OR EXISTS "
+                f"(SELECT 1 FROM {DV_SCHEMA}.[{d['ref']}] r WHERE {join}))")
+        preds.append(" AND " + body)
+        bodies.append(body)
+        labels.append(f"{d['ref']}({','.join(lc for lc, _ in cols)})")
+    return "".join(preds), labels, bodies
+
+
 def _parent_fk_predicates(cur, dv_table, shared, alias="m"):
     """Predicates that HOLD rows whose PARENT row does not exist, instead of
     letting the INSERT abort the whole mirror on a 547.
@@ -383,46 +431,16 @@ def _parent_fk_predicates(cur, dv_table, shared, alias="m"):
     predicates unwrapped, so the caller can count what THIS gate actually held
     rather than listing every gate that might have.
     """
-    cur.execute(
-        "SELECT fk.name, rt.name, cpa.name, cref.name "
-        "FROM sys.foreign_keys fk "
-        "JOIN sys.foreign_key_columns fkc "
-        "       ON fkc.constraint_object_id = fk.object_id "
-        "JOIN sys.tables  pt  ON pt.object_id = fk.parent_object_id "
-        "JOIN sys.schemas ps  ON ps.schema_id = pt.schema_id "
-        "JOIN sys.tables  rt  ON rt.object_id = fk.referenced_object_id "
-        "JOIN sys.columns cpa ON cpa.object_id = fkc.parent_object_id "
-        "                    AND cpa.column_id = fkc.parent_column_id "
-        "JOIN sys.columns cref ON cref.object_id = fkc.referenced_object_id "
-        "                     AND cref.column_id = fkc.referenced_column_id "
-        "WHERE ps.name = ? AND pt.name = ? "
-        "  AND rt.name NOT LIKE 'dv[_]r[_]%' "
-        "  AND rt.name <> 'dv_well' "
-        "  AND rt.object_id <> pt.object_id "        # not self-referencing
-        "ORDER BY fk.name, fkc.constraint_column_id",
-        DV_SCHEMA, dv_table)
+    cur.execute(PARENT_FK_SQL.format(p0="?", p1="?"), DV_SCHEMA, dv_table)
 
     by_fk: dict = {}
     for fk_name, ref_table, local_col, ref_col in cur.fetchall():
         by_fk.setdefault(fk_name, {"ref": ref_table, "cols": []})
         by_fk[fk_name]["cols"].append((local_col, ref_col))
 
-    shared_lower = {s.lower() for s in shared}
-    preds, labels, bodies = [], [], []
-    for fk_name, d in by_fk.items():
-        cols = d["cols"]
-        # Every column of the key must be one we are actually promoting; a key
-        # we only half-supply is not a key we can test.
-        if not all(lc.lower() in shared_lower for lc, _ in cols):
-            continue
-        nulls = " OR ".join(f"{alias}.[{lc}] IS NULL" for lc, _ in cols)
-        join = " AND ".join(f"r.[{rc}] = {alias}.[{lc}]" for lc, rc in cols)
-        body = (f"({nulls} OR EXISTS "
-                f"(SELECT 1 FROM {DV_SCHEMA}.[{d['ref']}] r WHERE {join}))")
-        preds.append(" AND " + body)
-        bodies.append(body)
-        labels.append(f"{d['ref']}({','.join(lc for lc, _ in cols)})")
-    return "".join(preds), labels, bodies
+    # Every column of the key must be one we are actually promoting; a key we
+    # only half-supply is not a key we can test. See parent_fk_sql.
+    return parent_fk_sql(by_fk, shared, alias)
 
 
 def _fill_cat_coords_from_gold(cur, cat, lat_col, lon_col, uwi_filter, params):
