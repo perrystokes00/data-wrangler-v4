@@ -1306,31 +1306,49 @@ def tier_units(res, verbose=False):
     def _las3_sections():
         import tempfile
         from dataview.file_catalog.las_reader import split_las3
+        # SHAPED LIKE THE REAL SPEC SAMPLES, not like something convenient.
+        # The first fixture used bare "~Version" headers and "_Data" section
+        # names, and passed while the reader could not read either of the two
+        # LAS 3.0 sample files published with the standard. Every oddity below
+        # is copied from those files:
+        #   * trailing prose after the section name ("~VERSION INFORMATION")
+        #   * data sections named for the SUBJECT, not "_Data" ("~TOPS | …")
+        #   * an INDEX distinguishing two sets of one kind (~Core[1], ~Core[2])
+        #   * an association whose case differs from the section it names
+        #     ("~TEST | TEST_Definition" against "~Test_Definition")
+        #   * "~ASCII | CURVE" — the log data pointing at ~CURVE INFORMATION
         las3 = (
-            "~Version\n"
+            "~VERSION INFORMATION\n"
             "VERS.   3.0 : CWLS LOG ASCII STANDARD - VERSION 3.0\n"
             "WRAP.   NO  : ONE LINE PER DEPTH STEP\n"
             "DLM .   COMMA : DELIMITING CHARACTER\n"
-            "\n~Well\n"
+            "\n~Well Information\n"
             "NULL .     -999.25 : NULL VALUE\n"
             "UWI  .     15041204660000 : UNIQUE WELL IDENTIFIER\n"
             "WELL .     BAKER, 13-8 : WELL NAME\n"
-            "\n~Log_Definition\n"
+            "\n~CURVE INFORMATION\n"
             "DEPT .M    : Depth {F}\n"
             "GR   .GAPI : Gamma Ray {F}\n"
-            "\n~Log_Data | Log_Definition\n"
+            "\n~ASCII | CURVE\n"
             "540.5,61.2\n"
             "541.0,-999.25\n"
             "\n~Core_Definition\n"
             "CORT .M : Core top {F}\n"
             "CORD .  : Core description {S}\n"
-            "\n~Core_Data | Core_Definition\n"
+            "\n~Core[1] | Core_Definition\n"
             '541.0,"shale, silty"\n'
-            "\n~Tops_Definition\n"
+            "\n~Core[2] | Core_Definition\n"
+            "560.0,Fine sandstone\n"
+            "\n~Test_Definition\n"
+            "DST  .  : Test number {F}\n"
+            "DDES .  : Recovery {S}\n"
+            "\n~TEST | TEST_Definition\n"
+            "1,Oil to surface\n"
+            "\n~TOPS_Definition\n"
             "TOPT .M : Top depth {F}\n"
             "TOPN .  : Formation {S}\n"
-            "\n~Tops_Data | Tops_Definition\n"
-            "540.8,Cherokee\n")
+            "\n~TOPS | TOPS_Definition\n"
+            "540.8,Basal Quartz\n")
         p = os.path.join(tempfile.gettempdir(), "selftest_las3.las")
         try:
             with open(p, "w", encoding="utf-8") as f:
@@ -1338,7 +1356,10 @@ def tier_units(res, verbose=False):
             las = split_las3(p)
             assert las.version.startswith("3"), las.version
             assert las.delimiter == ",", repr(las.delimiter)
-            assert set(las.sets) == {"Log", "Core", "Tops"}, sorted(las.sets)
+            # ~ASCII|CURVE lands as 'Log'; the two Core sets stay APART, which
+            # is the point of the index — merging them drops one silently
+            assert set(las.sets) == {"Log", "Core[1]", "Core[2]", "TEST",
+                                     "TOPS"}, sorted(las.sets)
 
             # a comma inside a HEADER value is data, not a delimiter
             assert las.well["WELL"] == "BAKER, 13-8", las.well["WELL"]
@@ -1351,12 +1372,18 @@ def tier_units(res, verbose=False):
 
             # a QUOTED value containing the delimiter stays one cell; splitting
             # it would shift every column after it and land plausible garbage
-            assert las.sets["Core"].rows == [[541.0, "shale, silty"]], \
-                las.sets["Core"].rows
+            assert las.sets["Core[1]"].rows == [[541.0, "shale, silty"]], \
+                las.sets["Core[1]"].rows
+            assert las.sets["Core[2]"].rows == [[560.0, "Fine sandstone"]], \
+                las.sets["Core[2]"].rows
+
+            # an association whose CASE differs from the section it names
+            assert las.sets["TEST"].rows == [[1.0, "Oil to surface"]], \
+                las.sets["TEST"].rows
 
             # {F} and {S} produce a float and a str, not two strings
-            t = las.sets["Tops"].rows[0]
-            assert isinstance(t[0], float) and t[1] == "Cherokee", t
+            t = las.sets["TOPS"].rows[0]
+            assert isinstance(t[0], float) and t[1] == "Basal Quartz", t
 
             # and it must REFUSE a 2.0 file rather than half-parsing one that
             # lasio already handles properly

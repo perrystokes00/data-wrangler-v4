@@ -132,7 +132,21 @@ def read_las(source, **kw):
 # A 3.0 section header is `~Name` optionally followed by an association after a
 # pipe: `~Log_Data | Log_Definition`. Everything up to the pipe (or whitespace)
 # is the name; 3.0 allows arbitrary names, so nothing is matched against a list.
-_SECTION_HEAD = re.compile(r"^\s*~\s*([^|\s]+)\s*(?:\|\s*(.*?))?\s*$")
+# THE NAME IS THE FIRST TOKEN AND THE REST OF THE LINE IS PROSE. Real files
+# write "~VERSION INFORMATION", "~Well Information", "~CURVE INFORMATION" —
+# the trailing words are decoration the standard has always allowed. Requiring
+# the name to be the whole line matched none of them, so the first run against
+# the two real spec samples found ZERO header sections and concluded neither
+# was a 3.0 file. The synthetic fixture never caught it because I wrote it with
+# bare "~Version" headers.
+#
+# An index is part of the name: ~Core[1] and ~Core[2] are two distinct core
+# sets in one file, and collapsing them would silently drop the second.
+_SECTION_HEAD = re.compile(r"^\s*~\s*([^\s|]+)[^|]*(?:\|\s*(.*?))?\s*$")
+
+# 'Core[1]' -> ('Core', '1'). The base is what a mapping cares about; the index
+# is what keeps two sets of the same kind apart.
+_SECTION_INDEX = re.compile(r"^(.*?)\[(\d+)\]$")
 
 # A header LINE inside a Definition/Parameter/Well section:
 #     MNEM .UNIT   VALUE : DESCRIPTION {F}
@@ -339,28 +353,42 @@ def split_las3(source):
                         null_value = None
             break
 
-    # Pair every *_Data with its definition. The association after the pipe
-    # wins; otherwise the name with _Data swapped for _Definition. ~Ascii is
-    # 2.0's spelling surviving into 3.0 and pairs with ~Curve/~Log_Definition.
+    # A DATA SECTION IS ONE THAT NAMES A DEFINITION. That is the rule the real
+    # files follow — "~Drilling | Drilling_Definition", "~Core[1] |
+    # Core_Definition", "~ASCII | CURVE". My first cut keyed on a "_Data"
+    # suffix, which the LAS 3.0 spec samples do not use ANYWHERE; it matched
+    # only my own fixture. The association is the signal, and it also tells us
+    # which definition to use without guessing at the name.
+    #
+    # A bare ~Ascii/~A with no association is 2.0's spelling surviving into a
+    # 3.0 file; fall back to the conventional definition sections for it.
     sets = {}
     for name, assoc, body in raw:
         low = name.lower()
-        if not (low.endswith("_data") or low in ("ascii", "a")):
-            continue
-        if low in ("ascii", "a"):
-            base, defname = "Log", None
-            for cand in ("Log_Definition", "Curve"):
-                if cand in by_name:
-                    defname = cand
-                    break
-        else:
-            base = name[: -len("_Data")]
-            defname = assoc or f"{base}_Definition"
-            if defname not in by_name:
-                defname = next((k for k in by_name
-                                if k.lower() == defname.lower()), None)
+        bare_ascii = low in ("ascii", "a") and not assoc
+        if not assoc and not bare_ascii:
+            continue                       # a Definition/Parameter/Other block
+        if low.endswith("_definition") or low.endswith("_parameter"):
+            continue                       # never data, whatever it associates
+
+        m = _SECTION_INDEX.match(name)
+        base = (m.group(1) if m else name)
+        if base.lower() in ("ascii", "a"):
+            base = "Log"
+
+        defname = assoc or None
+        if bare_ascii:
+            defname = next((c for c in ("Log_Definition", "Curve")
+                            if c in by_name), None)
+        if defname and defname not in by_name:
+            # case may differ between the association and the section it names
+            # — the spec sample writes "~TEST | TEST_Definition" against a
+            # section headed "~Test_Definition".
+            defname = next((k for k in by_name
+                            if k.lower() == defname.lower()), None)
         if not defname:
             continue
+        base = name if m else base         # keep Core[1] / Core[2] distinct
         cols = [Las3Column(m, u, d, f)
                 for m, u, _v, d, f in _parse_header_lines(by_name[defname])]
         rows = []
