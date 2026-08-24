@@ -2500,6 +2500,119 @@ def tier_units(res, verbose=False):
     check("segy: a 3D slice returns the traces it was asked for",
           _volume_slices_find_the_right_traces)
 
+    def _rich_las3_round_trips():
+        # A GENERATED FIXTURE IS ONLY WORTH ANYTHING IF IT READS BACK. The one
+        # that taught this: a bare ~Ascii found no definition section, so every
+        # generated 3.0 file produced a flawless header and ZERO data sets --
+        # no exception, no warning, just an empty result that looked like the
+        # reader's fault. So this writes a file with the real generator and
+        # parses it with the real parser, and checks the VALUES, not the shape.
+        import os
+        import random
+        import tempfile
+        from dataview.migration.synth_docs import las_file
+        from dataview.file_catalog.las_reader import split_las3
+
+        w = {"uwi": "15027206110000", "well_name": "SELFTEST 1-1",
+             "operator_name": "TEST OPERATING", "county": "HARPER",
+             "province_state": "KS", "final_td": 7800,
+             "kb_elevation": 1520, "ground_elevation": 1508,
+             "spud_date": "2021-04-12"}
+        tmp = tempfile.mkdtemp(prefix="las3_rich_")
+        rich = os.path.join(tmp, "rich.las")
+        plain2 = os.path.join(tmp, "plain2.las")
+        try:
+            las_file(rich, w, random.Random(11), version="3.0", rich=True)
+            l3 = split_las3(rich)
+
+            for s in ("Log", "Core[1]", "Tops", "Inclinometry", "Test"):
+                assert s in l3.sets, (
+                    "the rich 3.0 file lost its ~" + s + " set -- it parses to "
+                    + repr(sorted(l3.sets)) + ". A multi-section file is the "
+                    "whole reason 3.0 and split_las3 exist.")
+                assert l3.sets[s].rows, "~" + s + " parsed with no rows"
+
+            log = l3.sets["Log"]
+            mn = [c.mnemonic for c in log.columns]
+            for m in ("DEPT", "GR", "RESD", "RESM", "RESS", "SGR", "CGR", "DTS"):
+                assert m in mn, "the extended suite lost " + m + ": " + repr(mn)
+
+            def _col(st, name):
+                i = [c.mnemonic for c in st.columns].index(name)
+                return [r[i] for r in st.rows if r[i] is not None]
+
+            def _pairs(st, a, b):
+                """(a, b) per ROW, skipping rows where either is null.
+
+                PAIRING BY ROW IS THE POINT. Filtering each curve's nulls
+                independently shortens the two lists by different amounts, so a
+                zip then compares DIFFERENT DEPTHS -- which is exactly how the
+                first cut of this check "found" CGR above SGR in a file where
+                it never happens. The generator drops a value at random in
+                ~0.4% of rows, so misalignment is reliable, not rare.
+                """
+                ia = [c.mnemonic for c in st.columns].index(a)
+                ib = [c.mnemonic for c in st.columns].index(b)
+                return [(r[ia], r[ib]) for r in st.rows
+                        if r[ia] is not None and r[ib] is not None]
+
+            # THE CURVES MUST AGREE WITH EACH OTHER. Independently random
+            # tracks pass every format check and are obviously wrong to anyone
+            # who reads logs, which is worse than having no fixture: it would
+            # be calibrated against.
+            assert all(c <= s + 1e-9 for s, c in _pairs(log, "SGR", "CGR")), (
+                "CGR rose above SGR -- the computed gamma cannot exceed the "
+                "total, it is the total less uranium")
+            assert all(s <= m + 1e-9 for m, s in _pairs(log, "RESM", "RESS")), (
+                "shallow resistivity read above medium -- the invasion profile "
+                "is inverted")
+            assert all(m <= d + 1e-9 for d, m in _pairs(log, "RESD", "RESM")), (
+                "medium resistivity read above deep")
+
+            # A survey whose TVD does not close teaches a directional loader
+            # the wrong answer, and las3_capture maps this set for real.
+            inc = l3.sets["Inclinometry"]
+            assert all(t <= m + 1e-6 for m, t in _pairs(inc, "MD", "TVD")), (
+                "a station's TVD exceeds its measured depth")
+            tvd = _col(inc, "TVD")
+            assert all(b >= a - 1e-6 for a, b in zip(tvd, tvd[1:])), (
+                "TVD is not monotonic down the hole")
+
+            # QUOTING. A core description carries a comma, and the file is
+            # comma-delimited; an unquoted one shifts every column after it and
+            # lands in a table looking plausible.
+            core = l3.sets["Core[1]"]
+            desc = _col(core, "DESC")
+            assert any("," in str(v) for v in desc), (
+                "no core description contains a comma, so the quoting path -- "
+                "the one that shifts every later column when it breaks -- is "
+                "not exercised by this fixture")
+            assert all(isinstance(v, str) for v in desc), (
+                "a core description parsed as something other than text")
+            assert all(isinstance(v, float) for v in _col(core, "CORE_TOP")), (
+                "a core depth parsed as text")
+
+            # AND THE OLDER VERSIONS MUST BE UNTOUCHED. rich is a 3.0 concept;
+            # if it leaked into the 2.0 writer it would change every existing
+            # fixture and the round-trip checks built on them.
+            n1 = las_file(plain2, w, random.Random(11), version="2.0", rich=True)
+            with open(plain2, encoding="utf-8") as fh:
+                body = fh.read()
+            assert n1 > 0 and "~Core" not in body and "RESD" not in body, (
+                "rich=True altered a LAS 2.0 file; it must apply to 3.0 only")
+        finally:
+            for f in os.listdir(tmp):
+                try:
+                    os.remove(os.path.join(tmp, f))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(tmp)
+            except OSError:
+                pass
+    check("LAS 3.0: a generated multi-section file reads back, values and all",
+          _rich_las3_round_trips)
+
     def _loader_key_transforms_agree():
         # TWO FAILURES, ONE ROOT: a key transform applied on one side only.
         #

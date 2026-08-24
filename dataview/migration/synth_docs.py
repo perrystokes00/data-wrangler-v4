@@ -601,8 +601,254 @@ def _hline(mnem, unit, value, descr, version="2.0"):
     return f" {mnem:<4}.{unit:<17}{str(left):<30}: {right}"
 
 
+# --------------------------------------------------------------------------- #
+# LAS 3.0 enrichment: a wider curve suite, and the sections that make a file 3.0
+# --------------------------------------------------------------------------- #
+#
+# WHAT WAS THIN. The corpus had exactly one 3.0 file, carrying a single ~Log
+# section -- so the very thing 3.0 exists for, and the thing that makes lasio
+# fail on it, was never exercised by a generated file. split_las3 and
+# _view_las3_sections were both written against the spec's published samples
+# and one hand-made fixture.
+#
+# The extra sections are not decoration. las3_capture already maps
+# ~Inclinometry into cat_well_dir_srvy_hdr/sta, and its own docstring says Core,
+# Tops and Test "have mirrors waiting and are the obvious next additions, but
+# each needs its own column mapping read off the real files rather than
+# assumed". These files are that input.
+
+# The extended suite. Every one of these is DERIVED from the bed model that
+# already drives GR/RHOB/NPHI/RT/DT/PEF/SP/CALI, so the curves agree with each
+# other and with the lithology. A suite of independently random tracks would
+# pass a format check and look wrong to anyone who reads logs -- the same
+# reasoning _walk was written for.
+_RICH_CURVES = [
+    ("BS",   "IN",   "Bit Size"),
+    ("DRHO", "G/CC", "Density Correction"),
+    ("DTS",  "US/F", "Shear Sonic Delta-T"),
+    ("RESD", "OHMM", "Deep Resistivity"),
+    ("RESM", "OHMM", "Medium Resistivity"),
+    ("RESS", "OHMM", "Shallow Resistivity"),
+    ("SGR",  "GAPI", "Total Gamma Ray"),
+    ("CGR",  "GAPI", "Computed Gamma Ray (Th+K)"),
+    ("TENS", "LBF",  "Cable Tension"),
+]
+
+# Vp/Vs by lithology. Shear is slower than compressional by a ratio the rock
+# type sets -- a constant multiplier would make DTS a redrawn DT.
+_VPVS = {"shale": 1.92, "sand": 1.62, "limestone": 1.87,
+         "dolomite": 1.80, "anhydrite": 1.85, "coal": 2.10}
+# Beds that take mud filtrate. Invasion is what separates the three resistivity
+# curves; in a tight or shaly bed they read almost the same, and drawing a big
+# separation there would be a picture of something that does not happen.
+_PERMEABLE = ("sand", "limestone", "dolomite")
+
+
+def _rich_values(cur, lith, depth, td, rng, bit=8.5):
+    """The extended curves for one depth, in _RICH_CURVES order."""
+    washout = cur["CALI"] - bit
+    drho = max(-0.04, min(0.30, washout * 0.085 + rng.gauss(0, 0.006)))
+    dts = cur["DT"] * _VPVS.get(lith, 1.85) + rng.gauss(0, 1.2)
+    rt = cur["RT"]
+    if lith in _PERMEABLE:
+        f_m = rng.uniform(0.62, 0.80)
+        f_s = f_m * rng.uniform(0.48, 0.72)
+    else:
+        f_m = rng.uniform(0.92, 1.00)
+        f_s = f_m * rng.uniform(0.93, 0.995)
+    resm = max(0.2, rt * f_m)
+    ress = max(0.2, rt * f_s)
+    sgr = cur["GR"]
+    # CGR is SGR less the uranium contribution, so it is always the lower of
+    # the two -- clamped rather than merely scaled, because noise must not put
+    # the computed curve above the total.
+    cgr = min(sgr, max(0.0, sgr * 0.74 + rng.gauss(0, 1.5)))
+    tens = max(300.0, 2600.0 - (td - depth) * 0.018 + rng.gauss(0, 12))
+    return [bit, drho, dts, rt, resm, ress, sgr, cgr, tens]
+
+
+def _q(s):
+    """A 3.0 cell, quoted when it carries the delimiter.
+
+    A core description is exactly where a comma lands inside a value
+    ("shale, silty"), and an unquoted one shifts every column after it -- the
+    kind of wrong that lands in a table looking plausible. split_las3 honours
+    the quotes; this is what produces them.
+    """
+    t = str(s)
+    return '"' + t + '"' if ("," in t or '"' in t) else t
+
+
+def _defsec(name, cols):
+    """A ~*_Definition block. cols is [(mnem, unit, descr, fmt)]."""
+    out = [f"~{name}_Definition"]
+    for mnem, unit, descr, fmt in cols:
+        out.append(f" {mnem:<10}.{unit:<8} : {descr} {{{fmt}}}")
+    return out
+
+
+def _datasec(name, cols, rows):
+    """A data block that NAMES ITS DEFINITION.
+
+    That association is the rule split_las3 keys on -- "a data section is one
+    that names a definition" -- and it is how the reader knows which columns
+    belong to these rows without guessing from the name.
+    """
+    out = ["", f"~{name} | {name.split('[')[0]}_Definition"]
+    for r in rows:
+        out.append(",".join(_q(v) for v in r))
+    return out
+
+
+_CORE_LITH = ["sandstone", "shaly sandstone", "limestone", "dolomite",
+              "shale", "silty shale"]
+_CORE_NOTE = ["fine grained, well sorted, oil stained",
+              "medium grained, calcite cement, fair porosity",
+              "argillaceous, thin bedded, poor recovery",
+              "vuggy, partly dolomitised, good shows",
+              "laminated, carbonaceous, no shows",
+              "burrowed, glauconitic, trace fluorescence"]
+_TEST_TYPE = ["DST", "DST", "RFT", "PRODUCTION"]
+_RECOVERY = ["gas to surface, no water",
+              "oil and gas cut mud, rising pressure",
+              "salt water, no shows",
+              "gas cut mud, slow build-up",
+              "oil, 32 API, trace water"]
+
+
+def las3_extra_sections(w, rng, start, stop, td, units="FT", null_val=-999.25):
+    """The Core / Tops / Inclinometry / Test blocks of a rich LAS 3.0 file.
+
+    Returns a list of lines. Every section is a Definition/Data PAIR joined by
+    an association, which is what makes it a data set rather than a header
+    block as far as split_las3 is concerned.
+
+    The mnemonics are not free choices. las3_capture looks for MD/DEPT/DEPTH,
+    TVD, AZIM/AZI/AZ and DEVI/INCL/INC/DEV, so ~Inclinometry uses names from
+    those lists -- a survey written with mnemonics outside them parses into a
+    data set that the capture stage then silently declines to map, which is
+    exactly the failure this corpus is meant to catch rather than cause.
+    """
+    L = []
+    ft = 1.0 if units == "FT" else 0.3048
+
+    # ---- Core: a few cut intervals inside the logged section ---------------
+    core_cols = [("CORE_TOP", units, "Core interval top", "F"),
+                 ("CORE_BOT", units, "Core interval base", "F"),
+                 ("RECOV", "%", "Recovery", "F"),
+                 ("POR", "%", "Core porosity", "F"),
+                 ("PERM", "MD", "Core permeability", "F"),
+                 ("SO", "%", "Oil saturation", "F"),
+                 ("SW", "%", "Water saturation", "F"),
+                 ("LITH", "", "Core lithology", "S"),
+                 ("DESC", "", "Core description", "S")]
+    core_rows = []
+    for _i in range(rng.randint(2, 4)):
+        top = round(rng.uniform(start + 200 * ft, stop - 120 * ft), 1)
+        bot = round(top + rng.uniform(18, 60) * ft, 1)
+        por = round(rng.uniform(3.5, 24.0), 1)
+        core_rows.append([
+            top, bot, round(rng.uniform(72, 100), 1), por,
+            # Permeability tracks porosity the way a Kozeny-style trend does;
+            # an independent random k next to phi is the giveaway.
+            round(max(0.01, 10 ** (0.22 * por - 3.1) * rng.uniform(0.5, 2.0)), 3),
+            round(rng.uniform(0, 42), 1), round(rng.uniform(18, 78), 1),
+            rng.choice(_CORE_LITH), rng.choice(_CORE_NOTE)])
+    core_rows.sort(key=lambda r: r[0])
+    L += [""] + _defsec("Core", core_cols) + _datasec("Core[1]", core_cols,
+                                                      core_rows)
+
+    # ---- Tops: the state's stratigraphic column, down to TD ----------------
+    tops_cols = [("TOPMD", units, "Formation top, measured depth", "F"),
+                 ("TOPTVD", units, "Formation top, true vertical depth", "F"),
+                 ("FORMATION", "", "Formation name", "S"),
+                 ("SOURCE", "", "Pick source", "S"),
+                 ("REMARK", "", "Remark", "S")]
+    tops_rows = []
+    for nm, dep, note in _strat(w):
+        md = dep * ft
+        if md < start or md > min(stop, td):
+            continue
+        tops_rows.append([round(md, 1), round(md * rng.uniform(0.93, 1.0), 1),
+                          nm, rng.choice(["LOG", "LOG", "MUDLOG", "SEISMIC"]),
+                          note or ""])
+    if tops_rows:
+        L += [""] + _defsec("Tops", tops_cols) + _datasec("Tops", tops_cols,
+                                                          tops_rows)
+
+    # ---- Inclinometry: a build-and-hold survey ------------------------------
+    # MINIMUM CURVATURE, not a straight cosine. The difference is small per
+    # station and accumulates over a hole, and this file is fixture data for a
+    # directional-survey loader -- feeding it a survey whose TVD does not close
+    # would teach the loader the wrong answer.
+    incl_cols = [("MD", units, "Measured depth", "F"),
+                 ("INCL", "DEG", "Inclination", "F"),
+                 ("AZIM", "DEG", "Azimuth", "F"),
+                 ("TVD", units, "True vertical depth", "F"),
+                 ("NS", units, "North-South offset", "F"),
+                 ("EW", units, "East-West offset", "F"),
+                 ("DLS", "DEG", "Dogleg severity per 100", "F")]
+    import math as _m
+    kop = td * rng.uniform(0.35, 0.55)
+    build = rng.uniform(1.4, 3.0)                 # degrees per 100 ft
+    hold = rng.uniform(18, 62)                    # final inclination
+    azi0 = rng.uniform(0, 360)
+    step_md = 100.0 * ft
+    md, inc, azi, tvd, ns, ew = 0.0, 0.0, azi0, 0.0, 0.0, 0.0
+    incl_rows = [[0.0, 0.0, round(azi0, 2), 0.0, 0.0, 0.0, 0.0]]
+    while md < td:
+        nmd = min(md + step_md, td)
+        dmd = nmd - md
+        ninc = inc if nmd <= kop else min(hold, inc + build * (dmd / (100 * ft)))
+        nazi = azi + rng.gauss(0, 0.6)
+        i1, i2 = _m.radians(inc), _m.radians(ninc)
+        a1, a2 = _m.radians(azi), _m.radians(nazi)
+        cosdl = (_m.cos(i2 - i1)
+                 - _m.sin(i1) * _m.sin(i2) * (1 - _m.cos(a2 - a1)))
+        cosdl = max(-1.0, min(1.0, cosdl))
+        dl = _m.acos(cosdl)
+        rf = 1.0 if dl < 1e-9 else (2.0 / dl) * _m.tan(dl / 2.0)
+        tvd += (dmd / 2.0) * (_m.cos(i1) + _m.cos(i2)) * rf
+        ns += (dmd / 2.0) * (_m.sin(i1) * _m.cos(a1)
+                             + _m.sin(i2) * _m.cos(a2)) * rf
+        ew += (dmd / 2.0) * (_m.sin(i1) * _m.sin(a1)
+                             + _m.sin(i2) * _m.sin(a2)) * rf
+        md, inc, azi = nmd, ninc, nazi
+        incl_rows.append([round(md, 1), round(inc, 2), round(azi % 360, 2),
+                          round(tvd, 1), round(ns, 1), round(ew, 1),
+                          round(_m.degrees(dl) / (dmd / (100 * ft)), 2)])
+    L += [""] + _defsec("Inclinometry", incl_cols) + _datasec(
+        "Inclinometry", incl_cols, incl_rows)
+
+    # ---- Test: drill stem / formation tests ---------------------------------
+    test_cols = [("TESTNO", "", "Test number", "F"),
+                 ("TESTTOP", units, "Test interval top", "F"),
+                 ("TESTBOT", units, "Test interval base", "F"),
+                 ("TESTTYPE", "", "Test type", "S"),
+                 ("ISIP", "PSI", "Initial shut-in pressure", "F"),
+                 ("FSIP", "PSI", "Final shut-in pressure", "F"),
+                 ("DURATION", "MIN", "Test duration", "F"),
+                 ("RECOVERY", "", "Recovery description", "S")]
+    test_rows = []
+    for i in range(rng.randint(1, 3)):
+        top = round(rng.uniform(start + 300 * ft, stop - 200 * ft), 1)
+        bot = round(top + rng.uniform(30, 140) * ft, 1)
+        isip = round(rng.uniform(900, 4200), 1)
+        test_rows.append([
+            float(i + 1), top, bot, rng.choice(_TEST_TYPE), isip,
+            # A final shut-in below the initial is the normal case; a test that
+            # built back above its ISIP would be the anomaly, not the fixture.
+            round(isip * rng.uniform(0.72, 0.99), 1),
+            float(rng.choice([30, 45, 60, 90, 120])),
+            rng.choice(_RECOVERY)])
+    test_rows.sort(key=lambda r: r[1])
+    L += [""] + _defsec("Test", test_cols) + _datasec("Test", test_cols,
+                                                      test_rows)
+    return L
+
+
 def las_file(path, w, rng, shown="full", wrap=False, version="2.0",
-             units="FT", null_val=-999.25):
+             units="FT", null_val=-999.25, rich=False):
     """A LAS file with lithology-driven, depth-correlated curves.
 
     `version` governs BOTH the VERS line and the ~WELL/~PARAMETER field order —
@@ -622,6 +868,9 @@ def las_file(path, w, rng, shown="full", wrap=False, version="2.0",
               ("RHOB", "G/CC", "Bulk Density"), ("NPHI", "V/V", "Neutron Porosity"),
               ("RT", "OHMM", "True Resistivity"), ("DT", "US/F", "Sonic Delta-T"),
               ("PEF", "B/E", "Photoelectric Factor")]
+    _rich = bool(rich) and str(version).startswith("3")
+    if _rich:
+        curves = curves + list(_RICH_CURVES)
 
     # Bed boundaries down the logged interval — thick enough to be readable.
     n = int((stop - start) / step) + 1
@@ -726,6 +975,8 @@ def las_file(path, w, rng, shown="full", wrap=False, version="2.0",
         cur["RT"] = max(0.2, cur["RT"])
         vals = [d, cur["GR"], cur["CALI"], cur["SP"], cur["RHOB"],
                 cur["NPHI"], cur["RT"], cur["DT"], cur["PEF"]]
+        if _rich:
+            vals += _rich_values(cur, bounds[bi][2], d, td, rng)
         # A real log has gaps — tool off-bottom, bad hole, a curve not recorded
         if rng.random() < 0.004:
             k = rng.randint(1, len(vals) - 1)
@@ -743,8 +994,12 @@ def las_file(path, w, rng, shown="full", wrap=False, version="2.0",
             lines.append("".join(f"{v:>12.4f}" for v in vals))
         d += step
 
+    extra = (las3_extra_sections(w, rng, start, stop, td, units, null_val)
+             if _rich else [])
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write("\n".join(hdr) + "\n" + "\n".join(lines) + "\n")
+        if extra:
+            f.write("\n".join(extra) + "\n")
     return len(lines)
 
 
