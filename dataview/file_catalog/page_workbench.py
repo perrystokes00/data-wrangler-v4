@@ -3181,6 +3181,54 @@ def _mark_bad(engine, inv_id, fpath, fname=None, size_kb=None, reason=None):
     return dropped
 
 
+def _unmark_bad(engine, inv_id):
+    """Undo _mark_bad: off the blocklist, out of SKIPPED, pending again.
+
+    Returns True when the file was actually ON the blocklist, so the caller can
+    report a real count instead of the size of the selection.
+
+    THREE THINGS COME UNDONE, because _mark_bad did three:
+
+      * the BAD_FILE row goes, or the next crawl skips the file again. This is
+        the one everybody remembers.
+      * CATALOG_READINESS stops being 'SKIPPED'. Set to NULL rather than to a
+        guessed value: readiness is DERIVED (catalog_readiness._CASE) and the
+        next pass recomputes it. Writing 'CATALOGED' here would state a fact
+        nothing measured.
+      * HEADER_EXTRACTED goes back to 'N'. THIS IS THE ONE THAT IS EASY TO
+        MISS. _mark_bad DELETED the rows the file had staged in cat_*, but left
+        its stamp reading 'Y' -- so a restore that stopped at the first two
+        would leave a file claiming to be extracted, holding no staged rows,
+        and never re-extracted to get them back. Data silently missing behind a
+        completed stamp is the shape this codebase keeps getting bitten by.
+
+    dv_* is not touched, for the same reason _mark_bad does not touch it: rows
+    that already promoted belong to whichever load inserted them, and
+    un-promoting them is a separate decision.
+    """
+    from sqlalchemy import text as _t
+
+    with engine.begin() as con:
+        was_bad = bool(con.execute(_t(
+            "SELECT 1 FROM file_catalog.BAD_FILE WHERE INVENTORY_ID = :id"),
+            {"id": inv_id}).fetchone())
+        con.execute(_t("DELETE FROM file_catalog.BAD_FILE "
+                       "WHERE INVENTORY_ID = :id"), {"id": inv_id})
+        # was_bad is read BEFORE the DELETE and passed in as a parameter. An
+        # EXISTS against BAD_FILE inside this UPDATE would run AFTER the delete
+        # in the same transaction and so always be false, leaving a file that
+        # was blocklisted but never stamped SKIPPED with a stale 'Y'.
+        con.execute(_t("""
+            UPDATE file_catalog.GLOBAL_FILE_CATALOG
+               SET CATALOG_READINESS = NULL,
+                   HEADER_EXTRACTED  = 'N',
+                   ROW_CHANGED_DATE  = GETUTCDATE()
+             WHERE INVENTORY_ID = :id
+               AND (ISNULL(CATALOG_READINESS, '') = 'SKIPPED' OR :wasbad = 1)
+        """), {"id": inv_id, "wasbad": 1 if was_bad else 0})
+    return was_bad
+
+
 
 # =============================================================================
 # Status & Backlog -- every file, its state, and WHY it is stuck
@@ -3886,7 +3934,7 @@ def _tab_status(engine, dialect):
             st.rerun()
 
     # ── Actions ──────────────────────────────────────────────────────────────
-    st.markdown("##### ② Process, or reject what should not be here")
+    st.markdown("##### ② Process, reject, or restore")
     _n_uncap = (int(_n.get(_cs.ST_INVENTORIED, 0))
                 + int(_n.get(_cs.ST_EXTRACTED, 0)))
     st.caption(
@@ -3895,7 +3943,7 @@ def _tab_status(engine, dialect):
         f"promote has nothing of theirs to lift — run capture first, then "
         f"promote. Capture is idempotent (rows are replaced per file)."
     )
-    a0, a1, a2, a3 = st.columns(4)
+    a0, a1, a2, a3, a4 = st.columns(5)
 
     # 0. Capture. Sits BEFORE promote because that is the order the pipeline
     #    runs them in, and a file that was never captured cannot be promoted or
@@ -3972,60 +4020,38 @@ def _tab_status(engine, dialect):
         _status_run(engine)
         st.session_state["sb_nonce"] = _nonce + 1
 
-    # 3. Reject. Shares _mark_bad with Browse & View, so a file rejected here
-    #    behaves identically: blocklisted for the next crawl, its staged rows
-    #    dropped, its catalog row RETIRED as SKIPPED rather than deleted so the
-    #    history stays attributable. dv_* is never touched — un-promoting rows
-    #    that already landed is a separate decision, not a side effect.
-    # TWO CLICKS, NOT A TYPED WORD. The gate is a DECISION and keeps its
-    # confirmation; what it does not need is transcription. Typing REJECT
-    # proves nothing a deliberate second click does not, and it taxes the
-    # common case — Perry rejects files routinely.
+    # 3. Reject -- ONE CLICK, because it is no longer a one-way door. It was
+    #    two (arm, then confirm) for the reason destructive actions usually
+    #    are: _mark_bad blocklists the file, DROPS the rows it staged and
+    #    retires its catalog row as SKIPPED, and nothing in the app could undo
+    #    any of it -- nothing ever deleted from BAD_FILE. A mistake was
+    #    permanent, so the ceremony bought something real.
     #
-    # The arm is bound to the EXACT SELECTION, not to a boolean. Arming on a
-    # flag would let someone arm on three files, tick a fourth, and confirm a
-    # set they never looked at — the same staleness that let Apply write a
-    # superseded plan. Change the selection and the arm drops.
+    #    Restore below undoes all three, so the ceremony now buys nothing and
+    #    costs a click on the common path (Perry rejects files routinely).
+    #    "Automation may skip ceremony, never a decision": the decision is
+    #    still made -- tick the files, press the button -- what is gone is the
+    #    transcription of it.
+    #
+    #    dv_* is still never touched: rows that already promoted belong to the
+    #    load that inserted them, and un-promoting is a separate decision.
     _help = ("Blocklists the selected files, drops the rows they staged, and "
              "retires their catalog rows as SKIPPED. Rows already promoted "
-             "into dv_* are left alone.")
-    _pick_ids = (tuple(sorted(str(x) for x in _picked["inventory_id"]))
-                 if not _picked.empty else ())
-    _armed = st.session_state.get("sb_reject_armed") == _pick_ids and bool(_pick_ids)
-
-    if not _armed:
-        if a3.button(f"🚫 Reject {len(_picked)} file(s)…", key="sb_reject_arm",
-                     use_container_width=True, disabled=_picked.empty,
-                     help=_help):
-            st.session_state["sb_reject_armed"] = _pick_ids
-            st.rerun()
-        a3.caption("Asks once more before anything is written.")
-    else:
-        a3.warning(f"Reject **{len(_picked)}** file(s)? Their staged rows are "
-                   f"dropped and the catalog rows retired as SKIPPED.")
-        if a3.button("✗ Cancel", key="sb_reject_cancel",
-                     use_container_width=True):
-            st.session_state.pop("sb_reject_armed", None)
-            st.rerun()
-    if _armed and a3.button(f"✓ Yes — reject {len(_picked)} file(s)",
-                            key="sb_reject", type="primary",
-                            use_container_width=True, help=_help):
-        # RE-ASSERT THE GATE INSIDE THE HANDLER. `disabled=` is a UI affordance,
-        # not a guarantee: it stops a human clicking, and it stops nothing else.
-        # A harness, a replayed widget state, or any future refactor that moves
-        # the button can reach this block with the gate visibly closed. This
-        # cost 8 files and 160 staged rows on 19 Aug during testing — the button
-        # rendered "Reject 0 file(s)" and disabled, and the rows went anyway.
-        # A destructive action re-checks its own precondition.
-        if (_picked.empty
-                or st.session_state.get("sb_reject_armed") != _pick_ids):
-            st.error("Reject blocked — the confirmation does not match the "
-                     "files currently ticked. Nothing was changed.")
-            st.session_state.pop("sb_reject_armed", None)
+             "into dv_* are left alone. Undo with Restore.")
+    if a3.button(f"🚫 Reject {len(_picked)} file(s)", key="sb_reject",
+                 use_container_width=True, disabled=_picked.empty,
+                 help=_help):
+        # RE-ASSERT THE PRECONDITION INSIDE THE HANDLER. `disabled=` is a UI
+        # affordance, not a guarantee: it stops a human clicking and stops
+        # nothing else. A replayed widget state, or a refactor that moves the
+        # button, can reach this block with the gate visibly closed -- that
+        # cost 8 files and 160 staged rows on 19 Aug, the button rendering
+        # "Reject 0 file(s)" and disabled while the rows went anyway.
+        if _picked.empty:
+            st.error("Nothing ticked -- nothing was changed.")
             st.stop()
-        _reason = f"rejected from Status & Backlog"
-        _tot, _rows = 0, 0
-        _fail = []
+        _reason = "rejected from Status & Backlog"
+        _tot, _rows, _fail = 0, 0, []
         for _, _r in _picked.iterrows():
             try:
                 _dropped = _mark_bad(engine, _r["inventory_id"], _r["path"],
@@ -4034,13 +4060,52 @@ def _tab_status(engine, dialect):
                 _rows += sum(_dropped.values())
             except Exception as e:
                 _fail.append(f"{_r['file']}: {type(e).__name__}: {e}")
-        st.success(f"Rejected {_tot} file(s); dropped {_rows:,} staged row(s).")
+        st.success(f"Rejected {_tot} file(s); dropped {_rows:,} staged row(s). "
+                   f"To undo: filter State = SKIPPED, tick them, press "
+                   f"Restore.")
         if _fail:
-            st.error("Some rejects failed:\n" + "\n".join(_fail))
-        # DISARM. The selection is about to change underneath us (these files
-        # leave the view), and a live arm keyed to ids that are no longer
-        # ticked is a confirmation nobody gave.
-        st.session_state.pop("sb_reject_armed", None)
+            st.error("Some rejects failed: " + " | ".join(_fail))
+        _status_run(engine)
+        st.session_state["sb_nonce"] = _nonce + 1
+        st.rerun()
+
+    # 4. Restore -- the inverse of Reject, and the reason Reject is one click.
+    #    Rejected files stay in the catalog (retired as SKIPPED, not deleted),
+    #    which is what makes this possible at all: filter State = SKIPPED to
+    #    find them.
+    #
+    #    _unmark_bad returns the file to PENDING, not to "done". Reject deleted
+    #    its staged rows, so clearing only the blocklist would leave a file
+    #    stamped extracted with nothing staged -- run capture afterwards and
+    #    the rows come back.
+    if a4.button(f"♻ Restore {len(_picked)} file(s)", key="sb_restore",
+                 use_container_width=True, disabled=_picked.empty,
+                 help="Takes the selected files off the blocklist, clears "
+                      "SKIPPED and marks them pending, so the next run "
+                      "re-extracts them. Files that were not rejected are "
+                      "left alone."):
+        if _picked.empty:
+            st.error("Nothing ticked -- nothing was changed.")
+            st.stop()
+        _back, _left, _rfail = 0, 0, []
+        for _, _r in _picked.iterrows():
+            try:
+                if _unmark_bad(engine, _r["inventory_id"]):
+                    _back += 1
+                else:
+                    _left += 1
+            except Exception as e:
+                _rfail.append(f"{_r['file']}: {type(e).__name__}: {e}")
+        if _back:
+            st.success(f"Restored {_back} file(s) -- off the blocklist and "
+                       f"pending again. Run capture to re-stage their rows."
+                       + (f" {_left} were not rejected and were left alone."
+                          if _left else ""))
+        else:
+            st.info(f"Nothing to restore -- none of the {len(_picked)} ticked "
+                    f"file(s) were on the blocklist.")
+        if _rfail:
+            st.error("Some restores failed: " + " | ".join(_rfail))
         _status_run(engine)
         st.session_state["sb_nonce"] = _nonce + 1
         st.rerun()

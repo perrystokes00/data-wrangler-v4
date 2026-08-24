@@ -1898,6 +1898,79 @@ def tier_units(res, verbose=False):
     check("SEG-Y: a declared 4R coordinate format is honoured, not assumed int",
           _segy_declared_coord_format_is_honoured)
 
+    def _reject_is_reversible():
+        # REJECT IS ONE CLICK ONLY BECAUSE RESTORE EXISTS. It used to arm and
+        # confirm, and that ceremony was buying something real: nothing in the
+        # app ever deleted from BAD_FILE, so a rejection was permanent and a
+        # misclick cost the file's staged rows. The two are a pair -- if
+        # Restore is ever removed or weakened, the single-click Reject becomes
+        # a one-way door again, which is why they are asserted together.
+        import inspect
+        from dataview.file_catalog import page_workbench as _pw
+
+        assert hasattr(_pw, "_unmark_bad"), (
+            "_unmark_bad is gone -- Reject is a single click and there is now "
+            "no way back from it")
+        undo = inspect.getsource(_pw._unmark_bad)
+
+        # _mark_bad changes THREE things; the undo must reverse all three, and
+        # the third is the one that hides. Reject DELETES the rows the file
+        # staged in cat_*, so a restore that clears only the blocklist and the
+        # SKIPPED flag leaves a file stamped HEADER_EXTRACTED='Y' with nothing
+        # staged and no reason to ever be re-extracted -- data missing behind a
+        # completed stamp, which is the failure this codebase keeps hitting.
+        assert "DELETE FROM file_catalog.BAD_FILE" in undo, \
+            "restore no longer removes the blocklist row, so the next crawl " \
+            "skips the file again"
+        assert "CATALOG_READINESS = NULL" in undo, \
+            "restore no longer clears CATALOG_READINESS, and 'SKIPPED' " \
+            "survives a force by design -- the file would stay excluded"
+        assert "HEADER_EXTRACTED  = 'N'" in undo or \
+               "HEADER_EXTRACTED = 'N'" in undo, (
+            "restore no longer marks the file pending. Reject deleted its "
+            "staged rows; leaving the stamp at 'Y' means it reads as extracted, "
+            "holds nothing, and is never re-extracted to get the rows back")
+
+        # The blocklist test must be read BEFORE the delete. An EXISTS inside
+        # the UPDATE runs after it in the same transaction and is always false.
+        # .index() RAISES when the read is simply gone, so the check would die
+        # with "substring not found" instead of naming the fault. find() plus
+        # an explicit assertion reports the real problem either way.
+        _read = undo.find("SELECT 1 FROM file_catalog.BAD_FILE")
+        _del = undo.find("DELETE FROM file_catalog.BAD_FILE")
+        assert _read >= 0, (
+            "restore no longer reads the blocklist before clearing it, so it "
+            "cannot tell a rejected file from one that was never rejected and "
+            "would report every ticked file as restored")
+        assert _del >= 0, "restore no longer deletes the blocklist row"
+        assert _read < _del, (
+            "restore reads the blocklist AFTER deleting from it, so was_bad is "
+            "always false and a file blocklisted without a SKIPPED stamp keeps "
+            "a stale HEADER_EXTRACTED")
+
+        # And the UI: one Reject button, no arm/confirm, with a Restore beside
+        # it. The arm was keyed to the exact selection; its remnants must not
+        # linger, because a stale gate that nothing sets never opens.
+        src = inspect.getsource(_pw)
+        assert "sb_reject_armed" not in src, \
+            "the reject arm/confirm state is back -- Reject is meant to be a " \
+            "single click now that Restore can undo it"
+        assert src.count('key="sb_reject"') == 1, \
+            "expected exactly one Reject button in Status & Backlog"
+        assert 'key="sb_restore"' in src, \
+            "the Restore button is gone from Status & Backlog, leaving no way " \
+            "to reverse a rejection from the UI"
+        # Both handlers re-check the selection: `disabled=` stops a human and
+        # nothing else (8 files and 160 rows went through a disabled button on
+        # 19 Aug).
+        for _k in ("sb_reject", "sb_restore"):
+            _i = src.index(f'key="{_k}"')
+            _win = src[_i:_i + 1400]
+            assert "_picked.empty" in _win and "st.stop()" in _win, \
+                f"the {_k} handler no longer re-asserts its precondition"
+    check("reject: a single click, because restore reverses all three parts",
+          _reject_is_reversible)
+
     return res
 
 
