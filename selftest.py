@@ -2847,6 +2847,106 @@ def tier_units(res, verbose=False):
     check("horizons: a horizon lands on its reflector, and stays in Wyoming",
           _horizons_tie_to_their_reflectors)
 
+    def _documents_state_a_position_that_survives_reading():
+        # A WELL WITH NO COORDINATES IS HELD, and rightly -- promote will not
+        # invent a position. No generated document had EVER stated one, so
+        # every synthetic well reaching dv_well got its location from somewhere
+        # else, and 115 perfectly good wells sat as "header - held (no coords)".
+        #
+        # THE FIX HAD A TRAP IN IT. pdf_survey_catalog matches
+        #     (?:Surface\\s+)?Lat(?:itude)?[:\\s]+([+-]?\\d{1,3}\\.\\d+)\\s*[deg]?\\s*([NS])?
+        # and a PDF text layer renders two adjacent table cells as
+        #     Surface Latitude 43.290123 Surface Longitude -106.212345
+        # so the S of "Surface" was captured as SOUTH and _signed_coord
+        # returned -43.290123. Every well would have sat in the South Atlantic,
+        # from a number that parses cleanly and looks entirely valid. Stating
+        # the hemisphere explicitly is both the unambiguous form and the one a
+        # scout ticket actually uses.
+        import os
+        import random
+        import re
+        import tempfile
+        from dataview.migration.synth_docs import las_file, scout_ticket
+        from dataview.file_catalog.las_reader import read_las
+        from dataview.file_catalog.pdf_survey_catalog import (
+            INFO_PATTERNS, _signed_coord)
+
+        LAT, LON = 43.290123, -106.212345
+        w = {"uwi": "49025900010000", "well_name": "SELFTEST 1-1",
+             "operator_name": "NPR OPS", "county": "NATRONA",
+             "province_state": "WY", "final_td": 4800,
+             "surface_latitude": LAT, "surface_longitude": LON,
+             "spud_date": "2014-05-01", "completion_date": "2014-07-20",
+             "kb_elevation": 5200, "ground_elevation": 5188}
+        tmp = tempfile.mkdtemp(prefix="coord_")
+        try:
+            # ---- the PDF path -------------------------------------------
+            pdf = os.path.join(tmp, "SCOUT_selftest.pdf")
+            scout_ticket(pdf, w, random.Random(1), w["uwi"])
+            txt = ""
+            try:
+                import pdfplumber
+                with pdfplumber.open(pdf) as doc:
+                    txt = doc.pages[0].extract_text() or ""
+            except Exception:
+                try:
+                    from pypdf import PdfReader
+                    txt = PdfReader(pdf).pages[0].extract_text() or ""
+                except Exception:
+                    txt = ""
+            if txt:
+                for field, want in (("latitude", LAT), ("longitude", LON)):
+                    m = re.search(INFO_PATTERNS[field][0], txt, re.I)
+                    assert m, (
+                        "the scout ticket states no " + field + " the catalog "
+                        "can read; the well will be held for no coordinates")
+                    got = _signed_coord(m)
+                    assert got is not None and abs(got - want) < 1e-5, (
+                        field + " read back as " + repr(got) + ", not "
+                        + repr(want) + ". A sign flip here is the whole field "
+                        "in the wrong hemisphere, from a value that parses.")
+
+            # ---- the LAS path, which is where dv_well actually came from --
+            # extract_core reads LATI/LAT and LONG/LON out of ~WELL. All three
+            # versions must carry them: _hline orders value and description
+            # differently for 1.2 than for 2.0/3.0, and a coordinate written on
+            # the wrong side of the colon is a description, not a number.
+            for ver in ("1.2", "2.0", "3.0"):
+                p = os.path.join(tmp, "t" + ver.replace(".", "") + ".las")
+                las_file(p, w, random.Random(1), version=ver)
+                body = open(p, encoding="utf-8", errors="replace").read(4000)
+                assert re.search(r"^\s*LATI\s*\.", body, re.M), \
+                    "LAS " + ver + " has no LATI in its ~WELL section"
+                assert re.search(r"^\s*LONG\s*\.", body, re.M), \
+                    "LAS " + ver + " has no LONG in its ~WELL section"
+                for want in ("43.290123", "-106.212345"):
+                    assert want in body, (
+                        "LAS " + ver + " does not carry " + want
+                        + " -- the value is missing or was written as text")
+                if ver != "1.2":
+                    # 1.2 puts the description before the value, which lasio
+                    # reads differently; 2.0 and 3.0 are the versions
+                    # extract_core takes the header from.
+                    las = read_las(p)
+                    items = {i.mnemonic.upper(): i.value for i in las.well}
+                    for mn, want in (("LATI", LAT), ("LONG", LON)):
+                        assert mn in items, "LAS " + ver + " lost " + mn
+                        assert abs(float(items[mn]) - want) < 1e-5, (
+                            "LAS " + ver + " " + mn + " read back as "
+                            + repr(items[mn]) + ", not " + repr(want))
+        finally:
+            for f in os.listdir(tmp):
+                try:
+                    os.remove(os.path.join(tmp, f))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(tmp)
+            except OSError:
+                pass
+    check("synth: a document states a position, and it survives being read back",
+          _documents_state_a_position_that_survives_reading)
+
     def _loader_key_transforms_agree():
         # TWO FAILURES, ONE ROOT: a key transform applied on one side only.
         #

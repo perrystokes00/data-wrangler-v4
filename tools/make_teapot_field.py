@@ -92,8 +92,9 @@ def main(argv=None):
 
     if os.path.isdir(a.dir) and any(
             f for f in os.listdir(a.dir)
-            if f not in ("sample_pdfs", "sample_office", "las_files",
-                         "teapot_field_wells.csv", "manifest.csv")):
+            if f.lower() not in ("sample_pdfs", "sample_office",
+                                 "las_files", "teapot_field_wells.csv",
+                                 "manifest.csv")):
         print(f"\nREFUSED: {a.dir} holds files this tool did not write, and "
               f"synth_docs.generate() CLEARS its output folders. Point --dir "
               f"at an empty or dedicated folder.")

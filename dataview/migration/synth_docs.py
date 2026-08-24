@@ -194,11 +194,19 @@ def _pdf(path, title, subtitle, ident_rows, blocks, footer):
 
 
 def _ident(w, shown, rng, extra=()):
-    return [("Operator", w.get("operator_name", "")),
+    rows = [("Operator", w.get("operator_name", "")),
             ("Well Name", w.get("well_name", "")),
             ("UWI / API", shown),
             ("Field", _field(w, rng)),
-            ("State", _abbr(w)), ("County", w.get("county", ""))] + list(extra)
+            ("State", _abbr(w)), ("County", w.get("county", ""))]
+    _la, _lo = w.get("surface_latitude"), w.get("surface_longitude")
+    if _la not in (None, "") and _lo not in (None, ""):
+        _la, _lo = float(_la), float(_lo)
+        rows += [("Surface Latitude",
+                  f"{abs(_la):.6f} {'N' if _la >= 0 else 'S'}"),
+                 ("Surface Longitude",
+                  f"{abs(_lo):.6f} {'E' if _lo >= 0 else 'W'}")]
+    return rows + list(extra)
 
 
 # --------------------------------------------------------------------------- #
@@ -914,6 +922,14 @@ def las_file(path, w, rng, shown="full", wrap=False, version="2.0",
         _hline("CNTY", "", w.get("county", ""), "COUNTY", version),
         _hline("STAT", "", _abbr(w), "STATE", version),
         _hline("CTRY", "", "US", "COUNTRY", version),
+    ] + ([
+        _hline("LATI", "DEG", f"{float(w['surface_latitude']):.6f}",
+               "SURFACE LATITUDE", version),
+        _hline("LONG", "DEG", f"{float(w['surface_longitude']):.6f}",
+               "SURFACE LONGITUDE", version),
+        _hline("GDAT", "", "WGS84", "GEODETIC DATUM", version),
+    ] if w.get("surface_latitude") not in (None, "")
+         and w.get("surface_longitude") not in (None, "") else []) + [
         _hline("API", "", _dashed(w["uwi"]) if shown != "none" else "",
                "API NUMBER", version),
         _hline("LOG_ID", "", f"LOG_{w['uwi']}_1", "LOG ID", version),
