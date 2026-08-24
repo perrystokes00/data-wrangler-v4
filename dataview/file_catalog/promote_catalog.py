@@ -1122,17 +1122,68 @@ def promote_seismic(cur, apply, log):
              "REPLACE(REPLACE(REPLACE(s.SURVEY_NAME,CHAR(9),' '),CHAR(13),' '),CHAR(10),' ')"
              ")))")
 
+    # NAVIGATION IS NOT DATA (Perry, 24 Aug: "don't load UKOAA unless it ties
+    # to SEG-Y data"). A P1/90 carries shot-point geometry FOR a survey; it is
+    # not the survey. Promoted alone it creates a dv_seis_set row with nothing
+    # openable behind it — three of the eight rows in dv_seis_set were exactly
+    # that (TUIHU, SOUTH CHINA SEA UNIFIED AREA, EXAMPLE FIELD UKCS BLOCKS
+    # 311/7 AND 311/2), each backed by one .p190 and nothing else. A survey
+    # that cannot be opened is worse than one that is absent: it counts, it
+    # plots, and it gets quoted.
+    #
+    # TIED = the survey has at least one file that is NOT navigation.
+    # Deliberately "not nav" rather than "is SEG-Y": shapefile and OSDU-JSON
+    # surveys promote today and this is not the change that stops them. Teapot
+    # is unaffected — its nav sits beside filt_mig.sgy and lineA-E.sgy.
+    #
+    # Keyed on _norm, the same survey key the MERGE groups on, so the gate and
+    # the promote agree on what "a survey" is. Defined AFTER _norm for that
+    # reason — placing it above reads fine and raises NameError on first call.
+    #
+    # HELD, NOT DROPPED: the FILE_SEIS_HEADER rows survive untouched, so the
+    # day a SEG-Y lands beside the nav the survey promotes with the geometry
+    # the nav already gave it. Nothing has to be re-read.
+    _NAV_EXTS = "('.p190', '.p90', '.p1')"
+    if object_exists(cur, "file_catalog", "GLOBAL_FILE_CATALOG"):
+        _TIED = (
+            "EXISTS (SELECT 1 FROM file_catalog.FILE_SEIS_HEADER s2 "
+            "JOIN file_catalog.GLOBAL_FILE_CATALOG g2 "
+            "  ON g2.INVENTORY_ID = s2.INVENTORY_ID "
+            "WHERE UPPER(LTRIM(RTRIM(REPLACE(REPLACE(REPLACE("
+            "s2.SURVEY_NAME,CHAR(9),' '),CHAR(13),' '),CHAR(10),' ')))) "
+            f"= {_norm} "
+            f"AND LOWER(ISNULL(g2.FILE_EXT, '')) NOT IN {_NAV_EXTS})")
+    else:
+        _TIED = "1=1"          # no catalog to ask; do not invent a verdict
+
     cur.execute(
         "SELECT COUNT(DISTINCT SURVEY_NAME) FROM file_catalog.FILE_SEIS_HEADER s "
-        f"WHERE {_NAMED}")
+        f"WHERE {_NAMED} AND ({_TIED})")
     eligible = cur.fetchone()[0]
+
+    # Reported BY NAME, in dry run too, and separately from the mappable gate:
+    # "no data behind it" and "no geometry" are different facts with different
+    # repairs, and folded together a nav-only survey reads as one waiting for a
+    # CRS it does not need.
+    cur.execute(f"""
+        SELECT MAX(s.SURVEY_NAME)
+        FROM file_catalog.FILE_SEIS_HEADER s
+        WHERE {_NAMED} AND NOT ({_TIED})
+        GROUP BY {_norm}""")
+    _held_untied = sorted(r[0] for r in cur.fetchall() if r[0])
+    if _held_untied:
+        log(f"  seismic gate: {len(_held_untied)} survey(s) HELD — navigation "
+            f"only, no seismic data in the catalog ties to them. The nav rows "
+            f"are kept, so each promotes as soon as its SEG-Y is catalogued:")
+        for _hu in _held_untied:
+            log(f"      - {_hu}")
 
     # Surveys the gate holds — reported in DRY RUN too, so a run that would
     # promote nothing explains itself before anyone presses apply.
     cur.execute(f"""
         SELECT MAX(s.SURVEY_NAME)
         FROM file_catalog.FILE_SEIS_HEADER s
-        WHERE {_NAMED}
+        WHERE {_NAMED} AND ({_TIED})
         GROUP BY {_norm}
         HAVING MAX(CASE WHEN {_MAPPABLE} THEN 1 ELSE 0 END) = 0""")
     _held_surveys = sorted(r[0] for r in cur.fetchall())
@@ -1182,14 +1233,20 @@ def promote_seismic(cur, apply, log):
 
     # SURVEYS and FILES are different units and the note says so rather than
     # quietly adding them: an unnamed file has no survey to be counted as.
-    held = len(_held_surveys) + len(_held_unnamed)
+    # _held_untied is disjoint from _held_surveys: the unmappable query carries
+    # AND (_TIED), so a nav-only survey is counted once, under the gate that
+    # actually stopped it. Leaving it out of this tally would report "held 18"
+    # for 21 held surveys — the same undercount that made five Teapot lines
+    # read as vanished.
+    held = len(_held_surveys) + len(_held_unnamed) + len(_held_untied)
     # _gate_note, not _note: this function reuses _note further down for the
     # dv_seis_line log, and a name collision here would make the returned note
     # depend on how far execution got.
     _gate_note = "seismic survey"
-    if _held_surveys or _held_unnamed:
+    if _held_surveys or _held_unnamed or _held_untied:
         _gate_note += (" · held " + " + ".join(filter(None, [
             f"{len(_held_surveys)} unmappable survey(s)" if _held_surveys else "",
+            f"{len(_held_untied)} nav-only survey(s)" if _held_untied else "",
             f"{len(_held_unnamed)} unnamed file(s)" if _held_unnamed else ""])))
 
     if not apply or not eligible:
@@ -1206,7 +1263,8 @@ def promote_seismic(cur, apply, log):
         cur.execute(f"""
             SELECT DISTINCT SURVEY_NAME, SURVEY_OUTLINE
             FROM file_catalog.FILE_SEIS_HEADER s
-            WHERE SURVEY_OUTLINE IS NOT NULL AND {_NAMED}""")
+            WHERE SURVEY_OUTLINE IS NOT NULL AND {_NAMED}
+              AND ({_TIED})""")
         _rows = cur.fetchall()
         _bad = set()
         for _sn, _wkt in _rows:
@@ -1270,7 +1328,7 @@ def promote_seismic(cur, apply, log):
             LEFT JOIN file_catalog.GLOBAL_FILE_CATALOG g
                    ON g.INVENTORY_ID = s.INVENTORY_ID
             LEFT JOIN #badseis bs ON bs.sn = s.SURVEY_NAME
-            WHERE {_NAMED}
+            WHERE {_NAMED} AND ({_TIED})
             GROUP BY {_norm}
             HAVING MAX(CASE WHEN {_MAPPABLE} THEN 1 ELSE 0 END) = 1
         ) src ON UPPER(LTRIM(RTRIM(tgt.seis_set_name))) = src.nkey
@@ -1344,7 +1402,7 @@ def promote_seismic(cur, apply, log):
             FROM file_catalog.FILE_SEIS_HEADER s
             LEFT JOIN file_catalog.GLOBAL_FILE_CATALOG g
                    ON g.INVENTORY_ID = s.INVENTORY_ID
-            WHERE {_NAMED} AND NOT {_MAPPABLE}""")
+            WHERE {_NAMED} AND NOT {_MAPPABLE} AND ({_TIED})""")
         _held_lines = sorted({r[0] for r in cur.fetchall() if r[0]})
         if _held_lines:
             log(f"  seismic gate: {len(_held_lines)} file(s) held from "
@@ -1365,7 +1423,8 @@ def promote_seismic(cur, apply, log):
                 cur.execute(f"""
                     SELECT s.SEIS_HEADER_ID, s.SURVEY_OUTLINE
                     FROM file_catalog.FILE_SEIS_HEADER s
-                    WHERE s.SURVEY_OUTLINE IS NOT NULL AND {_NAMED}""")
+                    WHERE s.SURVEY_OUTLINE IS NOT NULL AND {_NAMED}
+                      AND ({_TIED})""")
                 _badl = []
                 for _hid, _wkt in cur.fetchall():
                     try:
@@ -1425,7 +1484,7 @@ def promote_seismic(cur, apply, log):
                        ON g.INVENTORY_ID = s.INVENTORY_ID
                 INNER JOIN dataview.dv_seis_set ss
                        ON UPPER(LTRIM(RTRIM(ss.seis_set_name))) = {_norm}{_geo_join}
-                WHERE {_NAMED} AND {_MAPPABLE}
+                WHERE {_NAMED} AND {_MAPPABLE} AND ({_TIED})
             ) src ON tgt.line_id = src.src_id
             WHEN MATCHED THEN UPDATE SET
                 seis_set_id = src.set_id, line_name = src.line_name,

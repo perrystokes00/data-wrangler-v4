@@ -1739,6 +1739,63 @@ def tier_units(res, verbose=False):
     check("SEG-Y 2D: crossline junk does not veto good coordinates",
           _segy_2d_coords_survive_crossline_garbage)
 
+    def _seis_nav_only_never_promotes():
+        # NAVIGATION IS NOT DATA. A P1/90 carries geometry FOR a survey; on its
+        # own it produced a dv_seis_set row with nothing openable behind it.
+        # Three of the eight rows in dv_seis_set were exactly that (TUIHU,
+        # SOUTH CHINA SEA UNIFIED AREA, EXAMPLE FIELD UKCS BLOCKS 311/7),
+        # each backed by one .p190 and nothing else.
+        #
+        # THE GATE IS A PREDICATE REUSED BY FOUR QUERIES, so the failure mode is
+        # not "the gate is wrong", it is "a fifth query forgot it" — the shape
+        # CLAUDE.md records for the four lists that must agree. Rather than
+        # assert the four call sites exist, assert the INVARIANT: no query that
+        # selects promotable rows may use _NAMED without _TIED beside it. A new
+        # MERGE added later fails this the moment it lands.
+        import inspect
+        import re
+        from dataview.file_catalog import promote_catalog as _pc
+
+        src = inspect.getsource(_pc.promote_seismic)
+        assert "_TIED" in src, (
+            "promote_seismic no longer gates on _TIED — a navigation-only "
+            "survey promotes into dv_seis_set with no seismic behind it")
+
+        # PER STATEMENT, NOT PER LINE. The first version of this check tested
+        # each source LINE, so wrapping "AND ({_TIED})" onto a continuation
+        # line made it report a correctly gated query as an offender — a check
+        # keyed on the wrong unit, which is the thing it exists to catch.
+        # {_NAMED} only ever appears inside a cur.execute(...), so split there
+        # and judge whole statements.
+        stmts = src.split("cur.execute(")[1:]
+        offenders = []
+        for st in stmts:
+            if "{_NAMED}" not in st:
+                continue
+            if "_TIED" not in st:
+                first = next((ln.strip() for ln in st.splitlines()
+                              if "{_NAMED}" in ln), st[:60].strip())
+                offenders.append(first)
+        assert not offenders, (
+            "these promote queries filter on _NAMED without the _TIED gate, so "
+            "they will lift a nav-only survey: " + " | ".join(offenders))
+
+        # And the hold tally must count them. Reporting "held 18" for 21 held
+        # surveys is the undercount that made five Teapot lines read as having
+        # vanished — Held is one of the four states and it has to be visible.
+        m = re.search(r"held\s*=\s*([^\r\n]+)", src)
+        assert m and "_held_untied" in m.group(1), (
+            "the held tally omits _held_untied, so nav-only surveys are "
+            "reported as neither promoted nor held")
+
+        # The gate must be keyed on the SAME survey key the MERGE groups on.
+        # Keyed on raw SURVEY_NAME instead, a survey whose files disagree on
+        # whitespace would tie under one spelling and not the other.
+        assert "_NAV_EXTS" in src and ".p190" in src, \
+            "the navigation extension list is gone from the tie gate"
+    check("seismic: navigation-only surveys are held, not promoted",
+          _seis_nav_only_never_promotes)
+
     return res
 
 
