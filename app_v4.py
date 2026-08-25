@@ -552,6 +552,21 @@ for k, v in DEFAULTS.items():
 
 S = st.session_state
 
+# ── SECOND-SCREEN ENTRY ───────────────────────────
+# A second browser window is a SECOND SESSION -- its own session_state, so it
+# cannot read the map's pick. ?view=seis is how the map hands this window a
+# line, and the map re-navigates the SAME named window rather than opening a
+# tab per click, so no polling or shared store is needed.
+#
+# Read BEFORE the nav renders. app_mode drives the nav buttons' `type=` and
+# the dispatch below; assigning it after a widget was drawn from it is
+# Streamlit scar #7, and the crash would land on whatever page drew next.
+try:
+    if str(st.query_params.get("view") or "").lower() == "seis":
+        S.app_mode = "seis_view"
+except Exception:
+    pass
+
 # ── Inject theme at top level so CSS applies to entire page ───────────
 _inject_theme(THEMES[S.get("theme", "Midnight Gold")])
 
@@ -903,6 +918,7 @@ with st.sidebar:
             # ("inspector",   "🔬", "Inspector"),          # retired Aug 2
             #   — uncomment to restore; its dispatch branch is still live.
             ("ref_tables",    "📋", "Reference Tables"),
+            ("spatial",       "🗺", "Spatial Loader"),
         ]
         for mode, icon, label in NAV:
             is_active = S.app_mode == mode
@@ -1132,6 +1148,23 @@ if S.app_mode == "splash":
         # _nav_card(c8, "🔍", "Document Recogniser",
         #           "Read a document, review what each table matched, correct the vocabulary",
         #           "docshape")
+# ── SEISMIC, SECOND SCREEN ──────────────────────
+elif S.app_mode == "seis_view":
+    try:
+        from dataview.mapping import page_well_map as _pwm
+        if S.engine is None:
+            # The sidebar renders for every mode and its Connect fields
+            # are pre-filled, so this is one click -- a second SESSION
+            # cannot inherit the first one's engine, and putting the
+            # connection in the URL to avoid that would be worse.
+            st.info("This window needs its own connection — press "
+                    "**Connect** in the sidebar. The line you picked is "
+                    "in the URL and will open once connected.")
+        else:
+            _pwm.render_seis_view(S.engine)
+    except Exception as e:
+        st.error(f"Seismic view error: {e}")
+
 # ── WELL MAP ──────────────────────────────────────────────────────────
 elif S.app_mode == "well_map":
     try:
@@ -1263,36 +1296,20 @@ elif S.app_mode == "file_scan":
     except Exception as e:
         st.error(f"File Manager error: {e}")
 
+# ── SPATIAL LOADER ───────────────────────────────────────
+# The old "📐 Spatial Layers" body lived here and could LIST and DELETE
+# layers -- and was not in NAV, so nothing could reach it. page_spatial_loader
+# does both of those and adds the part that was missing: browse a source, see
+# what is in it, and choose. Two branches on the same app_mode meant the first
+# won and the second was dead code, so they are one.
 elif S.app_mode == "spatial":
-    st.subheader("📐 Spatial Layers")
-    st.caption("Register GeoJSON and shapefiles as map overlays. "
-               "Layers registered here appear in the Well Map.")
-
     try:
-        from dataview.mapping.dv_spatial_loader import list_layers, delete_layer
-        layers = list_layers(S.engine)
-
-        if layers:
-            st.markdown(f"**{len(layers)} registered layer(s)**")
-            for lay in layers:
-                with st.container(border=True):
-                    c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
-                    c1.markdown(f"**{lay['layer_name']}**  "
-                                f"`{lay.get('layer_category','')}`")
-                    c2.caption(f"{lay.get('source_type','')} · "
-                               f"{lay.get('feature_count') or '?'} features")
-                    c3.caption(lay.get("layer_type",""))
-                    if c4.button("🗑", key=f"del_lay_{lay['layer_id']}",
-                                 help="Delete layer"):
-                        delete_layer(S.engine, lay["layer_id"])
-                        st.rerun()
-        else:
-            st.info("No layers registered yet. Use the Well Map → "
-                    "Registered Layers panel to add GeoJSON or shapefiles.")
-
+        from dataview.mapping import page_spatial_loader
+        page_spatial_loader.render(S.engine)
     except Exception as e:
-        st.error(f"Spatial layers error: {e}")
-
+        st.error(f"Spatial Loader error: {e}")
+        import traceback
+        st.code(traceback.format_exc())
 # ── REFERENCE TABLES ─────────────────────────────────────────────────
 elif S.app_mode == "ref_tables":
     try:

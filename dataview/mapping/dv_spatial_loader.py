@@ -524,6 +524,119 @@ def register_shapefile(engine, path: str,
         return {"loaded": 0, "layer_id": layer_id, "errors": [str(exc)]}
 
 
+def list_source_layers(path: str) -> list[dict]:
+    """What is inside a spatial source, without loading any of it.
+
+    Handles the three shapes a source arrives in: a .shp or .geojson FILE
+    (one layer), a .gdb DIRECTORY (many), and a folder of files. The File
+    Catalog cannot do the middle one at all -- it walks files, and a
+    geodatabase is a directory of a00000001.gdbtable, so it sees the parts
+    and never the whole.
+
+    Returns [{layer, geometry, features, crs, crs_ok, path}]. crs_ok is False
+    when the CRS is missing, because a layer that cannot be reprojected must
+    be refused rather than guessed at: the RMOTC geodatabase is NAD27 Wyoming
+    State Plane in FEET, and read as degrees it lands in the Gulf of Guinea.
+    """
+    import os
+    out = []
+    try:
+        import fiona
+    except ImportError:
+        return out
+
+    def _probe(src, layer=None):
+        try:
+            with fiona.open(src, layer=layer) if layer else fiona.open(src) as s:
+                geom = (s.schema or {}).get("geometry")
+                return {"layer": layer or os.path.basename(src),
+                        "geometry": geom, "features": len(s),
+                        "crs": str(s.crs)[:60] if s.crs else None,
+                        "crs_ok": bool(s.crs),
+                        "props": list((s.schema or {}).get("properties") or {}),
+                        "path": src}
+        except Exception:
+            return None
+
+    if os.path.isdir(path) and path.lower().endswith(".gdb"):
+        try:
+            for lay in fiona.listlayers(path):
+                r = _probe(path, lay)
+                if r and r["geometry"] and r["geometry"] != "None":
+                    out.append(r)
+        except Exception:
+            pass
+    elif os.path.isdir(path):
+        for f in sorted(os.listdir(path)):
+            fp = os.path.join(path, f)
+            if f.lower().endswith((".shp", ".geojson", ".json")):
+                r = _probe(fp)
+                if r:
+                    out.append(r)
+            elif f.lower().endswith(".gdb") and os.path.isdir(fp):
+                out.extend(list_source_layers(fp))
+    else:
+        r = _probe(path)
+        if r:
+            out.append(r)
+    return out
+
+
+def import_layer(engine, path: str, layer: str | None = None,
+                 layer_name: str = "", layer_category: str = "OTHER",
+                 style: dict | None = None,
+                 tooltip_fields: list | None = None,
+                 display_order: int = 99,
+                 source: str = "SHAPEFILE") -> dict:
+    """Load ONE layer from a shapefile, GeoJSON or geodatabase.
+
+    import_shapefile handles a whole file; this handles a named layer inside a
+    multi-layer source, which is the only way to take 12 useful layers out of
+    a 137-layer geodatabase.
+
+    Reprojects to WGS84 and REFUSES a layer with no CRS. Datetime columns are
+    stringified first: gdf.to_json() raises "Object of type Timestamp is not
+    JSON serializable" on any date attribute, and one such column took down a
+    1,401-feature well layer while eleven others loaded.
+
+    source must already exist in dv_r_source -- it is an FK, and an import has
+    no business minting standards vocabulary.
+    """
+    import os
+    try:
+        import geopandas as gpd
+    except ImportError:
+        return {"loaded": 0, "layer_id": None,
+                "errors": ["geopandas not installed"]}
+    try:
+        gdf = gpd.read_file(path, layer=layer) if layer else gpd.read_file(path)
+    except Exception as exc:
+        return {"loaded": 0, "layer_id": None,
+                "errors": ["could not read: %s" % exc]}
+    if gdf.empty or "geometry" not in gdf or gdf.geometry.isna().all():
+        return {"loaded": 0, "layer_id": None, "errors": ["no geometry"]}
+    if gdf.crs is None:
+        return {"loaded": 0, "layer_id": None,
+                "errors": ["no CRS — refused rather than guessed at"]}
+    try:
+        gdf = gdf.to_crs("EPSG:4326")
+    except Exception as exc:
+        return {"loaded": 0, "layer_id": None,
+                "errors": ["reprojection failed: %s" % exc]}
+    for c in gdf.columns:
+        if c != "geometry" and str(gdf[c].dtype).startswith("datetime"):
+            gdf[c] = gdf[c].astype(str)
+    key = os.path.join(path, layer) if layer else path
+    return _import_geodataframe(
+        engine, gdf,
+        layer_id=_layer_id(key),
+        layer_name=layer_name or (layer or Path(path).stem).replace("_", " "),
+        layer_type=_detect_geom_type(gdf),
+        layer_category=(layer_category or "OTHER").upper(),
+        file_path=key, style=style,
+        tooltip_fields=[t for t in (tooltip_fields or []) if t in gdf.columns] or None,
+        display_order=display_order, source=source)
+
 def import_folder(engine, folder: str,
                   extensions: tuple[str, ...] = (".shp", ".geojson", ".json"),
                   source: str = "DATAVIEW") -> dict:
