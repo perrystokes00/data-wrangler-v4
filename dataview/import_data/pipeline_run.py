@@ -2036,91 +2036,15 @@ def _stage_promote(engine, apply, log):
             raw.close()
         except Exception:
             pass
-    if apply:
-        # STAMP FROM LINEAGE, NOT FROM CATALOG_READINESS.
-        #
-        # This was `WHERE PROMOTED_AT IS NULL AND CATALOG_READINESS='CATALOGED'`
-        # — a stamp driven by the STATE a file happened to be in when promote
-        # finished, rather than by evidence that its rows landed. It is wrong in
-        # both directions:
-        #
-        #   UNDER-stamps. A file only reaches 'CATALOGED' by going through
-        #   cat_*. LAS/DLIS/LIS write dv_well_log(_curve) directly and SEG-Y
-        #   merges into dv_seis_set, so those never carry that state and were
-        #   never stamped even though their data is in dv_*. report_md already
-        #   carries a paragraph apologising for exactly this. MEASURED on
-        #   DataView_Demo 16 Aug: 11 files stamped, 97 demonstrably present in
-        #   dv_ by lineage — the stamp knew about 11% of what had promoted.
-        #
-        #   OVER-stamps. Promote HOLDS a row it cannot lift rather than guessing
-        #   (that is the design law), and a held row stays in cat_*, so its file
-        #   stays 'CATALOGED' — and got stamped as promoted anyway. Zero such
-        #   rows on this database today, only because the queue happened to be
-        #   drained; the moment a gate holds anything the stamp records a
-        #   promotion that did not happen. A confident wrong timestamp is worse
-        #   than a missing one.
-        #
-        # The honest test is the one the reports use: is this INVENTORY_ID
-        # present in a dv_ table? promotion_lineage.available() narrows LINEAGE
-        # to what this database can answer, so a partially-built schema stamps
-        # what it can instead of failing.
-        from sqlalchemy import text as _t
-        try:
-            from dataview.file_catalog import promotion_lineage as _lin
-            with engine.begin() as con:
-                _dv = [d for _c, d, _l in _lin.available(con)]
-                if _dv:
-                    _u = "\nUNION ALL\n".join(
-                        f"SELECT INVENTORY_ID FROM dataview.{t} "
-                        f"WHERE INVENTORY_ID IS NOT NULL" for t in _dv)
-                    # AND MARK IT CATALOGED, on the same evidence.
-                    #
-                    # THIS IS WHAT ENDED THE LOOP. catalog_rules selects WHERE
-                    # CATALOG_STATUS IS NULL OR = 'UNCATALOGED' and nothing on
-                    # this path wrote CATALOGED back, so a file that promoted
-                    # perfectly was re-selected on the next pass and every pass
-                    # after. Insert-only promote meant nothing DUPLICATED,
-                    # which is why it read as a hang rather than a bug.
-                    #
-                    # MATERIALISE THE LINEAGE FIRST. The first cut left this as
-                    # a correlated EXISTS over a 42-table UNION ALL and widened
-                    # the WHERE to catch reset rows -- so it re-evaluated that
-                    # union per catalog row and ran for 282 SECONDS on every
-                    # promote pass, which looked exactly like the loop it was
-                    # meant to fix. One pass over each dv_ table into a keyed
-                    # temp table, then a join, is the same answer in seconds.
-                    con.execute(_t("IF OBJECT_ID('tempdb..#lin_stamp') IS NOT NULL "
-                                   "DROP TABLE #lin_stamp"))
-                    con.execute(_t(
-                        f"SELECT DISTINCT INVENTORY_ID AS iid INTO #lin_stamp "
-                        f"FROM ({_u}) z"))
-                    # AN INDEX, NOT A PRIMARY KEY. SELECT INTO carries the
-                    # source column's NULLability across, and a PK cannot sit
-                    # on a nullable column -- "Cannot define PRIMARY KEY
-                    # constraint on nullable column". The index is what the
-                    # join needs anyway.
-                    con.execute(_t(
-                        "CREATE INDEX ix_lin_stamp ON #lin_stamp (iid)"))
-                    _n = con.execute(_t(
-                        "UPDATE g SET g.PROMOTED_AT = ISNULL(g.PROMOTED_AT, SYSUTCDATETIME()), "
-                        "          g.CATALOG_STATUS = 'CATALOGED' "
-                        "FROM file_catalog.GLOBAL_FILE_CATALOG g "
-                        "JOIN #lin_stamp l ON l.iid = g.INVENTORY_ID "
-                        "WHERE g.PROMOTED_AT IS NULL "
-                        "   OR ISNULL(g.CATALOG_STATUS,'') <> 'CATALOGED'")).rowcount
-                    con.execute(_t("DROP TABLE #lin_stamp"))
-                    log(f"  [promote] PROMOTED_AT + CATALOGED stamped on "
-                        f"{max(_n, 0):,} file(s) with rows in dv_ "
-                        f"(lineage evidence) — these leave the queue")
-                else:
-                    log("  [promote] PROMOTED_AT not stamped — no dv_ table in "
-                        "LINEAGE carries INVENTORY_ID in this database")
-        except Exception as _se:
-            # Reported, never swallowed. The promote itself has already
-            # committed; a failed stamp must not read as a failed promote, and
-            # must not be invisible either.
-            log(f"  [promote] PROMOTED_AT stamp FAILED ({type(_se).__name__}: "
-                f"{_se}) — rows are promoted, the stamp is not written")
+    # THE STAMP LIVES IN run_promote NOW, not here.
+    #
+    # It was here first, and here is one of FOUR ways promote is reached --
+    # page_monitor, page_triage and force_capture all call run_promote directly
+    # and none of them stamped, so files promoted through a button kept being
+    # re-selected and the loop carried on for everyone not using the pipeline
+    # page. Putting it in the function they all share is the difference between
+    # fixing a path and fixing the behaviour. Doing it in both places would run
+    # the lineage scan twice per pass for no benefit.
     return {}
 
 

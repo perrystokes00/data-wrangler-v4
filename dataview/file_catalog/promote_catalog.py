@@ -1810,6 +1810,67 @@ def tag_catalog_identity(cur, log=print):
     return tagged_u, tagged_s
 
 
+def stamp_promoted(cur, log=print):
+    """Mark every file whose rows are demonstrably in dv_* as CATALOGED.
+
+    LINEAGE, NOT STATE. A file is promoted when its INVENTORY_ID appears in a
+    dv_ table -- the same test promotion_lineage and every report use. Driving
+    it off CATALOG_READINESS instead under-stamps LAS/DLIS/SEG-Y (which do not
+    pass through cat_*) and over-stamps anything promote HELD.
+
+    MATERIALISE FIRST. Left as a correlated EXISTS over the 24-table lineage
+    UNION, this ran 282 seconds and had not finished -- on every promote pass,
+    which looked exactly like the loop it exists to end. One pass into an
+    indexed temp table then a join is the same answer in about a second.
+
+    Takes a CURSOR and does not commit: run_promote's contract is that the
+    caller owns the transaction, and the stamp must land or roll back with the
+    rows it describes.
+    """
+    # PROBE WITH THE CURSOR, not promotion_lineage.available(). That helper
+    # takes a SQLAlchemy connection and SWALLOWS the failure -- handed a raw
+    # pyodbc cursor every probe raises, is caught, returns False, and the whole
+    # stamp reports "no dv_ table in LINEAGE" and does nothing. Silently, which
+    # is the failure mode this repo has paid for most often. LINEAGE remains
+    # the single source of which tables count; only the probe is done in the
+    # caller's own dialect.
+    from dataview.file_catalog.promotion_lineage import LINEAGE as _LINEAGE
+    _dv = []
+    for _c3, _d3, _l3 in _LINEAGE:
+        cur.execute(
+            "SELECT CASE WHEN OBJECT_ID(?) IS NOT NULL AND EXISTS("
+            "SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID(?) "
+            "AND name='INVENTORY_ID') THEN 1 ELSE 0 END",
+            ("dataview." + _d3, "dataview." + _d3))
+        if (cur.fetchone() or [0])[0] == 1:
+            _dv.append(_d3)
+    if not _dv:
+        log("[promote] CATALOGED not stamped -- no dv_ table in LINEAGE "
+            "carries INVENTORY_ID in this database")
+        return 0
+    _sep = chr(10) + "UNION ALL" + chr(10)
+    _u = _sep.join(
+        "SELECT INVENTORY_ID FROM dataview.%s WHERE INVENTORY_ID IS NOT NULL" % t
+        for t in _dv)
+    cur.execute("IF OBJECT_ID('tempdb..#lin_stamp') IS NOT NULL DROP TABLE #lin_stamp")
+    cur.execute("SELECT DISTINCT INVENTORY_ID AS iid INTO #lin_stamp FROM (%s) z" % _u)
+    # An INDEX, not a PRIMARY KEY: SELECT INTO carries the source column's
+    # nullability across, and a PK cannot sit on a nullable column.
+    cur.execute("CREATE INDEX ix_lin_stamp ON #lin_stamp (iid)")
+    cur.execute(
+        "UPDATE g SET g.PROMOTED_AT = ISNULL(g.PROMOTED_AT, SYSUTCDATETIME()), "
+        "          g.CATALOG_STATUS = 'CATALOGED' "
+        "FROM file_catalog.GLOBAL_FILE_CATALOG g "
+        "JOIN #lin_stamp l ON l.iid = g.INVENTORY_ID "
+        "WHERE g.PROMOTED_AT IS NULL "
+        "   OR ISNULL(g.CATALOG_STATUS,'') <> 'CATALOGED'")
+    n = cur.rowcount
+    cur.execute("DROP TABLE #lin_stamp")
+    log("[promote] PROMOTED_AT + CATALOGED stamped on {:,} file(s) with rows "
+        "in dv_ (lineage evidence) -- these leave the queue".format(max(n, 0)))
+    return max(n, 0)
+
+
 def run_promote(cur, uwi=None, apply=False, log=print):
     """Promote every discovered cat_* mirror up into its dv_* table, logging one
     line per mirror plus a TOTAL. Shared by main() and the Pipeline-page button
@@ -1937,6 +1998,26 @@ def run_promote(cur, uwi=None, apply=False, log=print):
     log("[promote-steps-all] " + " · ".join(
         f"{k.split('.')[-1]} {v:.2f}s" for k, v in _steps if v >= 0.02))
     # -------------------------------------------------------------------------
+
+    # ---- leave the queue -----------------------------------------------------
+    # WHERE EVERY CALLER GETS IT. catalog_rules re-selects any file whose
+    # CATALOG_STATUS is NULL or UNCATALOGED, and nothing wrote CATALOGED back,
+    # so a file that promoted perfectly was re-processed on every pass forever.
+    #
+    # The first fix went into pipeline_run._stage_promote -- ONE of four ways
+    # promote is reached. page_monitor, page_triage and force_capture all call
+    # run_promote directly and none of them stamped, so the loop carried on for
+    # anyone using the buttons. Same shape as MIRROR_TABLES vs LINEAGE and the
+    # two loaders minting provenance differently: the answer belongs in the one
+    # function they all share, not in each wrapper.
+    if apply:
+        try:
+            stamp_promoted(cur, log=log)
+        except Exception as _se:
+            # Never swallowed: the promote itself has committed, and a failed
+            # stamp must not read as a failed promote OR be invisible.
+            log(f"[promote] CATALOGED stamp FAILED ({type(_se).__name__}: {_se})"
+                f" -- rows are promoted, the queue was not marked")
     return total_e, total_m, total_r
 
 
