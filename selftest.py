@@ -916,6 +916,66 @@ def tier_units(res, verbose=False):
     check("provenance: every loader resolves a sidecar CSV to its workbook",
           _sidecar_resolved_everywhere)
 
+    # 12d. NO FUNCTION MAY REBIND A MODULE-LEVEL IMPORT ALIAS.
+    #      "except Exception as _re" binds _re as a LOCAL for the WHOLE
+    #      function and DELETES it when the block ends, so a module-level
+    #      "import re as _re" is shadowed everywhere in that function --
+    #      including code far ABOVE the except. In page_well_map.run() one
+    #      such line, at 9740, made the colour guard at 8312 raise
+    #      UnboundLocalError on every Apply: no layer colour could be saved,
+    #      the handler caught it, and the message was gone before it could
+    #      be read. Nothing looked broken.
+    #
+    #      Grepping cannot find this. The import is present and correct; the
+    #      shadow is 9,600 lines away and reads as ordinary error handling.
+    #      Same family as extract_core missing "import uuid": a name that
+    #      resolves at import and fails only when its line runs. Code-only,
+    #      so it needs no database.
+    def _no_shadowed_import_alias():
+        import ast as _ast
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent
+        skip = (".venv", "venv", "_attic", "_quarantine", ".git",
+                "build", "node_modules", ".claude")
+        offenders = []
+        for py in root.rglob("*.py"):
+            if any(p in py.parts for p in skip):
+                continue
+            try:
+                tree = _ast.parse(py.read_text(encoding="utf-8",
+                                               errors="replace"))
+            except SyntaxError:
+                continue
+            aliases = {a.asname for n in tree.body
+                       if isinstance(n, (_ast.Import, _ast.ImportFrom))
+                       for a in n.names if a.asname}
+            if not aliases:
+                continue
+            funcs = [n for n in _ast.walk(tree)
+                     if isinstance(n, (_ast.FunctionDef,
+                                       _ast.AsyncFunctionDef))]
+            for fn in funcs:
+                for sub in _ast.walk(fn):
+                    hit = None
+                    if isinstance(sub, _ast.ExceptHandler):
+                        if sub.name in aliases:
+                            hit = (sub.name, "except-as")
+                    elif isinstance(sub, _ast.Name):
+                        if (isinstance(sub.ctx, _ast.Store)
+                                and sub.id in aliases):
+                            hit = (sub.id, "assignment")
+                    if hit:
+                        offenders.append("%s:%d %s() rebinds %r (%s)"
+                                         % (py.name, sub.lineno, fn.name,
+                                            hit[0], hit[1]))
+        assert not offenders, (
+            "a function rebinds a module-level import alias, shadowing it "
+            "for the whole function -- every use of that alias in the "
+            "function raises UnboundLocalError when it runs: "
+            + "; ".join(sorted(offenders)))
+    check("imports: no function shadows a module-level import alias",
+          _no_shadowed_import_alias)
+
     # 13. A LOAD THAT CANNOT REGISTER ITS FILE MUST SAY SO. The promote stamps
     #     every inserted row with the file's INVENTORY_ID before registration
     #     is attempted, so a failed register_file leaves those rows citing a
