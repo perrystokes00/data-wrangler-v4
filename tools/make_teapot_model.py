@@ -212,60 +212,277 @@ def _export_geography(root, log):
     return len(leases) + len(pipes) + 2
 
 
-def _write_tabular(wells, tab_dir, share, seed):
-    """One workbook per mirror, each holding `share` of the wells.
+# section -> (target table, [(display column, database column)], constants)
+#
+# COLUMN NAMES ARE THE LOADER'S INTERFACE. The first cut used the display
+# headers the scout ticket carries -- "Top MD", "Rec %", "SPF" -- because the
+# rows are shared with the PDF. The reader wants those; the Data Assistant maps
+# by column NAME, so it saw nothing it recognised and guessed: CHECKSHOTS,
+# CORE_RUNS, COMPLETION_SUMMARY and PRODUCTION_SUMMARY all landed on
+# DV_WELL_STIMULATION, and stg does DROP+CREATE, so four of the five would have
+# been silently overwritten by the fifth.
+#
+# The rows stay shared. Only the headers differ, because the two consumers want
+# different things from the same data -- and the file is NAMED for its target
+# so the mapping is obvious before anyone opens it.
+TABULAR_MAP = {
+    "Stratigraphy": ("dv_well_formation_top", [
+        ("Formation", "strat_unit_name"), ("Top MD (ft)", "top_depth"),
+        ("Base MD (ft)", "base_depth"), ("Gross (ft)", "gross_thickness"),
+        ("Lithology", "lithology")], {"depth_ouom": "ft"}),
+    "Directional Survey": ("dv_well_dir_srvy_sta", [
+        ("MD (ft)", "md"), ("Inc", "incl"), ("Azi", "azim"),
+        ("TVD (ft)", "tvd"), ("N/S (ft)", "ns_offset"),
+        ("E/W (ft)", "ew_offset"), ("DLS", "dls")], {"depth_ouom": "ft"}),
+    "DST": ("dv_well_dst", [
+        ("Test Date", "test_date"), ("Type", "test_type"),
+        ("Top MD", "top_depth"), ("Base MD", "base_depth"),
+        ("Result", "test_result"), ("Max Oil", "max_oil_rate"),
+        ("Max Gas", "max_gas_rate"), ("API Grav", "api_gravity")],
+        {"depth_ouom": "ft", "rate_ouom": "BBL/D"}),
+    "Core Runs": ("dv_well_core", [
+        ("#", "core_num"), ("Type", "core_type"), ("Show", "core_show"),
+        ("Formation", "strat_unit_name"), ("Top MD", "top_depth"),
+        ("Base MD", "base_depth"), ("Length", "core_length"),
+        ("Rec %", "recovery_pct"), ("Date", "core_date"),
+        ("Photos", "photo_count")], {"depth_ouom": "ft"}),
+    "Core Sample": ("dv_well_core_sample", [
+        ("Sample", "sample_id"), ("Type", "sample_type"),
+        ("Depth", "sample_depth"), ("Lithology", "lithology"),
+        ("Show", "hydrocarbon_show"), ("Por %", "porosity_frac"),
+        ("Perm", "permeability_air_md"), ("Bulk Den", "bulk_density_g_cc"),
+        ("Sw", "water_saturation_frac"), ("So", "oil_saturation_frac")],
+        {"depth_ouom": "ft"}),
+    "Completion Summary": ("dv_well_completion", [
+        ("Completion Date", "completion_date"), ("Type", "completion_type"),
+        ("Orientation", "well_orientation"), ("Formation", "strat_unit_name"),
+        ("Lateral (ft)", "lateral_length_ft"), ("Stages", "stage_count"),
+        ("Fluid (bbl)", "total_fluid_bbl"),
+        ("Proppant (lbs)", "total_proppant_lbs"),
+        ("Prop Intensity", "proppant_intensity_lbs_ft"),
+        ("Fluid System", "frac_fluid_system")], {"depth_ouom": "ft"}),
+    "Frac Stages": ("dv_well_stimulation", [
+        ("Stage", "stage_num"), ("Top MD", "stage_top_depth"),
+        ("Base MD", "stage_base_depth"), ("Clusters", "num_clusters"),
+        ("Cluster Sp", "cluster_spacing_ft"),
+        ("Fluid (bbl)", "fluid_volume_bbl"),
+        ("Proppant (lbs)", "proppant_mass_lbs"), ("ISIP", "isip_psi"),
+        ("Avg Treat", "avg_treating_pressure_psi"),
+        ("Max Rate", "max_rate_bpm")], {"stim_type": "HYDRAULIC FRACTURE"}),
+    "Checkshots": ("dv_well_checkshot", [
+        ("Station", "station_id"), ("MD (ft)", "md"), ("TVD (ft)", "tvd"),
+        ("TWT (ms)", "twt_ms"), ("OWT (ms)", "owt_ms"),
+        ("Avg Vel", "avg_velocity"), ("Int Vel", "interval_velocity")],
+        {"depth_ouom": "ft", "time_ouom": "ms", "velocity_ouom": "ft/s",
+         "depth_datum": "KB"}),
+    "Perforations": ("dv_well_perforation", [
+        ("Perf Date", "perf_date"), ("Top MD", "top_depth"),
+        ("Base MD", "base_depth"), ("Shots", "shot_count"),
+        ("SPF", "shot_density"), ("Gun", "gun_type"),
+        ("Phasing", "phasing_deg"), ("Formation", "strat_unit_name"),
+        ("Status", "perf_status")],
+        {"depth_ouom": "ft", "shot_density_ouom": "SPF",
+         "perf_diameter_in": "0.42"}),
+}
 
-    Sheet names and column headers are the ones synth_tables produces, which
-    are in turn the ones scout_pdf_reader.SECTIONS declares -- so the workbook
-    and the scout ticket describe a well identically, and the Data Assistant's
-    column mapping sees the same names either way.
+# A PARENT KEY THE LOADER CAN RESOLVE. dv_well_dir_srvy_sta, _core_sample,
+# _stimulation and _perforation all hang off a parent row, and a workbook that
+# omits the key leaves the operator to invent one in the mapping UI. Derived
+# from the UWI so the same well gets the same id in every workbook AND the same
+# id promote would mint from a document.
+_PARENT_KEY = {
+    "dv_well_dir_srvy_hdr": ("survey_id", "SRVY_"),
+    "dv_well_dir_srvy_sta": ("survey_id", "SRVY_"),
+    "dv_well_core":         ("core_id", "CORE_"),
+    "dv_well_core_sample":  ("core_id", "CORE_"),
+    "dv_well_completion":   ("completion_id", "COMP_"),
+    "dv_well_stimulation":  ("completion_id", "COMP_"),
+    "dv_well_perforation":  ("completion_id", "COMP_"),
+    "dv_well_checkshot":    ("checkshot_id", "CKSH_"),
+    "dv_well_dst":          ("dst_id", "DST_"),
+}
+# Row-level keys, unique within the parent.
+_ROW_KEY = {"dv_well_dir_srvy_sta": "station_id",
+            "dv_well_core_sample": "sample_id",
+            "dv_well_stimulation": "stim_id",
+            "dv_well_perforation": "perf_id",
+            "dv_well_checkshot": "station_id",
+            "dv_well_core": "core_id",
+            "dv_well_dst": "dst_id"}
+
+
+def _write_tabular(wells, tab_dir, share, seed):
+    """One workbook per TARGET TABLE, each holding `share` of the wells.
+
+    Named for the table and keyed by its column names, so the Data Assistant's
+    auto-mapping has nothing to guess. Five of these previously collapsed onto
+    DV_WELL_STIMULATION because they were named and headed for a human.
     """
     import random
+    import zlib
     from openpyxl import Workbook
     from dataview.migration.synth_tables import well_header_row, well_tables
 
-    rng = random.Random(seed + 77)
-    # Independent draw per mirror. A single shuffle reused across sheets would
-    # put the same wells in every workbook and the same wells in every
-    # document -- two populations that never meet.
     def _take(name):
-        import zlib
+        # crc32, not hash(): Python salts string hashing per process, so the
+        # 75% draw would pick different wells on every run.
         r = random.Random(zlib.crc32(f"{seed}:{name}".encode("utf-8")))
         return {w["uwi"] for w in wells if r.random() < share}
 
+    def _pid(uwi, prefix):
+        return f"{prefix}{uwi}"
+
     total = 0
 
-    # Well header: its own workbook, because it is the parent every other
-    # mirror hangs off and is the one most likely to be loaded on its own.
+    # ---- the well header, its own workbook ----------------------------
     keep = _take("well_header")
-    wb = Workbook(); ws = wb.active; ws.title = "Well Header"
-    rows = [well_header_row(w, rng) for w in wells if w["uwi"] in keep]
+    rows = [well_header_row(w) for w in wells if w["uwi"] in keep]
     if rows:
-        ws.append(list(rows[0].keys()))
+        wb = Workbook(); ws = wb.active; ws.title = "dv_well"
+        ws.append(["uwi", "well_name", "operator_name", "field_name", "county",
+                   "province_state", "country", "well_type", "well_status",
+                   "well_profile_type", "spud_date", "completion_date",
+                   "final_td", "kb_elevation", "ground_elevation",
+                   "surface_latitude", "surface_longitude",
+                   "bottom_hole_latitude", "bottom_hole_longitude"])
         for r in rows:
-            ws.append(list(r.values()))
+            ws.append([r["UWI"], r["WELL_NAME"], r["OPERATOR"], r["FIELD"],
+                       r["COUNTY"], r["STATE"], r["COUNTRY"], r["WELL_TYPE"],
+                       r["WELL_STATUS"], r["WELL_PROFILE"], r["SPUD_DATE"],
+                       r["COMPLETION_DATE"], r["TOTAL_DEPTH"],
+                       r["KB_ELEVATION"], r["GROUND_ELEVATION"],
+                       r["SURFACE_LATITUDE"], r["SURFACE_LONGITUDE"],
+                       r["BOTTOM_HOLE_LATITUDE"], r["BOTTOM_HOLE_LONGITUDE"]])
+        wb.save(os.path.join(tab_dir, "DV_WELL.xlsx"))
         total += len(rows)
-    wb.save(os.path.join(tab_dir, "WELL_HEADER.xlsx"))
 
-    # Every other section, one workbook each, UWI carried on every row so the
-    # loader can resolve the parent without a join the operator has to invent.
+    # ---- everything else, one workbook per target table ----------------
     by_section = {}
     for w in wells:
         for name, (cols, rws, _wd) in well_tables(w):
-            by_section.setdefault(name, (cols, []))[1].extend(
-                [w["uwi"]] + list(r) for r in rws)
-    for name, (cols, rws) in by_section.items():
-        keep = _take(name)
-        sel = [r for r in rws if r[0] in keep]
-        if not sel:
+            by_section.setdefault(name, (cols, []))[1].append((w["uwi"], rws))
+
+    prod = []
+    for name, (cols, per_well) in by_section.items():
+        if name == "Production Summary":
+            prod = per_well
             continue
-        wb = Workbook(); ws = wb.active; ws.title = name[:31]
-        ws.append(["UWI"] + list(cols))
-        for r in sel:
-            ws.append(r)
-        fn_ = name.upper().replace(" ", "_").replace("/", "_") + ".xlsx"
-        wb.save(os.path.join(tab_dir, fn_))
-        total += len(sel)
+        spec = TABULAR_MAP.get(name)
+        if not spec:
+            continue
+        table, pairs, consts = spec
+        keep = _take(name)
+        idx = {c: i for i, c in enumerate(cols)}
+        parent = _PARENT_KEY.get(table)
+        rowkey = _ROW_KEY.get(table)
+        _mapped = {db for _disp, db in pairs} | set(consts)
+        _need_rowkey = bool(rowkey) and rowkey not in _mapped and (
+            not parent or rowkey != parent[0])
+        hdr = (["uwi"]
+               + ([parent[0]] if parent else [])
+               + ([rowkey] if _need_rowkey else [])
+               + [db for _disp, db in pairs] + list(consts))
+        out = []
+        for uwi, rws in per_well:
+            if uwi not in keep:
+                continue
+            for k, r in enumerate(rws, start=1):
+                vals = [uwi]
+                if parent:
+                    vals.append(_pid(uwi, parent[1]))
+                if _need_rowkey:
+                    vals.append(f"{rowkey.upper()[:4]}{k:04d}")
+                for disp, _db in pairs:
+                    i = idx.get(disp)
+                    vals.append(r[i] if i is not None and i < len(r) else None)
+                vals += list(consts.values())
+                out.append(vals)
+        if not out:
+            continue
+        wb = Workbook(); ws = wb.active; ws.title = table[:31]
+        ws.append(hdr)
+        for v in out:
+            ws.append(v)
+        wb.save(os.path.join(tab_dir, table.upper() + ".xlsx"))
+        total += len(out)
+
+    # ---- the survey header the stations hang off ----------------------
+    # dv_well_dir_srvy_sta CARRIES A FOREIGN KEY to dv_well_dir_srvy_hdr
+    # (fk_srvy_sta_hdr -- the same constraint that dictated the delete order
+    # earlier). A workbook of stations with no header workbook loads into
+    # nothing: every station is an orphan the loader cannot place. Derived
+    # from the stations themselves so the depths agree.
+    sta = by_section.get("Directional Survey")
+    if sta:
+        cols, per_well = sta
+        keep = _take("Directional Survey")
+        idx = {c: i for i, c in enumerate(cols)}
+        hdr_rows = []
+        for uwi, rws in per_well:
+            if uwi not in keep or not rws:
+                continue
+            def _f(r, name):
+                i = idx.get(name)
+                try:
+                    return float(str(r[i]).replace(",", "")) if i is not None else None
+                except (ValueError, TypeError):
+                    return None
+            mds = [x for x in (_f(r, "MD (ft)") for r in rws) if x is not None]
+            hdr_rows.append([uwi, _pid(uwi, "SRVY_"), "MWD",
+                             min(mds) if mds else None,
+                             max(mds) if mds else None, "ft", "KB"])
+        if hdr_rows:
+            wb = Workbook(); ws = wb.active; ws.title = "dv_well_dir_srvy_hdr"
+            ws.append(["uwi", "survey_id", "survey_type", "survey_top_depth",
+                       "survey_base_depth", "depth_ouom", "depth_datum"])
+            for r in hdr_rows:
+                ws.append(r)
+            wb.save(os.path.join(tab_dir, "DV_WELL_DIR_SRVY_HDR.xlsx"))
+            total += len(hdr_rows)
+
+    # ---- production: entity + volume, and UNPIVOTED --------------------
+    # dv_prod_volume is TALL -- one row per fluid per period -- while the
+    # report is wide. Loading the wide shape would put gas into a column that
+    # means oil, so it is unpivoted here rather than left for a mapping UI
+    # that has no way to express it.
+    if prod:
+        keep = _take("Production Summary")
+        ent, vol = [], []
+        for uwi, rws in prod:
+            if uwi not in keep:
+                continue
+            per = [r for r in rws]
+            if not per:
+                continue
+            eid = _pid(uwi, "PENT_")
+            ent.append([eid, uwi, "WELL",
+                        str(per[0][0]), str(per[-1][0]), "OIL"])
+            for r in per:
+                period = str(r[0])
+                for col, fluid, uom in ((1, "OIL", "bbl"), (2, "GAS", "mcf"),
+                                        (3, "WATER", "bbl")):
+                    raw = str(r[col]).replace(",", "") if col < len(r) else ""
+                    try:
+                        v = float(raw)
+                    except ValueError:
+                        continue
+                    vol.append([eid, period, fluid, v, uom])
+        if ent:
+            wb = Workbook(); ws = wb.active; ws.title = "dv_prod_entity"
+            ws.append(["prod_entity_id", "uwi", "prod_entity_type",
+                       "first_prod_date", "last_prod_date", "primary_fluid"])
+            for r in ent:
+                ws.append(r)
+            wb.save(os.path.join(tab_dir, "DV_PROD_ENTITY.xlsx"))
+            total += len(ent)
+        if vol:
+            wb = Workbook(); ws = wb.active; ws.title = "dv_prod_volume"
+            ws.append(["prod_entity_id", "period_date", "fluid_type",
+                       "volume", "volume_ouom"])
+            for r in vol:
+                ws.append(r)
+            wb.save(os.path.join(tab_dir, "DV_PROD_VOLUME.xlsx"))
+            total += len(vol)
     return total
 
 
@@ -364,6 +581,12 @@ def main(argv=None):
     # The 75% is drawn INDEPENDENTLY PER MIRROR, so a well can have its header
     # off a spreadsheet and its tops off a scout ticket. Splitting whole wells
     # instead would produce two clean populations and never test a merge.
+    _scratch = os.path.join(tab_dir, "_xl_sheets")
+    if os.path.isdir(_scratch):
+        import shutil
+        shutil.rmtree(_scratch, ignore_errors=True)
+        print("   cleared _xl_sheets/ -- the Data Assistant's scratch "
+              "from a previous, differently-shaped run")
     _stale = [f for f in os.listdir(tab_dir)
               if f.lower().endswith(".xlsx")
               and f.upper().startswith(("PRODUCTION_", "CORE_ANALYSIS_"))
