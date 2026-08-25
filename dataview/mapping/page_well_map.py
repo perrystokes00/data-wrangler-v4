@@ -10238,63 +10238,116 @@ def run(engine=None):
         view_persist._parent = m
         m.add_child(view_persist)
 
-        # -- JS: click-to-centre, so the map can be walked without dragging --
-        # ENTIRELY IN THE BROWSER, and that is the whole point. Recentring via
-        # Python would mean subscribing to last_clicked, which fires on every
-        # mouse-down and reruns the page -- the map would grey out on each
-        # click, which is the opposite of moving around freely. Leaflet already
-        # has the latlng; panTo is instant, and the view-persist handler above
-        # catches the resulting moveend and stores the new centre, so a rerun
-        # returns to where the user just moved to. Nothing new to persist.
+        # -- Click-to-centre: walk the map without dragging -----------------
+        # A REAL LEAFLET CONTROL, not a floating div. Every corner of this map
+        # is already taken -- Draw toolbar top-left, LayerControl top-right,
+        # zoom badge bottom-left, status legend bottom-right -- and the legend
+        # has a variable height, so an absolutely-positioned button would sit
+        # on top of something at some zoom. A control lets Leaflet stack it
+        # under the LayerControl and inherit the standard button styling.
+        #
+        # ALWAYS ADDED, ARMED IN THE BROWSER. Gating this on a Streamlit
+        # checkbox cost a rerun just to arm the mode, and put the switch in a
+        # collapsed expander BELOW the map, where it was reported missing.
+        # sessionStorage holds the armed state, so it survives a rerun the
+        # same way the saved view does, and toggling it greys nothing.
         #
         # A CLICK ON SOMETHING IS NOT A CLICK ON THE MAP. Leaflet propagates
         # vector and marker clicks up to the map, so an unguarded handler would
-        # recentre every time a well popup or an H3 cell was opened. Both are
-        # rejected by walking up from the event target. DV_DRAW_ACTIVE, already
-        # maintained by the drag guard, keeps it out of the way of the draw
-        # tools -- a rectangle would otherwise re-centre on every vertex.
-        if st.session_state.get("wm_click_centre"):
-            click_centre = MacroElement()
-            click_centre._name = "dv_click_centre"
-            click_centre._template = Template(u"""
-                {% macro script(this, kwargs) %}
-                (function() {
-                    function findMap() {
-                        var el = document.querySelector(".leaflet-container");
-                        if (!el) { return null; }
-                        for (var k in window) {
-                            try {
-                                var v = window[k];
-                                if (v && v._container === el &&
-                                        typeof v.on === "function") {
-                                    return v;
-                                }
-                            } catch (e) { /* cross-origin key, skip */ }
-                        }
-                        return null;
-                    }
-                    function install() {
-                        var mapInst = findMap();
-                        if (!mapInst) { setTimeout(install, 200); return; }
-                        if (mapInst.__dv_click_centre_bound) { return; }
-                        mapInst.__dv_click_centre_bound = true;
-                        mapInst.on("click", function(e) {
-                            if (window.DV_DRAW_ACTIVE) { return; }
-                            var t = e.originalEvent && e.originalEvent.target;
-                            if (t && t.closest) {
-                                if (t.closest(".leaflet-interactive") ||
-                                    t.closest(".leaflet-marker-icon") ||
-                                    t.closest(".leaflet-control")) { return; }
+        # recentre every time a well popup or an H3 cell was opened -- the two
+        # clicks this map most depends on. DV_DRAW_ACTIVE, already maintained
+        # by the drag guard, keeps it clear of the draw tools, which would
+        # otherwise recentre on every vertex of a rectangle.
+        click_centre = MacroElement()
+        click_centre._name = "dv_click_centre"
+        click_centre._template = Template(u"""
+            {% macro script(this, kwargs) %}
+            (function() {
+                var KEY = "dv_centre_mode";
+                function findMap() {
+                    var el = document.querySelector(".leaflet-container");
+                    if (!el) { return null; }
+                    for (var k in window) {
+                        try {
+                            var v = window[k];
+                            if (v && v._container === el &&
+                                    typeof v.on === "function") {
+                                return v;
                             }
-                            mapInst.panTo(e.latlng, {animate: true});
-                        });
+                        } catch (e) { /* unreadable key, skip */ }
                     }
-                    install();
-                })();
-                {% endmacro %}
-            """)
-            click_centre._parent = m
-            m.add_child(click_centre)
+                    return null;
+                }
+                function install() {
+                    if (typeof L === "undefined") {
+                        setTimeout(install, 200); return;
+                    }
+                    var mapInst = findMap();
+                    if (!mapInst) { setTimeout(install, 200); return; }
+                    if (mapInst.__dv_centre_bound) { return; }
+                    mapInst.__dv_centre_bound = true;
+
+                    var armed = false;
+                    try { armed = sessionStorage.getItem(KEY) === "1"; }
+                    catch (e) { armed = false; }
+
+                    var link = null;
+                    function paint() {
+                        if (!link) { return; }
+                        link.style.background = armed ? "#f59e0b" : "#fff";
+                        link.style.color = armed ? "#fff" : "#0f172a";
+                        link.title = armed
+                            ? "Click-to-centre is ON - click the map to move "
+                              + "there. Click here to turn it off."
+                            : "Click-to-centre: turn on, then click the map "
+                              + "to re-centre without dragging.";
+                    }
+
+                    var Ctl = L.Control.extend({
+                        options: { position: "topright" },
+                        onAdd: function() {
+                            var box = L.DomUtil.create(
+                                "div", "leaflet-bar dv-centre-ctl");
+                            link = L.DomUtil.create("a", "", box);
+                            link.href = "#";
+                            link.innerHTML = "&#10021;";
+                            link.style.cssText =
+                                "font-size:15px;line-height:26px;"
+                                + "text-align:center;font-weight:700;";
+                            L.DomEvent.disableClickPropagation(box);
+                            L.DomEvent.on(link, "click", function(ev) {
+                                L.DomEvent.preventDefault(ev);
+                                armed = !armed;
+                                try {
+                                    sessionStorage.setItem(
+                                        KEY, armed ? "1" : "0");
+                                } catch (e) { /* private mode */ }
+                                paint();
+                            });
+                            paint();
+                            return box;
+                        }
+                    });
+                    mapInst.addControl(new Ctl());
+
+                    mapInst.on("click", function(e) {
+                        if (!armed) { return; }
+                        if (window.DV_DRAW_ACTIVE) { return; }
+                        var t = e.originalEvent && e.originalEvent.target;
+                        if (t && t.closest) {
+                            if (t.closest(".leaflet-interactive") ||
+                                t.closest(".leaflet-marker-icon") ||
+                                t.closest(".leaflet-control")) { return; }
+                        }
+                        mapInst.panTo(e.latlng, { animate: true });
+                    });
+                }
+                install();
+            })();
+            {% endmacro %}
+        """)
+        click_centre._parent = m
+        m.add_child(click_centre)
 
 
         # Crosshair cursor over map, pointer over markers
@@ -10521,17 +10574,10 @@ def run(engine=None):
                 "🛢 PPDM well symbols", key="wm_ppdm_symbols", value=False,
                 help="Draw wells as standard PPDM/API symbols (shape = status) "
                      "instead of plain coloured dots")
-            # READ EARLY, DRAWN LATE. The macro that consumes this is added to
-            # the map hundreds of lines above, so it reads the key from
-            # session_state rather than this variable. That is correct and not
-            # a lag: when a checkbox changes, Streamlit writes the new value
-            # into session_state BEFORE re-running the script, so the macro
-            # sees it on the very run that follows the click.
-            st.checkbox(
-                "✥ Click to centre", key="wm_click_centre", value=False,
-                help="Click anywhere on the map and it re-centres there, so "
-                     "you can walk across a field without dragging. Clicks on "
-                     "wells and cells still open them. Dragging still works.")
+            # Click-to-centre is NOT here. It is a button ON the map -- see
+            # dv_click_centre. A map control buried in a collapsed expander
+            # BELOW the map is a control nobody finds, which is exactly how
+            # this one was reported missing the first time.
 
         _sel_for_key = st.session_state.get("selected_cells", [])
         _sel_key_hash = hash(tuple(sorted(
