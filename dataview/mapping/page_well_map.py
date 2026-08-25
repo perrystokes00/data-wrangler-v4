@@ -8225,7 +8225,11 @@ def run(engine=None):
             # not hash() -- hash() is SALTED PER PROCESS, so the key would
             # differ every restart and the grid would reset for no reason.
             import zlib as _zlib
-            _sig = _zlib.crc32("|".join(_order).encode("utf-8"))
+            # "v2|" IS PART OF THE SIGNATURE ON PURPOSE. Scar #3: a
+            # data_editor keyed only to its ROWS carries stale widget
+            # state when the COLUMNS change, so adding Fill would have
+            # left a live session editing a frame that no longer exists.
+            _sig = _zlib.crc32(("v2|" + "|".join(_order)).encode("utf-8"))
             with st.form("wm_shp_form"):
                 _grid = st.data_editor(
                     pd.DataFrame([{
@@ -8243,6 +8247,19 @@ def run(engine=None):
                         # with the hex for anyone who would rather paste one.
                         "Colour": _colour_name(
                             _by_id[k].get("style_color")),
+                        # FILL FALLS BACK TO THE LINE COLOUR, which is
+                        # exactly what _add_shapefile_layer does when
+                        # style_fill_color is null. Showing a blank here
+                        # would claim there is no fill when the map draws
+                        # one.
+                        "Fill": _colour_name(
+                            _by_id[k].get("style_fill_color")
+                            or _by_id[k].get("style_color")),
+                        # A PERCENT, because 0.15 in a grid cell reads as
+                        # a typo. Converted back on the way in.
+                        "Fill %": int(round(float(
+                            _by_id[k].get("style_fill_opacity") or 0)
+                            * 100)),
                         "id": k,
                     } for k in _order]),
                     hide_index=True, use_container_width=True,
@@ -8288,6 +8305,16 @@ def run(engine=None):
                             help="Double-click to edit. Type a name from "
                                  "the list below, or paste a #rrggbb "
                                  "value — both work."),
+                        "Fill": st.column_config.TextColumn(
+                            width="medium",
+                            help="Polygon fill. Same names and hex "
+                                 "values as Colour."),
+                        "Fill %": st.column_config.NumberColumn(
+                            width="small", min_value=0, max_value=100,
+                            step=5, format="%d",
+                            help="0 draws no fill. A structure or "
+                                 "facility polygon reads best around "
+                                 "15-40."),
                         # The id rides along so a row maps back to its layer
                         # without trusting row ORDER, which a sort would break.
                         "id": None,
@@ -8312,28 +8339,60 @@ def run(engine=None):
                         _re_n = 0
                         for _n, r in _grid.iterrows():
                             _k = str(r["id"])
-                            _raw = str(r.get("Colour") or "").strip()
-                            _c = _colour_hex(_raw)
-                            _was = str(_by_id.get(_k, {}).get("style_color")
-                                       or "#888888").upper()
-                            if not _c or _c.upper() == _was:
-                                continue
-                            # REFUSE A MALFORMED HEX rather than writing it:
-                            # folium takes any string and draws nothing, which
-                            # reads as "the layer is broken".
-                            if not _re.fullmatch(r"#[0-9A-Fa-f]{6}", _c):
-                                _msgs.append(("warning",
-                                    "**%s**: %r is not a colour name or a "
-                                    "#rrggbb value — left unchanged. Pick from "
-                                    "the list, or type a name such as `Red`."
-                                    % (r["Layer"], _raw)))
-                                continue
-                            # A FALSE RETURN IS A FAILED WRITE, not a no-op:
-                            # set_style swallows its own exception. Untold, a
-                            # failed UPDATE looks exactly like an unchanged row.
+                            _lay = _by_id.get(_k, {})
+                            # ONE set_style PER LAYER, not one per field.
+                            # set_style already takes None for "leave alone",
+                            # and two UPDATEs to change a line and its fill
+                            # would stamp row_changed twice for one edit.
+                            _chg = {}
+                            for _fld, _col in (("color", "Colour"),
+                                               ("fill_color", "Fill")):
+                                _raw = str(r.get(_col) or "").strip()
+                                if not _raw:
+                                    continue
+                                _c = _colour_hex(_raw)
+                                # FILL COMPARES AGAINST THE LINE COLOUR when
+                                # style_fill_color is null, because that is
+                                # what the frame showed and what the map draws
+                                # (_add_shapefile_layer: fill_color or color).
+                                # Comparing against "" would rewrite every
+                                # unfilled layer on the very first Apply.
+                                _cur = _lay.get("style_" + _fld)
+                                if _fld == "fill_color" and not _cur:
+                                    _cur = _lay.get("style_color")
+                                if _c.upper() == str(_cur or "").upper():
+                                    continue
+                                # REFUSE A MALFORMED HEX rather than writing
+                                # it: folium takes any string and draws
+                                # nothing, which reads as "layer is broken".
+                                if not _re.fullmatch(r"#[0-9A-Fa-f]{6}", _c):
+                                    _msgs.append(("warning",
+                                        "**%s** / %s: %r is not a colour name "
+                                        "or a #rrggbb value - left unchanged."
+                                        % (r["Layer"], _col, _raw)))
+                                    continue
+                                _chg[_fld] = _c
+                            # PERCENT IN THE GRID, FRACTION IN THE TABLE.
+                            # style_fill_opacity is 0-1 and Leaflet clamps
+                            # above 1, so storing a typed 35 would draw every
+                            # polygon SOLID -- a plausible number meaning
+                            # something completely different.
                             try:
-                                _ok = set_style(engine, _k, color=_c,
-                                                strict=True)
+                                _fp = r.get("Fill %")
+                                if _fp is not None and str(_fp).strip() != "":
+                                    _fp = max(0.0, min(float(_fp), 100.0)) / 100
+                                    _wasfp = float(_lay.get(
+                                        "style_fill_opacity") or 0.0)
+                                    if abs(_fp - _wasfp) > 0.004:
+                                        _chg["fill_opacity"] = _fp
+                            except (TypeError, ValueError):
+                                _msgs.append(("warning",
+                                    "**%s**: Fill %% must be a number from 0 "
+                                    "to 100 - left unchanged." % r["Layer"]))
+                            if not _chg:
+                                continue
+                            try:
+                                _ok = set_style(engine, _k, strict=True, **_chg)
                             except Exception as _we:
                                 _ok = False
                                 _msgs.append(("error",
@@ -8342,7 +8401,7 @@ def run(engine=None):
                                 _re_n += 1
                             elif not _msgs or _msgs[-1][0] != "error":
                                 _msgs.append(("error",
-                                    "**%s**: no layer row matched — nothing "
+                                    "**%s**: no layer row matched - nothing "
                                     "was written." % r["Layer"]))
                         if _re_n:
                             # NO st.cache_data.clear() HERE. The style is
