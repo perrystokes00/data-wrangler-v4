@@ -554,13 +554,34 @@ def _add_status_legend(m, df, ppdm=False):
     # position:fixed pins to the iframe viewport reliably. The {% macro %}
     # wrapper is the canonical folium floating-legend pattern.
     from branca.element import Template, MacroElement
+    # COLLAPSIBLE, AND IT REMEMBERS. A sixteen-entry legend covers a real
+    # corner of the map, and the only control was a checkbox that removed it
+    # entirely -- so the choice was "in the way" or "gone", with nothing left
+    # on screen to say a legend exists. <details> folds to its summary bar,
+    # which keeps the affordance visible at about one line high.
+    #
+    # STATE LIVES IN THE BROWSER, not in session_state. The map is rebuilt on
+    # every rerun, so a Python-side toggle would need a rerun to fold a box --
+    # greying the map to hide a legend. sessionStorage is what the view-persist
+    # JS below already uses for exactly this reason: the browser owns it.
     legend_body = (
-        "<div id='wm-status-legend' style='position:fixed;bottom:22px;"
-        "right:12px;z-index:9999;background:rgba(255,255,255,0.94);"
-        "padding:8px 11px;border-radius:6px;"
-        "box-shadow:0 1px 5px rgba(0,0,0,0.35);max-height:48%;overflow:auto'>"
-        "<div style='font-size:11px;font-weight:700;color:#0f172a;"
-        "margin-bottom:4px'>Well status</div>" + "".join(rows) + "</div>")
+        "<details id='wm-status-legend' open style='position:fixed;"
+        "bottom:22px;right:12px;z-index:9999;"
+        "background:rgba(255,255,255,0.94);padding:6px 11px 8px;"
+        "border-radius:6px;box-shadow:0 1px 5px rgba(0,0,0,0.35);"
+        "max-height:48%;overflow:auto'>"
+        "<summary style='font-size:11px;font-weight:700;color:#0f172a;"
+        "cursor:pointer;outline:none;user-select:none'>Well status</summary>"
+        "<div style='margin-top:4px'>" + "".join(rows) + "</div></details>"
+        "<script>(function(){"
+        "var d=document.getElementById('wm-status-legend');"
+        "if(!d){return;}"
+        "try{if(sessionStorage.getItem('dv_legend_open')==='0')"
+        "{d.removeAttribute('open');}}catch(e){}"
+        "d.addEventListener('toggle',function(){"
+        "try{sessionStorage.setItem('dv_legend_open',d.open?'1':'0');}"
+        "catch(e){}});"
+        "})();</script>")
     macro = MacroElement()
     macro._template = Template(
         "{% macro html(this, kwargs) %}" + legend_body + "{% endmacro %}")
