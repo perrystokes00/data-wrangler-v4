@@ -8319,14 +8319,27 @@ def run(engine=None):
                             # A FALSE RETURN IS A FAILED WRITE, not a no-op:
                             # set_style swallows its own exception. Untold, a
                             # failed UPDATE looks exactly like an unchanged row.
-                            if set_style(engine, _k, color=_c):
-                                _re_n += 1
-                            else:
+                            try:
+                                _ok = set_style(engine, _k, color=_c,
+                                                strict=True)
+                            except Exception as _we:
+                                _ok = False
                                 _msgs.append(("error",
-                                    "**%s**: the database refused the colour "
-                                    "change." % r["Layer"]))
+                                    "**%s**: %s" % (r["Layer"], _we)))
+                            if _ok:
+                                _re_n += 1
+                            elif not _msgs or _msgs[-1][0] != "error":
+                                _msgs.append(("error",
+                                    "**%s**: no layer row matched — nothing "
+                                    "was written." % r["Layer"]))
                         if _re_n:
-                            st.cache_data.clear()
+                            # NO st.cache_data.clear() HERE. The style is
+                            # read by _load_shp_layers, which is NOT cached.
+                            # What the cache holds is _cached_layer_geojson --
+                            # the GEOMETRY, which a colour change does not
+                            # touch. Clearing it re-fetched every layer
+                            # (Topography alone is 3,768 features) to refresh
+                            # a hex string the next run reads anyway.
                             _msgs.append(("success",
                                 "Restyled %d layer(s)." % _re_n))
                     except Exception as _se:
@@ -8339,7 +8352,12 @@ def run(engine=None):
             # _colour_hex takes the name or the hex, either case.
             st.caption(" · ".join("%s = %s" % (_cn, _ch)
                                    for _cn, _ch in MAP_COLOURS[:16]))
-            for _lvl, _txt in (st.session_state.pop("wm_shp_msgs", None) or []):
+            # READ, DO NOT POP. pop showed each message for exactly ONE
+            # render, and this page reruns on any widget -- so an error
+            # explaining a refused colour flashed and was gone before it
+            # could be read. The next Apply overwrites the list; until then
+            # the explanation stays next to the grid it is about.
+            for _lvl, _txt in (st.session_state.get("wm_shp_msgs") or []):
                 getattr(st, _lvl, st.info)(_txt)
             # READ THE APPLIED SET, not the editor. The grid holds unsubmitted
             # edits; the map must draw what was last APPLIED or a half-ticked

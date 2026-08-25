@@ -525,7 +525,8 @@ def register_shapefile(engine, path: str,
 
 
 def set_style(engine, layer_id: str, color=None, weight=None, opacity=None,
-              fill_color=None, fill_opacity=None, dash=None) -> bool:
+              fill_color=None, fill_opacity=None, dash=None,
+              strict: bool = False) -> bool:
     """Restyle a layer that is already loaded. Only the values given change.
 
     The colour was settable at IMPORT time and nowhere else: the map reads
@@ -556,6 +557,12 @@ def set_style(engine, layer_id: str, color=None, weight=None, opacity=None,
                 + " WHERE layer_id = :lid"), params).rowcount
         return bool(n)
     except Exception:
+        # STRICT RE-RAISES. A bare False meant both "no row matched" and
+        # "the server rejected it", so a caller could only say "the
+        # database refused it" without saying why -- a discarded
+        # diagnostic makes the next failure undiagnosable.
+        if strict:
+            raise
         return False
 
 def list_source_layers(path: str, max_depth: int = 4) -> list[dict]:
