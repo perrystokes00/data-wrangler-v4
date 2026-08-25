@@ -230,6 +230,76 @@ def _seed_defaults(engine, table: str, pk: str,
 
 # ── Main render ───────────────────────────────────────────────────────
 
+_AUDIT_COLS = {"active_ind", "row_created_by", "row_created_date",
+               "row_changed_by", "row_changed_date"}
+
+
+def discover_reference_tables(engine):
+    """The curated tabs, PLUS every dv_r_* table the database actually has.
+
+    REFERENCE_TABLES was a hand-written registry of four while the schema had
+    six, so dv_r_depth_datum and dv_r_well_profile_type had no tab and could
+    not be seeded from the app at all. That is not cosmetic: creating a dv_r_*
+    table ARMS A GUARD -- promote holds any row whose coded value is not
+    registered -- so a reference table you cannot reach is a guard you cannot
+    satisfy, and the rows it holds are held silently.
+
+    The curated entries keep their icon, description and seed defaults. A
+    discovered one gets its primary key and editable columns from the schema
+    and no defaults, which is honest: nobody has said what its canonical
+    values are, and inventing some would be worse than an empty tab.
+
+    Falls back to the curated dict if introspection fails -- a page that
+    shows four tables beats a page that shows an exception.
+    """
+    out = dict(REFERENCE_TABLES)
+    known = {v["table"].split(".")[-1].lower() for v in out.values()}
+    try:
+        with engine.connect() as con:
+            names = [r[0] for r in con.execute(text(
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_SCHEMA='dataview' AND TABLE_TYPE='BASE TABLE' "
+                "AND TABLE_NAME LIKE 'dv[_]r[_]%' ORDER BY TABLE_NAME")).fetchall()]
+            for t in names:
+                if t.lower() in known:
+                    continue
+                cols = [r[0] for r in con.execute(text(
+                    "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                    "WHERE TABLE_SCHEMA='dataview' AND TABLE_NAME=:t "
+                    "ORDER BY ORDINAL_POSITION"), {"t": t}).fetchall()]
+                pk = [r[0] for r in con.execute(text(
+                    "SELECT kc.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc "
+                    "JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kc "
+                    "  ON kc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME "
+                    "WHERE tc.TABLE_SCHEMA='dataview' AND tc.TABLE_NAME=:t "
+                    "AND tc.CONSTRAINT_TYPE='PRIMARY KEY' "
+                    "ORDER BY kc.ORDINAL_POSITION"), {"t": t}).fetchall()]
+                # A COMPOSITE KEY IS NOT A CODE LIST. This editor writes one
+                # canonical value at a time; showing a tab it cannot save is
+                # worse than not showing it.
+                if len(pk) != 1:
+                    continue
+                editable = [c for c in cols if c.lower() not in _AUDIT_COLS]
+                if pk[0] not in editable:
+                    continue
+                _stem = t[5:] if t.lower().startswith("dv_r_") else t
+                label = _stem.replace("_", " ").title()
+                out[label] = {
+                    "table": "dataview." + t,
+                    "pk": pk[0],
+                    "cols": editable,
+                    "icon": "📌",
+                    "desc": ("Discovered from the schema. Canonical %s codes — "
+                             "add values below; promote HOLDS any row whose "
+                             "code is not registered here." % label.lower()),
+                    "defaults": [],
+                    "discovered": True,
+                }
+    except Exception as exc:
+        print("[standards_manager] reference discovery failed: %s" % exc)
+    return out
+
+
 def render(engine=None):
     st.subheader("📐 Standards Manager")
     st.caption(
@@ -277,11 +347,31 @@ def render(engine=None):
 
     st.divider()
 
-    tabs = st.tabs([f"{v['icon']} {k}" for k, v in REFERENCE_TABLES.items()])
+    # THE SCHEMA DECIDES WHICH TABS EXIST, not a hand-written list that
+    # went stale two tables ago.
+    _tables = discover_reference_tables(engine)
 
-    for tab, (name, cfg) in zip(tabs, REFERENCE_TABLES.items()):
-        with tab:
-            _render_reference_tab(engine, name, cfg)
+    # A LIST, NOT A TAB STRIP. Tabs were a fixed row of four; every new dv_r_*
+    # table makes them narrower and eventually unreadable, and a tab strip has
+    # to render EVERY tab body on every run. One selectbox costs the same at
+    # six tables as at sixty, and the name of the table is in the option so
+    # there is no guessing which dv_r_* a friendly label means.
+    _opts = list(_tables)
+    if not _opts:
+        st.warning("No dv_r_* reference tables found in this database.")
+        return
+
+    def _label(k):
+        _c = _tables[k]
+        _t = _c["table"].split(".")[-1]
+        return "%s  %s  —  %s%s" % (
+            _c.get("icon", "📌"), k, _t,
+            "  (discovered)" if _c.get("discovered") else "")
+
+    _sel = st.selectbox("Reference table", _opts, format_func=_label,
+                        key="ref_table_pick")
+    if _sel:
+        _render_reference_tab(engine, _sel, _tables[_sel])
 
 
 def _render_reference_tab(engine, name: str, cfg: dict):
