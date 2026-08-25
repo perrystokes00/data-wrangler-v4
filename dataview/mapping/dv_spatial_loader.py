@@ -524,7 +524,7 @@ def register_shapefile(engine, path: str,
         return {"loaded": 0, "layer_id": layer_id, "errors": [str(exc)]}
 
 
-def list_source_layers(path: str) -> list[dict]:
+def list_source_layers(path: str, max_depth: int = 4) -> list[dict]:
     """What is inside a spatial source, without loading any of it.
 
     Handles the three shapes a source arrives in: a .shp or .geojson FILE
@@ -567,14 +567,27 @@ def list_source_layers(path: str) -> list[dict]:
         except Exception:
             pass
     elif os.path.isdir(path):
-        for f in sorted(os.listdir(path)):
-            fp = os.path.join(path, f)
-            if f.lower().endswith((".shp", ".geojson", ".json")):
-                r = _probe(fp)
-                if r:
-                    out.append(r)
-            elif f.lower().endswith(".gdb") and os.path.isdir(fp):
-                out.extend(list_source_layers(fp))
+        # WALK SUBFOLDERS. A one-level listing found nothing at
+        # ...\DataSets\GIS, because the geodatabase sits in CD_files one level
+        # down -- and "0 layers" on a folder that plainly contains GIS data
+        # reads as "unsupported" rather than "look deeper". Bounded, and a
+        # .gdb is a LEAF: it is a source, not a folder to descend into, or its
+        # internals get probed as if they were layers.
+        for root, dirs, files in os.walk(path):
+            depth = root[len(path):].count(os.sep)
+            if depth >= max_depth:
+                dirs[:] = []
+            for dname in list(dirs):
+                if dname.lower().endswith(".gdb"):
+                    dirs.remove(dname)
+                    out.extend(list_source_layers(os.path.join(root, dname)))
+                elif dname.startswith((".", "$")):
+                    dirs.remove(dname)
+            for f in sorted(files):
+                if f.lower().endswith((".shp", ".geojson", ".json")):
+                    r = _probe(os.path.join(root, f))
+                    if r and r.get("geometry"):
+                        out.append(r)
     else:
         r = _probe(path)
         if r:
