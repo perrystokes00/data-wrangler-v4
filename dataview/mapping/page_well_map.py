@@ -4573,6 +4573,70 @@ def _add_seismic_3d(m, df):
     fg.add_to(m)
 
 
+# A NAMED PALETTE, because "#795548" is not a colour to a human. The grid
+# stores and the map draws HEX -- that is the real value and it has to stay
+# exact -- but nobody picking a colour for a pipeline is thinking in hex, and
+# a text field full of them is a field you cannot skim. Names in, hex out.
+#
+# Chosen to stay apart from each other on a pale basemap and from the well
+# symbols already on it: no two greens, nothing so light it vanishes on
+# CartoDB positron.
+MAP_COLOURS = [
+    ("Red",         "#D32F2F"), ("Orange",      "#F57C00"),
+    ("Amber",       "#FFA000"), ("Yellow",      "#FBC02D"),
+    ("Olive",       "#827717"), ("Green",       "#388E3C"),
+    ("Teal",        "#00796B"), ("Cyan",        "#0097A7"),
+    ("Blue",        "#1976D2"), ("Navy",        "#283593"),
+    ("Purple",      "#7B1FA2"), ("Magenta",     "#C2185B"),
+    ("Brown",       "#795548"), ("Slate",       "#455A64"),
+    ("Grey",        "#616161"), ("Black",       "#212121"),
+    # THE CATEGORY DEFAULTS, BY NAME. Without these, eleven of twelve loaded
+    # layers showed a raw hex in the grid -- every layer the loader styled from
+    # CATEGORY_DEFAULTS -- and a palette that names only the colours you chose
+    # by hand is a palette that names almost nothing.
+    ("Field Green", "#4CAF50"), ("Lease Blue",   "#2196F3"),
+    ("Well Red",    "#E24B4A"), ("Boundary Slate", "#607D8B"),
+    ("Layer Grey",  "#9E9E9E"), ("Seismic Orange", "#FF6B35"),
+    ("Seismic Purple", "#7B2D8B"), ("Basin Orange", "#FF9800"),
+    ("Pale Green",  "#A5D6A7"), ("Pale Blue",    "#90CAF9"),
+    ("Pale Purple", "#C490D1"), ("Pale Orange",  "#FFE0B2"),
+    ("Near White",  "#EEEEEE"), ("White",        "#FFFFFF"),
+]
+_COLOUR_BY_NAME = {n: h for n, h in MAP_COLOURS}
+_COLOUR_BY_HEX = {h.upper(): n for n, h in MAP_COLOURS}
+
+
+def _colour_name(hex_colour):
+    """A palette name for a hex value, or the hex itself when it is not one.
+
+    Returning the hex unchanged matters: a layer styled outside this grid --
+    by the loader's category defaults, or by hand -- must still round-trip.
+    Mapping it to the NEAREST name would silently restyle a layer nobody
+    touched, which is a worse sin than showing a hex.
+    """
+    s = str(hex_colour or "").strip().upper()
+    return _COLOUR_BY_HEX.get(s, s or "#888888")
+
+
+def _colour_hex(name):
+    """The hex for a palette name, passing an unrecognised value through."""
+    s = str(name or "").strip()
+    return _COLOUR_BY_NAME.get(s, s)
+
+def _darken(hex_colour, factor=0.5):
+    """A darker shade of a #rrggbb colour, for a pipeline's casing.
+
+    Returns the input unchanged if it is not a hex triple -- a style value can
+    be any string a person typed, and a casing that raises would take the whole
+    map down to make a line prettier.
+    """
+    s = str(hex_colour or "").strip()
+    if not _re.fullmatch(r"#[0-9A-Fa-f]{6}", s):
+        return s or "#333333"
+    r, g, b = (int(s[i:i + 2], 16) for i in (1, 3, 5))
+    f = max(0.0, min(1.0, factor))
+    return "#%02X%02X%02X" % (int(r * f), int(g * f), int(b * f))
+
 def _add_shapefile_layer(m, engine, layer):
     source_type  = layer.get("source_type","GEOJSON")
     layer_name   = layer.get("layer_name","Layer")
@@ -4616,6 +4680,52 @@ def _add_shapefile_layer(m, engine, layer):
         if d:
             s["dashArray"] = d
         return s
+
+    # ── pipelines look like pipelines ─────────────────────────────
+    # A pipeline drawn as a plain coloured line is indistinguishable from a
+    # road, a fault, a contour or a lease edge -- and this map carries all
+    # four. The cartographic convention is a CASING: a dark line laid down
+    # first, a lighter body over it, and a dashed centreline on top. The
+    # casing gives the pipe an edge, the dashes read as segment ticks, and
+    # together they say "pipe" at any zoom without a legend.
+    #
+    # Three passes into ONE FeatureGroup, not three layers: the layer control
+    # must toggle a pipeline once, and three entries for one dataset is the
+    # kind of clutter that makes people stop using the control.
+    #
+    # Leaflet's PolylineDecorator would draw true perpendicular ticks and is
+    # deliberately not used: it is an external plugin, and the map has to work
+    # offline behind whatever CSP the host applies.
+    if str(layer.get("layer_category") or "").upper() == "PIPELINE":
+        _grp = folium.FeatureGroup(name=f"{icon_ch} {layer_name}", show=True)
+
+        def _casing(_, c=_darken(color, 0.45), w=weight + 3.0, o=opacity):
+            return {"color": c, "weight": w, "opacity": o, "fillOpacity": 0}
+
+        def _body(_, c=color, w=max(weight, 1.5), o=opacity):
+            return {"color": c, "weight": w, "opacity": o, "fillOpacity": 0}
+
+        def _ticks(_, w=max(weight * 0.5, 0.8)):
+            # Short dash, long gap: ticks along the pipe rather than a dashed
+            # line, which would read as "proposed" or "buried".
+            return {"color": "#FFFFFF", "weight": w, "opacity": 0.75,
+                    "dashArray": "1,9", "fillOpacity": 0}
+
+        folium.GeoJson(gj, style_function=_casing).add_to(_grp)
+        folium.GeoJson(gj, style_function=_body).add_to(_grp)
+        _tk = {"style_function": _ticks}
+        if tt_fields:
+            _sample = (gj.get("features") or [{}])[0].get("properties", {})
+            _valid = [f for f in tt_fields if f in _sample]
+            if _valid:
+                # THE TOP PASS CARRIES THE TOOLTIP, once. On all three the
+                # hover fires whichever the cursor happens to hit and the
+                # popup can open three deep.
+                _tk["tooltip"] = folium.GeoJsonTooltip(fields=_valid, sticky=True)
+                _tk["popup"] = folium.GeoJsonPopup(fields=_valid, max_width=300)
+        folium.GeoJson(gj, **_tk).add_to(_grp)
+        _grp.add_to(m)
+        return
 
     kw = {"name": f"{icon_ch} {layer_name}", "style_function": _style}
     if tt_fields:
@@ -8091,8 +8201,8 @@ def run(engine=None):
                         "Type": _by_id[k].get("layer_type") or "",
                         "Category": _by_id[k].get("layer_category") or "",
                         "Features": _by_id[k].get("feature_count"),
-                        "Colour": (_by_id[k].get("style_color")
-                                   or "#888888"),
+                        "Colour": _colour_name(
+                            _by_id[k].get("style_color")),
                         "id": k,
                     } for k in _order]),
                     hide_index=True, use_container_width=True,
@@ -8111,14 +8221,23 @@ def run(engine=None):
                                                                 width="small"),
                         "Features": st.column_config.NumberColumn(
                             disabled=True, format="%d", width="small"),
-                        # A HEX FIELD, because Streamlit has no colour
-                        # COLUMN -- st.color_picker is a standalone widget
-                        # and cannot live in a data_editor. The stored value
-                        # IS the hex, so editing it here edits the thing
-                        # itself rather than a proxy for it.
-                        "Colour": st.column_config.TextColumn(
-                            width="small",
-                            help="Line colour as #rrggbb. Applied on submit."),
+                        # A DROPDOWN OF NAMES. Streamlit has no colour COLUMN
+                        # -- st.color_picker is a standalone widget and cannot
+                        # live in a data_editor -- and a text field of hex is a
+                        # field nobody can skim. Names are the interface; the
+                        # stored value stays hex, which is what the map draws.
+                        #
+                        # Options carry any hex ALREADY in use that has no name,
+                        # because a SelectboxColumn drops a value outside its
+                        # options -- the layer would silently show blank and
+                        # Apply would clear a colour nobody meant to change.
+                        "Colour": st.column_config.SelectboxColumn(
+                            width="medium",
+                            options=[n for n, _h in MAP_COLOURS] + sorted(
+                                {_colour_name(_by_id[k].get("style_color"))
+                                 for k in _order}
+                                - {n for n, _h in MAP_COLOURS}),
+                            help="Applied on submit."),
                         # The id rides along so a row maps back to its layer
                         # without trusting row ORDER, which a sort would break.
                         "id": None,
@@ -8136,10 +8255,10 @@ def run(engine=None):
                         _re_n = 0
                         for _n, r in _grid.iterrows():
                             _k = str(r["id"])
-                            _c = str(r.get("Colour") or "").strip()
-                            _was = (_by_id.get(_k, {}).get("style_color")
-                                    or "#888888")
-                            if not _c or _c == _was:
+                            _c = _colour_hex(str(r.get("Colour") or "").strip())
+                            _was = str(_by_id.get(_k, {}).get("style_color")
+                                       or "#888888").upper()
+                            if not _c or _c.upper() == _was:
                                 continue
                             # REFUSE A MALFORMED HEX rather than writing it:
                             # folium takes any string and draws nothing, which
