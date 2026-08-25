@@ -10366,32 +10366,55 @@ def run(engine=None):
                              "removed — they come from code and from your data")):
             if _delete_place(_pick):
                 st.rerun()
-        # Saving takes the CURRENT view, so a place is whatever you were
-        # looking at — no coordinates to type and nothing to get wrong.
-        # KEY IS VERSIONED, NOT REASSIGNED. Clearing the box after a save by
-        # writing st.session_state["wm_place_new"] = "" is illegal — Streamlit
-        # refuses to let a widget's own key be set once the widget exists, and
-        # it raises on the NEXT run, on whatever page happens to draw first.
-        # That is scar #6 in this codebase and I wrote it again here. Bumping a
-        # counter gives a fresh widget, which starts empty by itself.
+        # NOT "the current view" -- Python is never told where you panned or
+        # zoomed to, and three designs that tried to follow the viewport all
+        # failed. What gets saved is the extent the app ITSELF set: the box
+        # you drew, or the bbox a drill produced. The old comment here claimed
+        # otherwise and the code never matched it.
+        #
+        # AND IT IS A TEXT BOX AMONG BUTTONS. With its label collapsed to line
+        # up with Go and the bin, a grey placeholder in a bordered box reads as
+        # a DISABLED BUTTON -- which is exactly how it was reported. Worse, the
+        # "draw a box first" hint only appeared AFTER you typed a name, so the
+        # thing that looked dead stayed dead until you argued with it. Now the
+        # state is honest before you touch it: genuinely disabled when there is
+        # nothing to save, and the placeholder says which.
+        _can_save = bool(st.session_state.get("_drawn_bounds")
+                         or st.session_state.get("_active_drill_bbox"))
         _pv = st.session_state.get("wm_place_ver", 0)
-        _newname = _pl4.text_input("Save current view as",
-                                   key=f"wm_place_new_{_pv}",
-                                   placeholder="save this view as…",
-                                   label_visibility="collapsed")
-        if _newname.strip():
+        # KEY IS VERSIONED, NOT REASSIGNED. Clearing the box after a save by
+        # writing st.session_state["wm_place_new"] = "" is illegal -- Streamlit
+        # refuses to let a widget own key be set once the widget exists, and it
+        # raises on the NEXT run, on whatever page happens to draw first. That
+        # is scar #6 in this codebase. Bumping a counter gives a fresh widget,
+        # which starts empty by itself.
+        _newname = _pl4.text_input(
+            "Save current view as",
+            key="wm_place_new_%d" % _pv,
+            placeholder=("name this area…" if _can_save
+                         else "draw a box to save"),
+            disabled=not _can_save,
+            help=("Names the extent you drew or drilled and adds it to Go to."
+                  if _can_save else
+                  "Nothing to save yet. The map cannot tell Python where you "
+                  "panned or zoomed to — draw a box with the rectangle tool, "
+                  "or run a search, and THAT extent is what a name saves."),
+            label_visibility="collapsed")
+        if _newname.strip() and _can_save:
             _b = (st.session_state.get("_drawn_bounds")
                   or st.session_state.get("_active_drill_bbox"))
-            if not _b:
-                st.caption("Draw a box or run a search first — there is no "
-                           "current extent to save yet.")
-            else:
-                _p = _load_user_prefs()
-                _p.setdefault("places", {})[_newname.strip()] = _b
-                _save_user_prefs(_p)
-                st.session_state["wm_place_ver"] = _pv + 1   # fresh, empty box
-                st.success(f"Saved “{_newname.strip()}”.")
-                st.rerun()
+            _p = _load_user_prefs()
+            _p.setdefault("places", {})[_newname.strip()] = _b
+            _save_user_prefs(_p)
+            st.session_state["wm_place_ver"] = _pv + 1   # fresh, empty box
+            st.session_state["wm_place_msg"] = _newname.strip()
+            st.rerun()
+        # AFTER the rerun, not before it. st.rerun() RAISES, so an st.success
+        # written above is destroyed before it reaches the screen -- the same
+        # scar that hid the colour-grid errors for a whole session.
+        _pmsg = st.session_state.pop("wm_place_msg", None)
+        if _pmsg:
+            st.success("Saved “%s” — it is in the Go to list now." % _pmsg)
 
         _rv1, _rv2 = st.columns([1.1, 5])
         if _rv1.button("🎯 Reset view", key="wells_reset_view",
