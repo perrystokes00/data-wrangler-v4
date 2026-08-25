@@ -61,16 +61,49 @@ def render(engine=None):
                 "features": r["feature_count"],
                 "source": r["source_type"],
             } for r in cur]), hide_index=True, use_container_width=True)
-            _del = st.selectbox("Remove a layer", ["—"] + [r["layer_name"] for r in cur],
-                                key="sl_del_pick")
-            if _del != "—" and st.button("🗑 Remove", key="sl_del_go"):
-                _lid = next((r["layer_id"] for r in cur if r["layer_name"] == _del), None)
-                if _lid and sl.delete_layer(engine, _lid):
-                    st.success(f"Removed {_del}.")
-                    st.rerun()
-                else:
-                    st.error("Could not remove it.")
+            # ── restyle ─────────────────────────────────────
+            # Colour was settable at IMPORT and nowhere else, so changing one
+            # meant deleting the layer and re-reading every feature to alter a
+            # hex string. The map already reads these six fields at draw time.
+            _names = [r["layer_name"] for r in cur]
+            _sel = st.selectbox("Restyle a layer", _names, key="sl_style_pick")
+            _row = next((r for r in cur if r["layer_name"] == _sel), None)
+            if _row:
+                # KEYS VERSIONED ON THE LAYER. A fixed-key widget never
+                # re-defaults (Streamlit scar #1): switch layers and the
+                # picker keeps the PREVIOUS layer's colour, so Apply writes
+                # one layer's style onto another and it looks like the save
+                # went to the wrong row.
+                _k = str(_row["layer_id"])[:12]
+                s1, s2, s3, s4 = st.columns([1, 1, 1, 1])
+                _col = s1.color_picker(
+                    "Line", _row.get("style_color") or "#888888",
+                    key="sl_style_col_" + _k)
+                _fill = s2.color_picker(
+                    "Fill", _row.get("style_fill_color")
+                    or _row.get("style_color") or "#888888",
+                    key="sl_style_fill_" + _k)
+                _w = s3.slider("Width", 0.5, 6.0,
+                               float(_row.get("style_weight") or 1.5), 0.5,
+                               key="sl_style_w_" + _k)
+                _fo = s4.slider("Fill opacity", 0.0, 1.0,
+                                float(_row.get("style_fill_opacity") or 0.0), 0.05,
+                                key="sl_style_fo_" + _k)
+                _dash = st.checkbox(
+                    "Dashed", value=bool(_row.get("style_dash")),
+                    key="sl_style_dash_" + _k)
+                if st.button("🎨 Apply style", key="sl_style_go_" + _k):
+                    if sl.set_style(engine, _row["layer_id"], color=_col,
+                                    fill_color=_fill, weight=_w,
+                                    fill_opacity=_fo,
+                                    dash=("6 4" if _dash else "")):
+                        st.success(f"Restyled {_sel}. Reload the map to see it.")
+                        st.rerun()
+                    else:
+                        st.error("Could not update the style.")
 
+            _del = st.selectbox("Remove a layer", ["—"] + _names,
+                                key="sl_del_pick")
     st.divider()
 
     # ── the source ──────────────────────────────────────────────────────

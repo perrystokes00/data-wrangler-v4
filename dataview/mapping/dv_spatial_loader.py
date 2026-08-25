@@ -524,6 +524,40 @@ def register_shapefile(engine, path: str,
         return {"loaded": 0, "layer_id": layer_id, "errors": [str(exc)]}
 
 
+def set_style(engine, layer_id: str, color=None, weight=None, opacity=None,
+              fill_color=None, fill_opacity=None, dash=None) -> bool:
+    """Restyle a layer that is already loaded. Only the values given change.
+
+    The colour was settable at IMPORT time and nowhere else: the map reads
+    style_color at draw time and its register form offers a picker, but only
+    while registering a NEW path. So changing the colour of a loaded layer
+    meant deleting and re-importing it -- re-reading and re-storing thousands
+    of features to change a hex string.
+
+    None means "leave alone", so a caller can change one field without
+    knowing the rest. That matters because the category defaults set six
+    style values, and an editor that sent all six would silently overwrite
+    whatever the operator had already tuned.
+    """
+    sets, params = [], {"lid": layer_id}
+    for col, val in (("style_color", color), ("style_weight", weight),
+                     ("style_opacity", opacity), ("style_fill_color", fill_color),
+                     ("style_fill_opacity", fill_opacity), ("style_dash", dash)):
+        if val is not None:
+            sets.append("%s = :%s" % (col, col))
+            params[col] = val
+    if not sets:
+        return False
+    try:
+        with engine.begin() as con:
+            n = con.execute(text(
+                "UPDATE dataview.dv_spatial_layer SET " + ", ".join(sets)
+                + ", row_changed_by = 'IMPORTER', row_changed_date = GETDATE()"
+                + " WHERE layer_id = :lid"), params).rowcount
+        return bool(n)
+    except Exception:
+        return False
+
 def list_source_layers(path: str, max_depth: int = 4) -> list[dict]:
     """What is inside a spatial source, without loading any of it.
 
