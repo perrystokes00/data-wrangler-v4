@@ -4219,6 +4219,19 @@ def _render_seis_pick(lines=None, df3d=None):
             except (TypeError, ValueError):
                 pass
         st.caption(" - ".join(_bits))
+        # -- Open on the second screen ----------------------------------
+        # A NAMED window, not a new tab. target="dwseis" means the first
+        # click opens the window (drag it to the other monitor once) and
+        # every later pick RE-NAVIGATES that same window. That is what makes
+        # this feel live without polling: the map pushes, nothing watches.
+        # Hidden in the second window itself, which would otherwise offer to
+        # open a second copy of the page it already is.
+        if _path and str(st.query_params.get("view") or "").lower() != "seis":
+            st.markdown(
+                '<a href="%s" target="dwseis" rel="noopener" '
+                'style="font-size:0.82rem;text-decoration:none">'
+                '&#x2197; open on second screen</a>' % seis_view_url(_path),
+                unsafe_allow_html=True)
     with _c2c:
         if st.button("Clear", key="seis_pick_clear", use_container_width=True):
             st.session_state.pop("_seis_pick", None)
@@ -4270,6 +4283,50 @@ def _render_seis_pick(lines=None, df3d=None):
     except Exception as _e:
         st.error("The SEG-Y viewer could not open this file: " + str(_e))
         st.code(_path, language=None)
+
+
+def seis_view_url(path):
+    """The href that opens `path` on the second screen.
+
+    Relative, so it works behind whatever host/port Streamlit was started on.
+    """
+    from urllib.parse import quote
+    return "?view=seis&path=" + quote(str(path or ""), safe="")
+
+
+def render_seis_view(engine):
+    """The seismic panel ALONE, sized for a second monitor.
+
+    A SECOND WINDOW IS A SECOND SESSION. Streamlit keys session_state to the
+    browser connection, so this window cannot see the map's _seis_pick and no
+    amount of shared Python state would change that. The pick travels in the
+    URL instead, and the map re-navigates this window BY NAME (target=dwseis)
+    rather than opening a tab per click -- which is why this needs no polling,
+    no shared store, and no refresh loop to feel live.
+
+    The URL is applied only when it CHANGES. This window has its own chooser,
+    and re-asserting the query param on every rerun would fight the operator
+    every time they picked a different line here.
+    """
+    st.markdown("### Seismic — second screen")
+    _want = str(st.query_params.get("path") or "").strip()
+    _lines = _seismic_line_paths(engine)
+    _df3d = _qry_seismic_3d(engine)
+
+    if _want and st.session_state.get("_seis_url_path") != _want:
+        _hit = next((c for c in _seis_candidates(_lines, _df3d)
+                     if c.get("path") == _want), None)
+        st.session_state["_seis_url_path"] = _want
+        if _hit:
+            st.session_state["_seis_pick"] = dict(_hit)
+        else:
+            # NAME THE FILE. "Nothing to show" sends the reader back to the map
+            # to click again; the path says whether the catalog moved on.
+            st.warning("That file is not in the seismic catalog on this "
+                       "connection: `%s`. Pick a line below instead."
+                       % _want)
+
+    _render_seis_pick(_lines, _df3d)
 
 
 def _render_seis_slice(path):
@@ -8008,15 +8065,105 @@ def run(engine=None):
     with st.expander("🗺 Registered layers", expanded=False):
         _all_layers = shp_layers or []
         if _all_layers:
-            _lbl = {}
-            for _l in _all_layers:
-                _n = _l.get("layer_name") or _l.get("layer_id")
-                _c = _l.get("layer_category") or ""
-                _lbl[f"{_n}" + (f"  ({_c})" if _c else "")] = _l
-            _picked_lyr = st.multiselect(
-                "Show on map", sorted(_lbl), key="wm_shp_pick",
-                help="Layers registered in dv_spatial_layer.")
-            active_shp = [_lbl[k] for k in _picked_lyr if k in _lbl]
+            # A GRID IN A FORM, NOT A MULTISELECT. Every change to a multiselect
+            # reruns the script, and a rerun REBUILDS AND RE-SERIALISES THE WHOLE
+            # MAP -- so ticking four layers redrew it four times, greying the page
+            # each time. A data_editor inside a form holds its edits until the
+            # submit (Streamlit scar #5 in reverse: outside a form it would be
+            # worse than the multiselect), so the map is rebuilt ONCE however
+            # many boxes are ticked.
+            _by_id = {str(_l.get("layer_id")): _l for _l in _all_layers}
+            _order = sorted(_by_id, key=lambda k: (
+                (_by_id[k].get("layer_category") or ""),
+                (_by_id[k].get("layer_name") or "")))
+            _on = set(st.session_state.get("wm_shp_on") or [])
+            # KEYED TO THE FRAME'S SIGNATURE (scar #3): load or delete a layer
+            # and the editor must rebuild rather than carry stale rows. crc32,
+            # not hash() -- hash() is SALTED PER PROCESS, so the key would
+            # differ every restart and the grid would reset for no reason.
+            import zlib as _zlib
+            _sig = _zlib.crc32("|".join(_order).encode("utf-8"))
+            with st.form("wm_shp_form"):
+                _grid = st.data_editor(
+                    pd.DataFrame([{
+                        "Show": k in _on,
+                        "Layer": _by_id[k].get("layer_name") or k,
+                        "Type": _by_id[k].get("layer_type") or "",
+                        "Category": _by_id[k].get("layer_category") or "",
+                        "Features": _by_id[k].get("feature_count"),
+                        "Colour": (_by_id[k].get("style_color")
+                                   or "#888888"),
+                        "id": k,
+                    } for k in _order]),
+                    hide_index=True, use_container_width=True,
+                    # ENDS "_editor" ON PURPOSE. _is_action_key excludes
+                    # data editors by that suffix; without it the sub-page
+                    # persist loop self-assigns the key, the assignment
+                    # raises, the try/except swallows it, and the error
+                    # surfaces on whatever page draws next.
+                    key="wm_shp_grid_v%d_editor" % _sig,
+                    column_config={
+                        "Show": st.column_config.CheckboxColumn(width="small"),
+                        "Layer": st.column_config.TextColumn(disabled=True),
+                        "Type": st.column_config.TextColumn(disabled=True,
+                                                            width="small"),
+                        "Category": st.column_config.TextColumn(disabled=True,
+                                                                width="small"),
+                        "Features": st.column_config.NumberColumn(
+                            disabled=True, format="%d", width="small"),
+                        # A HEX FIELD, because Streamlit has no colour
+                        # COLUMN -- st.color_picker is a standalone widget
+                        # and cannot live in a data_editor. The stored value
+                        # IS the hex, so editing it here edits the thing
+                        # itself rather than a proxy for it.
+                        "Colour": st.column_config.TextColumn(
+                            width="small",
+                            help="Line colour as #rrggbb. Applied on submit."),
+                        # The id rides along so a row maps back to its layer
+                        # without trusting row ORDER, which a sort would break.
+                        "id": None,
+                    })
+                if st.form_submit_button("✓ Apply to map", type="primary",
+                                         use_container_width=True):
+                    st.session_state["wm_shp_on"] = [
+                        str(r["id"]) for _n, r in _grid.iterrows() if r["Show"]]
+                    # COLOURS TOO, and only where they CHANGED. Writing every
+                    # row on every Apply would be six UPDATEs per layer for no
+                    # reason, and would stamp row_changed on layers nobody
+                    # touched.
+                    try:
+                        from dataview.mapping.dv_spatial_loader import set_style
+                        _re_n = 0
+                        for _n, r in _grid.iterrows():
+                            _k = str(r["id"])
+                            _c = str(r.get("Colour") or "").strip()
+                            _was = (_by_id.get(_k, {}).get("style_color")
+                                    or "#888888")
+                            if not _c or _c == _was:
+                                continue
+                            # REFUSE A MALFORMED HEX rather than writing it:
+                            # folium takes any string and draws nothing, which
+                            # reads as "the layer is broken".
+                            if not _re.fullmatch(r"#[0-9A-Fa-f]{6}", _c):
+                                st.warning("%s: %r is not a #rrggbb colour — "
+                                           "left unchanged."
+                                           % (r["Layer"], _c))
+                                continue
+                            if set_style(engine, _k, color=_c):
+                                _re_n += 1
+                        if _re_n:
+                            st.cache_data.clear()
+                    except Exception as _se:
+                        st.warning("Colour changes not saved: %s" % _se)
+                    st.rerun()
+            # READ THE APPLIED SET, not the editor. The grid holds unsubmitted
+            # edits; the map must draw what was last APPLIED or a half-ticked
+            # grid would redraw on some other widget's rerun.
+            active_shp = [_by_id[k] for k in
+                          (st.session_state.get("wm_shp_on") or []) if k in _by_id]
+            if active_shp:
+                st.caption("Showing %d of %d layer(s)."
+                           % (len(active_shp), len(_by_id)))
         else:
             st.caption("No layers registered yet.")
 
