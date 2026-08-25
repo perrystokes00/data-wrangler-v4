@@ -1903,12 +1903,30 @@ def _tab_admin(engine, dialect, user, role):
                                  use_container_width=True, type="primary"):
                         try:
                             with engine.begin() as conn:
+                                # SCOPED TO THE FILES ACTUALLY ASSIGNED. This
+                                # UPDATE had no WHERE clause, so clearing
+                                # assignments reset EVERY row in the catalog --
+                                # including 1,701 files that had already
+                                # extracted, captured and promoted. Their rows
+                                # were never at risk, but catalog_rules selects
+                                # on CATALOG_STATUS and never writes CATALOGED
+                                # back, so every one of them returned to the
+                                # queue permanently. Read the ids BEFORE the
+                                # DELETE, the way the single-assignment branch
+                                # above already does.
+                                _inv = [r[0] for r in conn.execute(text(
+                                    f"SELECT DISTINCT INVENTORY_ID FROM {ft} "
+                                    f"WHERE INVENTORY_ID IS NOT NULL")).fetchall()]
                                 conn.execute(text(f"DELETE FROM {ft}"))
                                 conn.execute(text(f"DELETE FROM {at}"))
                                 conn.execute(text(f"DELETE FROM {gt}"))
-                                conn.execute(text(
-                                    f"UPDATE {ht} SET CATALOG_STATUS='UNCATALOGED'"
-                                ))
+                                for _i in range(0, len(_inv), 500):
+                                    _chunk = ",".join(
+                                        "'" + str(x).replace("'", "''") + "'"
+                                        for x in _inv[_i:_i + 500])
+                                    conn.execute(text(
+                                        f"UPDATE {ht} SET CATALOG_STATUS='UNCATALOGED' "
+                                        f"WHERE INVENTORY_ID IN ({_chunk})"))
                             st.session_state.pop("adm_confirm_assign", None)
                             st.success("✅ All assignments cleared. Inventory status reset.")
                             st.rerun()

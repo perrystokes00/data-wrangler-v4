@@ -445,6 +445,19 @@ def _do_las(engine, fpath, uwi, inv, say) -> FileResult:
     if _hdr_uwi:
         uwi = _hdr_uwi      # header UWI wins — it's the real well identity
 
+    # THE FILENAME, WHEN THE HEADER AND THE CALLER BOTH HAVE NOTHING.
+    # _do_dlis already does this; LAS did not, so it depended on an
+    # EARLIER STAGE having written MATCHED_UWI into the catalog. Run
+    # capture before the matcher and the file skips with 'invalid UWI'
+    # — 20 of the 185 Teapot LAS, exactly the 20 whose ~WELL section
+    # carries an empty UWI field, which is a shape real LAS files have.
+    # Deriving it here makes the stage order stop mattering.
+    if not _valid_uwi(uwi):
+        _fn_uwi = _norm_uwi(_uwi_from_filename(os.path.basename(fpath), fpath))
+        if _fn_uwi:
+            uwi = _fn_uwi
+            say(f"uwi from filename: {uwi} ({os.path.basename(fpath)})")
+
     if not _valid_uwi(uwi):
         say(f"skip (invalid UWI {uwi!r}): {fpath}")
         res.status = "skip"
