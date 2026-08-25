@@ -4603,21 +4603,8 @@ MAP_COLOURS = [
     ("Near White",  "#EEEEEE"), ("White",        "#FFFFFF"),
 ]
 _COLOUR_BY_NAME = {n: h for n, h in MAP_COLOURS}
-_COLOUR_BY_HEX = {h.upper(): n for n, h in MAP_COLOURS}
 # CASE-FOLDED, because people TYPE into the grid. See _colour_hex.
 _COLOUR_BY_FOLD = {n.casefold(): h for n, h in MAP_COLOURS}
-
-
-def _colour_name(hex_colour):
-    """A palette name for a hex value, or the hex itself when it is not one.
-
-    Returning the hex unchanged matters: a layer styled outside this grid --
-    by the loader's category defaults, or by hand -- must still round-trip.
-    Mapping it to the NEAREST name would silently restyle a layer nobody
-    touched, which is a worse sin than showing a hex.
-    """
-    s = str(hex_colour or "").strip().upper()
-    return _COLOUR_BY_HEX.get(s, s or "#888888")
 
 
 def _colour_hex(name):
@@ -8234,8 +8221,16 @@ def run(engine=None):
                         "Type": _by_id[k].get("layer_type") or "",
                         "Category": _by_id[k].get("layer_category") or "",
                         "Features": _by_id[k].get("feature_count"),
-                        "Colour": _colour_name(
-                            _by_id[k].get("style_color")),
+                        # THE HEX ITSELF, not a name for it. A name has to
+                        # round-trip through a lookup to mean anything, and
+                        # eleven of twelve layers were styled by the loader's
+                        # category defaults, so most of what the grid showed
+                        # was a name for a colour nobody had chosen. The hex
+                        # is what dv_spatial_layer stores and what folium
+                        # draws -- show that, and the legend below says which
+                        # hex is which colour.
+                        "Colour": str(_by_id[k].get("style_color")
+                                      or "#888888").upper(),
                         "id": k,
                     } for k in _order]),
                     hide_index=True, use_container_width=True,
@@ -8278,8 +8273,9 @@ def run(engine=None):
                         # is refused BY NAME below, where a refusal is visible.
                         "Colour": st.column_config.TextColumn(
                             width="medium",
-                            help="Double-click to edit. A palette name such as "
-                                 "Red or Field Green, or a #rrggbb value."),
+                            help="Double-click to edit. Paste a #rrggbb "
+                                 "value, or type a name from the list "
+                                 "below."),
                         # The id rides along so a row maps back to its layer
                         # without trusting row ORDER, which a sort would break.
                         "id": None,
@@ -8338,11 +8334,11 @@ def run(engine=None):
                                       "Colour changes not saved: %s" % _se))
                     st.session_state["wm_shp_msgs"] = _msgs
                     st.rerun()
-            # THE NAMES, because the dropdown that used to list them is gone.
-            # Only the base sixteen: the category defaults are derived names
-            # nobody types on purpose, and thirty in a caption is a wall.
-            st.caption("Colours: " + ", ".join(n for n, _h in MAP_COLOURS[:16])
-                       + " — or any #rrggbb.")
+            # NAME = HEX, so the legend answers the only question the grid
+            # raises: which hex do I paste for red. Both halves are typed:
+            # _colour_hex takes the name or the hex, either case.
+            st.caption(" · ".join("%s = %s" % (_cn, _ch)
+                                   for _cn, _ch in MAP_COLOURS[:16]))
             for _lvl, _txt in (st.session_state.pop("wm_shp_msgs", None) or []):
                 getattr(st, _lvl, st.info)(_txt)
             # READ THE APPLIED SET, not the editor. The grid holds unsubmitted
