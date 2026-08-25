@@ -227,7 +227,14 @@ def well_tables(w, rng=None):
     dec = float(w.get("_decline") or 0.03)
     prod = []
     for m in range(n):
-        d = d0 + timedelta(days=30 * m)
+        # CALENDAR MONTHS, NOT 30 DAYS. A month averages 30.44 days, so a
+        # 30-day step drifts ~22 days backwards over a 50-month series and
+        # eventually REPEATS a month. dv_prod_volume's PK is
+        # (prod_entity_id, period_date, fluid_type), so each repeat was a
+        # duplicate key -- 213 rows silently skipped by an insert-only
+        # promote, with no error anywhere, on 57 of 89 wells.
+        _mo = d0.month - 1 + m
+        d = date(d0.year + _mo // 12, _mo % 12 + 1, 1)
         oil = q * math.exp(-dec * m) * rng.uniform(0.88, 1.12)
         gas = oil * rng.uniform(1.2, 2.6)
         prod.append([d.strftime("%Y-%m"), f"{oil:,.0f}", f"{gas:,.0f}",

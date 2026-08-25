@@ -310,6 +310,87 @@ _ROW_KEY = {"dv_well_dir_srvy_sta": "station_id",
             "dv_well_core": "core_id",
             "dv_well_dst": "dst_id"}
 
+# Sections that must sample the SAME wells as their parent. The share still
+# applies -- it is applied once per family instead of once per table, so a
+# well whose cores arrive as a workbook has its core SAMPLES there too.
+_DRAW_GROUP = {"Core Sample":  "Core Runs",
+               "Frac Stages":  "Completion Summary",
+               "Perforations": "Completion Summary"}
+
+# Provenance on every row. `source` is NOT NULL on four of these targets and
+# nullable on the rest, so omitting it made the loader offer a `constant` rule
+# with a BLANK argument -- which stamps '' and fails the dv_r_source FK. SYNTH
+# is already registered and is what the rest of this model carries.
+SOURCE_TAG = "SYNTH"
+
+
+def _denum(v):
+    """A DISPLAY string like '1,224' back to a real number.
+
+    well_tables formats its rows for the PDF -- the scout ticket and the
+    workbook share them -- so depths, pressures and volumes carry thousands
+    separators. Written into a workbook they reach a numeric column as text,
+    and the loader's TRY_CONVERT turns '1,224' into NULL rather than raising:
+    ~15,000 values across eight mirrors would have loaded BLANK and reported
+    success. It surfaced only because dv_well_perforation.base_depth is NOT
+    NULL, which turned one silent wrong answer into a loud one.
+
+    A value with no comma is returned untouched, so a 14-digit uwi is never
+    turned into a float -- an identifier read as a number stops being an
+    identifier, and that is the older bug this must not trade itself for.
+    """
+    if not isinstance(v, str) or "," not in v:
+        return v
+    try:
+        f = float(v.replace(",", "").strip())
+    except ValueError:
+        return v                      # "Oil, gas to surface" is not a number
+    return int(f) if f.is_integer() else f
+
+
+def _month_start(period):
+    """'2015-01' -> '2015-01-01'.
+
+    dv_prod_volume.period_date is nvarchar and keeps the YYYY-MM label, but
+    dv_prod_entity.first/last_prod_date are datetime2, where TRY_CONVERT
+    returns NULL for a month with no day -- the same silent blank the
+    thousands separator produced. An entity whose first and last production
+    dates are both NULL cannot be reasoned about at all.
+    """
+    s = str(period or "").strip()
+    if len(s) == 7 and s[4] == "-":
+        return s + "-01"
+    return s or None
+
+
+def _unit_id(name):
+    """A stratigraphic unit CODE from its display name.
+
+    dv_well_formation_top requires strat_unit_id, and the workbook carried only
+    the name. The convention already in the table is the name upper-cased with
+    runs of punctuation collapsed to underscores -- "Council Grove" is
+    COUNCIL_GROVE -- so the workbook path and the document path agree on the id
+    instead of minting two codes for one unit.
+    """
+    s = _re_nonword.sub("_", str(name or "").upper()).strip("_")
+    return s or None
+
+
+_re_nonword = __import__("re").compile(r"[^A-Z0-9]+")
+_DERIVED = {"dv_well_formation_top": {
+    "strat_unit_id": lambda row: _unit_id(row.get("strat_unit_name"))}}
+
+
+def _num(row, idx, key):
+    """A float from a display cell, or None. Handles the thousands separator."""
+    i = idx.get(key)
+    if i is None or i >= len(row):
+        return None
+    try:
+        return float(str(row[i]).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
 
 def _write_tabular(wells, tab_dir, share, seed):
     """One workbook per TARGET TABLE, each holding `share` of the wells.
@@ -335,8 +416,15 @@ def _write_tabular(wells, tab_dir, share, seed):
     total = 0
 
     # ---- the well header, its own workbook ----------------------------
-    keep = _take("well_header")
-    rows = [well_header_row(w) for w in wells if w["uwi"] in keep]
+    # EVERY WELL, NOT `share` OF THEM. The header workbook is the only thing
+    # in tabular/ that CREATES a well; every other workbook hangs off one. Drawn
+    # at 75% it named 93 wells while its own detail files referenced 120, so the
+    # 27 that arrived only as a LAS header left 1,744 detail rows with no parent
+    # -- held on promote, and surfaced as 27 FK "decisions" that were really one
+    # load-order fact. The split still applies to the detail mirrors below; it is
+    # the PARENT that cannot be partial, because a row cannot be filed under a
+    # well that does not exist yet.
+    rows = [well_header_row(w) for w in wells]
     if rows:
         wb = Workbook(); ws = wb.active; ws.title = "dv_well"
         ws.append(["uwi", "well_name", "operator_name", "field_name", "county",
@@ -344,15 +432,17 @@ def _write_tabular(wells, tab_dir, share, seed):
                    "well_profile_type", "spud_date", "completion_date",
                    "final_td", "kb_elevation", "ground_elevation",
                    "surface_latitude", "surface_longitude",
-                   "bottom_hole_latitude", "bottom_hole_longitude"])
+                   "bottom_hole_latitude", "bottom_hole_longitude",
+                   "source"])
         for r in rows:
-            ws.append([r["UWI"], r["WELL_NAME"], r["OPERATOR"], r["FIELD"],
+            ws.append([_denum(_x) for _x in [r["UWI"], r["WELL_NAME"], r["OPERATOR"], r["FIELD"],
                        r["COUNTY"], r["STATE"], r["COUNTRY"], r["WELL_TYPE"],
                        r["WELL_STATUS"], r["WELL_PROFILE"], r["SPUD_DATE"],
                        r["COMPLETION_DATE"], r["TOTAL_DEPTH"],
                        r["KB_ELEVATION"], r["GROUND_ELEVATION"],
                        r["SURFACE_LATITUDE"], r["SURFACE_LONGITUDE"],
-                       r["BOTTOM_HOLE_LATITUDE"], r["BOTTOM_HOLE_LONGITUDE"]])
+                       r["BOTTOM_HOLE_LATITUDE"], r["BOTTOM_HOLE_LONGITUDE"],
+                       SOURCE_TAG]])
         wb.save(os.path.join(tab_dir, "DV_WELL.xlsx"))
         total += len(rows)
 
@@ -361,6 +451,53 @@ def _write_tabular(wells, tab_dir, share, seed):
     for w in wells:
         for name, (cols, rws, _wd) in well_tables(w):
             by_section.setdefault(name, (cols, []))[1].append((w["uwi"], rws))
+
+    # A CHILD MIRROR CANNOT BE DRAWN INDEPENDENTLY OF ITS PARENT. Each section
+    # took its own 75% sample, so a well could land in Core Sample without
+    # landing in Core Runs -- 57 parent keys across three pairs referenced rows
+    # that were never written, and the composite FKs that catch it
+    # (fk_dv_well_core_sample_uwi_core_id) are exactly the ones Phase 3 skips,
+    # so it passed analysis and failed on promote. Families share one draw.
+    core_ids = {}
+    if "Core Runs" in by_section:
+        _ccols, _cper = by_section["Core Runs"]
+        _ci = {c: i for i, c in enumerate(_ccols)}
+        for _u, _rws in _cper:
+            core_ids[_u] = [(f"CORE_{_u}_{k:02d}",
+                             _num(r, _ci, "Top MD"), _num(r, _ci, "Base MD"))
+                            for k, r in enumerate(_rws, start=1)]
+
+    def _parent_id(table, uwi, k, r, idx):
+        """The FK parent key for ONE row.
+
+        dv_well_core is the exception: core_id is BOTH the FK parent key and
+        half its own PK (uwi, core_id), so one id per WELL makes every core
+        after the first a duplicate -- 187 rows collapsing to 92 keys, 95 of
+        them rejected. Cores get a sequence, and a sample is tied to the core
+        whose interval CONTAINS its depth, because that is the only real link
+        the data has; picking one arbitrarily would file samples under a core
+        that never cut them.
+        """
+        lst = core_ids.get(uwi) or []
+        # A table whose ROW key IS its parent key needs a per-row sequence.
+        # dv_well_core and dv_well_dst both key on the id they also hang
+        # off, so one id per WELL made every run after the first a duplicate
+        # PK -- and an insert-only promote drops those without a word: 94 of
+        # 190 DSTs never arrived and the load reported success.
+        if table == "dv_well_dst":
+            return f"DST_{uwi}_{k:02d}"
+        if table == "dv_well_core":
+            return lst[k - 1][0] if k - 1 < len(lst) else f"CORE_{uwi}_{k:02d}"
+        if table == "dv_well_core_sample":
+            if not lst:
+                return f"CORE_{uwi}_01"
+            d0 = _num(r, idx, "Depth")
+            if d0 is not None:
+                for cid, top, base in lst:
+                    if top is not None and base is not None and top <= d0 <= base:
+                        return cid
+            return lst[0][0]
+        return _pid(uwi, _PARENT_KEY[table][1])
 
     prod = []
     for name, (cols, per_well) in by_section.items():
@@ -371,7 +508,7 @@ def _write_tabular(wells, tab_dir, share, seed):
         if not spec:
             continue
         table, pairs, consts = spec
-        keep = _take(name)
+        keep = _take(_DRAW_GROUP.get(name, name))
         idx = {c: i for i, c in enumerate(cols)}
         parent = _PARENT_KEY.get(table)
         rowkey = _ROW_KEY.get(table)
@@ -381,7 +518,8 @@ def _write_tabular(wells, tab_dir, share, seed):
         hdr = (["uwi"]
                + ([parent[0]] if parent else [])
                + ([rowkey] if _need_rowkey else [])
-               + [db for _disp, db in pairs] + list(consts))
+               + [db for _disp, db in pairs] + list(consts)
+               + list(_DERIVED.get(table, {})) + ["source"])
         out = []
         for uwi, rws in per_well:
             if uwi not in keep:
@@ -389,13 +527,19 @@ def _write_tabular(wells, tab_dir, share, seed):
             for k, r in enumerate(rws, start=1):
                 vals = [uwi]
                 if parent:
-                    vals.append(_pid(uwi, parent[1]))
+                    vals.append(_parent_id(table, uwi, k, r, idx))
                 if _need_rowkey:
                     vals.append(f"{rowkey.upper()[:4]}{k:04d}")
+                _row = {}
                 for disp, _db in pairs:
                     i = idx.get(disp)
-                    vals.append(r[i] if i is not None and i < len(r) else None)
+                    _v = _denum(r[i] if i is not None and i < len(r) else None)
+                    _row[_db] = _v
+                    vals.append(_v)
+                _row.update(consts)
                 vals += list(consts.values())
+                vals += [fn(_row) for fn in _DERIVED.get(table, {}).values()]
+                vals.append(SOURCE_TAG)
                 out.append(vals)
         if not out:
             continue
@@ -434,9 +578,10 @@ def _write_tabular(wells, tab_dir, share, seed):
         if hdr_rows:
             wb = Workbook(); ws = wb.active; ws.title = "dv_well_dir_srvy_hdr"
             ws.append(["uwi", "survey_id", "survey_type", "survey_top_depth",
-                       "survey_base_depth", "depth_ouom", "depth_datum"])
+                       "survey_base_depth", "depth_ouom", "depth_datum",
+                       "source"])
             for r in hdr_rows:
-                ws.append(r)
+                ws.append([_denum(x) for x in r] + [SOURCE_TAG])
             wb.save(os.path.join(tab_dir, "DV_WELL_DIR_SRVY_HDR.xlsx"))
             total += len(hdr_rows)
 
@@ -456,7 +601,8 @@ def _write_tabular(wells, tab_dir, share, seed):
                 continue
             eid = _pid(uwi, "PENT_")
             ent.append([eid, uwi, "WELL",
-                        str(per[0][0]), str(per[-1][0]), "OIL"])
+                        _month_start(per[0][0]), _month_start(per[-1][0]),
+                        "OIL"])
             for r in per:
                 period = str(r[0])
                 for col, fluid, uom in ((1, "OIL", "bbl"), (2, "GAS", "mcf"),
@@ -470,17 +616,18 @@ def _write_tabular(wells, tab_dir, share, seed):
         if ent:
             wb = Workbook(); ws = wb.active; ws.title = "dv_prod_entity"
             ws.append(["prod_entity_id", "uwi", "prod_entity_type",
-                       "first_prod_date", "last_prod_date", "primary_fluid"])
+                       "first_prod_date", "last_prod_date", "primary_fluid",
+                       "source"])
             for r in ent:
-                ws.append(r)
+                ws.append([_denum(x) for x in r] + [SOURCE_TAG])
             wb.save(os.path.join(tab_dir, "DV_PROD_ENTITY.xlsx"))
             total += len(ent)
         if vol:
             wb = Workbook(); ws = wb.active; ws.title = "dv_prod_volume"
             ws.append(["prod_entity_id", "period_date", "fluid_type",
-                       "volume", "volume_ouom"])
+                       "volume", "volume_ouom", "source"])
             for r in vol:
-                ws.append(r)
+                ws.append([_denum(x) for x in r] + [SOURCE_TAG])
             wb.save(os.path.join(tab_dir, "DV_PROD_VOLUME.xlsx"))
             total += len(vol)
     return total
