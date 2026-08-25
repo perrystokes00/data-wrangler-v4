@@ -3942,10 +3942,36 @@ def render_promote(ss, server, database, schema="dataview"):
                     _revp = next((x for x in (ss.get("bdl_review") or [])
                                   if x.get("skey") == skey), None)
                     _src_path = (_revp or {}).get("path") or ""
+                    # THE WORKBOOK, NOT THE SIDECAR. Same fix as the Data
+                    # Assistant needed: an .xlsx is exploded into
+                    # _xl_sheets/<workbook>__<sheet>.csv and the review row
+                    # carries that scratch path, so the stamp named a file
+                    # nothing catalogues and the next scan rewrites. 1,317
+                    # dv_well rows cited a sidecar this way AFTER the
+                    # assistant-side fix, because there are TWO loaders and
+                    # only one was patched. No-op for a real CSV.
+                    _src_path = pdl.workbook_for_sheet_csv(_src_path)
                     if _src_path:
                         from dataview.import_data.file_gate import (
                             inventory_id as _iid_p)
                         _inv_p = _iid_p(os.path.abspath(_src_path))
+                        # REGISTER WHERE WE STAMP. This loader minted an id
+                        # and never registered the file, so every bulk load
+                        # left rows citing a source GLOBAL_FILE_CATALOG had
+                        # never heard of -- the sidecar fix alone would only
+                        # have changed WHICH unresolvable id they cited.
+                        # Doing both from the same path is what makes them
+                        # agree by construction rather than by discipline.
+                        # Best effort: bookkeeping must not fail a load, but
+                        # a failure is SAID, not swallowed.
+                        try:
+                            from dataview.import_data.load_ledger import (
+                                register_file as _reg_p)
+                            if not _reg_p(eng, _src_path, log=None):
+                                _inv_err = ("could not register "
+                                            + os.path.basename(_src_path))
+                        except Exception as _re:
+                            _inv_err = f"registration failed: {_re}"
                     else:
                         _inv_err = "no source path on the review row"
                 except Exception as _ie:

@@ -876,6 +876,46 @@ def tier_units(res, verbose=False):
           "a targeted reset reaches every FK-linked domain",
           _reset_lists_agree)
 
+    # 12c. EVERY LOADER THAT STAMPS PROVENANCE MUST RESOLVE THE SIDECAR.
+    #      An .xlsx is exploded into _xl_sheets/<workbook>__<sheet>.csv and
+    #      loaded from there, so a loader minting inventory_id from its own
+    #      input path stamps a scratch file nothing catalogues and the next
+    #      scan deletes. There are TWO loaders doing this and the first fix
+    #      reached only one -- 1,317 dv_well rows cited a sidecar AFTER the
+    #      bug was "fixed". So the check is not "does it work" but "does
+    #      EVERY mint site resolve", which is the half a targeted fix misses.
+    def _sidecar_resolved_everywhere():
+        import glob as _g
+        from dataview.import_data.page_dir_loader import workbook_for_sheet_csv
+        _d = os.path.join(ROOT, "dataview", "import_data")
+        # EXEMPT, WITH A REASON. pipeline_run is the File Catalog SCANNER: it
+        # hashes the file it actually walked and writes that same id into
+        # GLOBAL_FILE_CATALOG in the same pass, so stamp and registration
+        # cannot disagree -- and it never meets a sidecar, because the catalog
+        # does not crawl TABULAR_EXTS. The rule is for loaders that stamp rows
+        # from an input path they were handed.
+        _scanners = {"pipeline_run.py"}
+        _miss = []
+        for _f in _g.glob(os.path.join(_d, "*.py")):
+            if os.path.basename(_f) in _scanners:
+                continue
+            _src = open(_f, encoding="utf-8", errors="ignore").read()
+            if "inventory_id as" not in _src:
+                continue
+            if "workbook_for_sheet_csv" not in _src:
+                _miss.append(os.path.basename(_f))
+        assert not _miss, (
+            "loader(s) mint an inventory_id without resolving a sidecar CSV "
+            "back to its workbook: " + ", ".join(sorted(_miss)))
+        _side = os.path.join(ROOT, "_xl_sheets", "BOOK__Sheet1.csv")
+        assert workbook_for_sheet_csv(_side) == _side, (
+            "a sidecar with no workbook beside it must pass through unchanged")
+        _plain = os.path.join(ROOT, "plain.csv")
+        assert workbook_for_sheet_csv(_plain) == _plain, (
+            "a real CSV must never be rewritten")
+    check("provenance: every loader resolves a sidecar CSV to its workbook",
+          _sidecar_resolved_everywhere)
+
     # 13. A LOAD THAT CANNOT REGISTER ITS FILE MUST SAY SO. The promote stamps
     #     every inserted row with the file's INVENTORY_ID before registration
     #     is attempted, so a failed register_file leaves those rows citing a
