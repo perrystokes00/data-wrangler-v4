@@ -4617,6 +4617,22 @@ def render_verify(ss, server, database, schema="dataview"):
                      "and will be deduped away.")
 
 
+def cx_pk(engine, table):
+    """First primary-key column of a dataview table, or None. From the DATABASE."""
+    from sqlalchemy import text as _t
+    try:
+        with engine.connect() as _c:
+            return _c.execute(_t(
+                "SELECT TOP 1 kc.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc "
+                "JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kc "
+                "  ON kc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME "
+                "WHERE tc.TABLE_SCHEMA='dataview' AND tc.TABLE_NAME=:t "
+                "AND tc.CONSTRAINT_TYPE='PRIMARY KEY' ORDER BY kc.ORDINAL_POSITION"),
+                {"t": table}).scalar()
+    except Exception:
+        return None
+
+
 def render_backlog(server, database, schema="dataview"):
     """What is stuck in staging, why, and the button that clears it.
 
@@ -4716,6 +4732,83 @@ def render_backlog(server, database, schema="dataview"):
                 st.success(f"Blanked the well link on {_n:,} staged row(s). "
                            f"They promote unattached on the next run.")
                 st.rerun()
+
+        # ── the third answer: reject ───────────────────────────────────
+        # Seed and Null both end with the row LOADING. Neither helps when the
+        # honest answer is that it should not: a UWI cell holding "N", a well
+        # no source will ever describe. Without a third option those rows live
+        # in staging forever, and a queue nobody can empty is one nobody reads
+        # -- which is how a real problem comes to hide among the ones you
+        # decided to live with.
+        #
+        # Reject is a MOVE, not a delete. The row goes to dataview.load_rejects
+        # whole, as JSON, with a required reason, and reinstate is the same
+        # move backwards. "Hold, don't drop" is kept: nothing is destroyed.
+        if _stuck:
+            from dataview.import_data import load_reject as _lr
+            with st.form("bdl_backlog_reject"):
+                st.caption(
+                    "Or reject them: the rows leave staging for "
+                    "`dataview.load_rejects` with your reason attached, kept "
+                    "whole and reinstatable. Use this when the row should NOT "
+                    "load — bad identifier, a well no source will describe.")
+                # A FORM, because the reason must COMMIT before the button
+                # reads it. A text box still being edited is not read by the
+                # enclosing form -- the same trap that saved a blank constant
+                # rule and cost an afternoon.
+                _why = st.text_input(
+                    "Reason (required)", key="bdl_reject_reason",
+                    placeholder="e.g. UWI cell holds 'N' — not an identifier")
+                if st.form_submit_button("✖ Reject these rows",
+                                         use_container_width=True):
+                    if not _why.strip():
+                        st.error("A reject needs a reason. Without one the "
+                                 "table is a landfill and nobody can tell a "
+                                 "decision from an accident.")
+                    else:
+                        _m = 0
+                        for _t, _c in sfm.CHILDREN:
+                            try:
+                                _m += _lr.reject(eng, _t.split(".")[-1], _c,
+                                                 _stuck, _why, who="BACKLOG_PANEL",
+                                                 pad=True)
+                            except Exception as _re:
+                                st.error(f"{_t}: {type(_re).__name__}: {_re}")
+                        # AND EVERYTHING ELSE THE PANEL REPORTS. CHILDREN is a
+                        # list of four; the section below already shows holds it
+                        # does not cover. A button that clears less than the
+                        # panel reports leaves rows in the limbo it was added to
+                        # end -- dv_prod_volume, three rows, invisible to the
+                        # list and reported two inches lower.
+                        try:
+                            from dataview.import_data import load_health as _lh2
+                            _seen2 = {t.split(".")[-1].lower() for t, _c in sfm.CHILDREN}
+                            for _r2 in _lh2.held_report(eng):
+                                if not (_r2["held"] or 0) or _r2["table"].lower() in _seen2:
+                                    continue
+                                for _c2 in _lh2.held_causes(eng, _r2["table"]):
+                                    _pk2 = cx_pk(eng, _c2["parent"])
+                                    if not _pk2:
+                                        continue
+                                    _m += _lr.reject_unresolved(
+                                        eng, _r2["table"], _c2["child_col"],
+                                        _c2["parent"], _pk2, _why,
+                                        who="BACKLOG_PANEL")
+                        except Exception as _re2:
+                            st.error(f"extra rejects failed: "
+                                     f"{type(_re2).__name__}: {_re2}")
+                        st.success(f"Rejected {_m:,} staged row(s) with a reason. "
+                                   f"They are in dataview.load_rejects, whole, "
+                                   f"and can be reinstated.")
+                        st.rerun()
+
+        _rej = _lr.summary(eng) if "_lr" in dir() else []
+        if _rej:
+            st.caption("Rejected so far: "
+                       + " · ".join("**%s** from `%s` — %s"
+                                      % (format(r["rows"], ","),
+                                         r["source_table"], r["reason"][:60])
+                                      for r in _rej[:4]))
 
         # ── what this panel could not see ───────────────────────────────
         # backlog() asks ONE question -- is this row's WELL missing -- against a
