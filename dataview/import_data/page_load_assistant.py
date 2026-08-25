@@ -1231,95 +1231,6 @@ def run():
            directory=ss.get("bdl_dir"))
 
 
-def render_load_health(engine, directory=None):
-    """After the load: what landed, what did not, and what is repairable.
-
-    THE QUESTIONS THIS ANSWERS WERE ONLY ANSWERABLE FROM A TERMINAL. The
-    inline "N row(s) held" notice lives in session state and is gone on the
-    next rerun, so the day after a load there was no way to ask whether it
-    actually landed -- and every check that reads a status column instead has
-    been wrong at least once this week.
-
-    Nothing here runs on page load. The held query scans every staged table,
-    which is 631,251 rows on the current batch; making that a click keeps a
-    diagnostic from taxing every rerun of the page it lives on.
-    """
-    import pandas as pd
-    from dataview.import_data import load_health as _lh
-
-    st.markdown("**After the load — what landed, what did not**")
-    st.caption("Keyed on rows in the target, not on a status column: stg keeps "
-               "its rows after promote, so a staged row whose key is absent "
-               "did not land. A flag can be reset; this cannot.")
-    if not st.button("Check this load", key="la_health_run"):
-        return
-
-    with st.spinner("Comparing staged rows against their targets..."):
-        try:
-            rows = _lh.held_report(engine)
-            orphans = _lh.orphan_provenance(engine)
-        except Exception as e:
-            st.error("Health check failed: %s" % e)
-            return
-
-    if not rows:
-        st.info("Nothing staged. Load something first.")
-        return
-
-    st.dataframe(pd.DataFrame([{
-        "staging table": r["table"], "staged": r["staged"],
-        "landed": r["landed"], "held": r["held"], "note": r["note"],
-    } for r in rows]), hide_index=True, use_container_width=True)
-
-    _held = [r for r in rows if (r["held"] or 0) > 0]
-    _total = sum(r["held"] or 0 for r in _held)
-    if _total:
-        st.warning("%s row(s) staged but never landed. Held is RECOVERABLE: "
-                   "load the missing parent, then re-run the load."
-                   % format(_total, ","))
-        for r in _held:
-            with st.expander("%s — why %s row(s) did not land"
-                             % (r["table"], format(r["held"], ","))):
-                causes = _lh.held_causes(engine, r["table"])
-                if causes:
-                    for c in causes:
-                        st.markdown("- `%s` → **%s** — %s unmatched, e.g. %s"
-                                    % (c["child_col"], c["parent"],
-                                       format(c["unmatched"], ","),
-                                       ", ".join("`%s`" % v for v in c["examples"][:3])))
-                else:
-                    # NOT "unknown". Every FK resolving points somewhere specific.
-                    st.markdown("Every foreign key resolves, so these were refused "
-                                "for another reason — most often a **duplicate key**: "
-                                "promote is insert-only, so a repeated key is skipped "
-                                "silently.")
-    else:
-        st.success("Every staged row reached its target.")
-
-    st.markdown("**Provenance**")
-    if not orphans:
-        st.success("Every row resolves to a catalogued file.")
-        return
-    _n = sum(o["rows"] for o in orphans)
-    st.warning("%s row(s) cite a file the catalog cannot resolve. The data is "
-               "fine; the audit trail is a dangling pointer — you cannot get "
-               "from a suspect value back to the file that supplied it."
-               % format(_n, ","))
-    _dirs = [d for d in {directory, st.session_state.get("la_dir")} if d]
-    st.dataframe(pd.DataFrame([{
-        "table": o["table"], "inventory_id": o["inventory_id"][:16] + "...",
-        "rows": o["rows"],
-    } for o in orphans]), hide_index=True, use_container_width=True)
-    st.caption("Usually a sidecar: an .xlsx is loaded via "
-               "`_xl_sheets/<workbook>__<sheet>.csv`, and older builds stamped "
-               "that scratch path. `tools/repair_sidecar_provenance.py --dir "
-               "<folder> --apply` repoints them at the workbook; it refuses if "
-               "the workbook is not registered, rather than swapping one "
-               "unresolvable id for another.")
-    if _dirs:
-        st.code("python tools\repair_sidecar_provenance.py --dir \"%s\" --apply"
-                % _dirs[0], language="bash")
-
 def render(ss, server, database, schema="dataview", directory=None):
     """`directory` is passed in by the host page. It used to be read out of
     session state, which broke the moment the host returned early before
@@ -1737,19 +1648,6 @@ def render(ss, server, database, schema="dataview", directory=None):
             st.rerun()
         st.divider()
 
-    # ── after the load ────────────────────────────────────────────
-    # OUTSIDE the la_last_result block on purpose. The question "did my load
-    # land" outlives the notice that answered it: session state drops the
-    # result on the next rerun, and the day after a load there was nowhere to
-    # ask. This stays available whenever something is staged.
-    try:
-        _eng_h = get_engine(server, database)
-    except Exception:
-        _eng_h = None
-    if _eng_h is not None:
-        with st.expander("🩺 After the load — what landed, what did not",
-                         expanded=False):
-            render_load_health(_eng_h, directory)
 
     # ── the work queue ──────────────────────────────────────────────────────
     _q = ss.get("la_queue") or []

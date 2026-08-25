@@ -4708,6 +4708,47 @@ def render_backlog(server, database, schema="dataview"):
                            f"They promote unattached on the next run.")
                 st.rerun()
 
+        # ── what this panel could not see ───────────────────────────────
+        # backlog() asks ONE question -- is this row's WELL missing -- against a
+        # hand-written CHILDREN list. That is the right question for the seed
+        # remedy above, and it is blind to two things: a table held by a parent
+        # that is not dv_well (dv_prod_volume hangs off dv_prod_entity and is not
+        # in CHILDREN at all), and provenance. Both are asked here from the FK
+        # graph and the catalog, so a hold cannot hide behind a list.
+        try:
+            from dataview.import_data import load_health as _lh
+            _seen = {t.split(".")[-1].lower() for t, _c in sfm.CHILDREN}
+            _other = [r for r in _lh.held_report(eng)
+                      if (r["held"] or 0) > 0 and r["table"].lower() not in _seen]
+            if _other:
+                st.caption("Also held, and not covered by the seed above — these "
+                           "hang off a parent other than dv_well:")
+                for _r in _other:
+                    _c = _lh.held_causes(eng, _r["table"])
+                    _why = ("; ".join("`%s` → **%s** (%s unmatched, e.g. %s)"
+                                      % (x["child_col"], x["parent"],
+                                         format(x["unmatched"], ","),
+                                         ", ".join("`%s`" % v for v in x["examples"][:2]))
+                                      for x in _c)
+                            or "every FK resolves — likely a repeated key, which an "
+                               "insert-only promote skips silently")
+                    st.markdown("- **%s** — %s row(s) held: %s"
+                                % (_r["table"], format(_r["held"], ","), _why))
+            _orph = _lh.orphan_provenance(eng)
+            if _orph:
+                _n = sum(o["rows"] for o in _orph)
+                st.warning("%s row(s) cite a file the catalog cannot resolve. The "
+                           "data is fine; the audit trail is a dangling pointer, so "
+                           "you cannot get from a suspect value back to its file. "
+                           "Usually a sidecar CSV: repair with "
+                           "`tools/repair_sidecar_provenance.py --dir <folder> --apply`."
+                           % format(_n, ","))
+        except Exception as _he:
+            # SAY SO. A silent except here is what let the last three of these
+            # sit unnoticed for a week.
+            st.caption("Extra health checks unavailable: %s: %s"
+                       % (type(_he).__name__, _he))
+
         _dups = sum(r["duplicates"] or 0 for r in rows)
         if _dups:
             st.caption(
