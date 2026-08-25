@@ -2968,11 +2968,22 @@ def _wb_um_match(engine, inputs, _pi):
         if uw and uw in uwi_map:
             m = uwi_map[uw]
             loc = " · ".join(x for x in (m.COUNTY, m.PROVINCE_STATE) if x)
-            txt = (f"✓ UWI in reference · {m.WELL_NAME or ''}"
+            txt = (f"✓ {uw} · in reference · {m.WELL_NAME or ''}"
                    + (f" ({loc})" if loc else ""))
             fill = uw
         elif uw:
-            txt = "✗ UWI not found in reference"
+            # THE FILE'S OWN UWI IS STILL AN ANSWER. The reference master
+            # is one corpus, not the world -- a LAS whose header or name
+            # carries a good API is not wrong because well_master_gold has
+            # never heard of it. Reporting only "not found" left the guess
+            # on screen, unusable, and Save wrote nothing, so files with a
+            # perfectly good UWI could not be keyed at all.
+            #
+            # So the result IS the UWI, and it fills. The tick is reserved
+            # for corroborated ones: unverified and verified must stay
+            # tellable apart, which is the whole reason to show the mark.
+            txt = f"● {uw} · not in reference — using the file's own"
+            fill = uw
         elif nm:
             cands = name_map.get(nm.upper(), [])
             scored = []
@@ -6942,11 +6953,17 @@ def _well_key_grid(engine):
                 if uw and uw in uwi_map:
                     m = uwi_map[uw]
                     loc = " · ".join(x for x in (m.COUNTY, m.PROVINCE_STATE) if x)
-                    txt = (f"✓ UWI in reference · {m.WELL_NAME or ''}"
+                    txt = (f"✓ {uw} · in reference · {m.WELL_NAME or ''}"
                            + (f" ({loc})" if loc else ""))
                     fill = uw
                 elif uw:
-                    txt = "✗ UWI not found in reference"
+                    # Same rule as the other grid: the file's own UWI is an
+                    # answer, so the result IS the UWI and it fills. Both
+                    # copies of this block changed together -- they are the
+                    # same screen twice and drifting them is how one gets
+                    # fixed and the other keeps the old behaviour.
+                    txt = f"● {uw} · not in reference — using the file's own"
+                    fill = uw
                 elif nm:
                     cands = name_map.get(nm.upper(), [])
                     scored = []
