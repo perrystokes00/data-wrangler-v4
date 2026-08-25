@@ -4603,9 +4603,18 @@ def render_verify(ss, server, database, schema="dataview"):
                               f"run once the parent arrives)")
             else:
                 _lines.append(f"{r['table']} (−{r['missing']})")
+        # NAME WHERE THE ANSWER IS. The Backlog panel explains every table in
+        # this list and offers the remedies, but it renders ABOVE the scan gate
+        # -- near the top of a page that is six phases long -- so from down here
+        # it is invisible. A warning that states a problem and not the place to
+        # fix it is how this one became wallpaper.
         st.warning("Not fully loaded: " + ", ".join(_lines)
                    + ". Held rows are expected and safe; for the rest, re-run "
-                     "Promote (idempotent) or check the mapping.")
+                     "Promote (idempotent) or check the mapping.  "
+                     "**⏸ Backlog**, at the TOP of this page, breaks each of "
+                     "these down — which parent is missing, how many wells the "
+                     "reference master can seed, and how many rows repeat a key "
+                     "and will be deduped away.")
 
 
 def render_backlog(server, database, schema="dataview"):
