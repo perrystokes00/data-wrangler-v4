@@ -9737,8 +9737,15 @@ def run(engine=None):
                                " — a spread sample across the whole view. "
                                "Draw a box or pick an area to see every well "
                                "in it."))
-                    except Exception as _re:
-                        _msg.warning(f"Reference wells skipped: {_re}")
+                    # NOT "as _re". "except ... as X" binds X as a LOCAL for
+                    # the WHOLE function, so this one line shadowed the
+                    # module-level "import re as _re" everywhere in run() --
+                    # including the colour guard 1,400 lines above, which then
+                    # raised UnboundLocalError on every Apply and wrote
+                    # nothing. Python also DELETES the name when the except
+                    # block ends, so it is unbound even after this runs.
+                    except Exception as _refexc:
+                        _msg.warning(f"Reference wells skipped: {_refexc}")
             except Exception as _ge:
                 _msg.warning(f"Geography layers skipped: {_ge}")
 
