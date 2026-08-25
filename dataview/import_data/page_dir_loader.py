@@ -105,6 +105,39 @@ XL_EXTS = (".xlsx", ".xlsm", ".xltx", ".xls")
 SHEET_DIR = "_xl_sheets"          # sidecar CSVs land here, beside the workbooks
 
 
+def workbook_for_sheet_csv(path):
+    """The WORKBOOK a sidecar CSV came from, or `path` unchanged.
+
+    explode_workbooks writes <dir>/_xl_sheets/<workbook>__<sheet>.csv, and the
+    rest of the loader treats that CSV as the source -- including when it mints
+    the inventory_id stamped on every promoted row. But the sidecar is SCRATCH:
+    it is rewritten on every scan and deleted with the folder, and nothing
+    registers it in GLOBAL_FILE_CATALOG. So the rows cited a file that was
+    never catalogued and no longer exists, while the workbook sat registered
+    under a different id -- 120 dv_well rows naming A9BDA051 (the sidecar)
+    when the catalog held 5812CD31 (DV_WELL.xlsx). Provenance has to name the
+    thing a person can open.
+    """
+    try:
+        ap = os.path.abspath(path)
+        parts = os.path.normpath(ap).split(os.sep)
+    except Exception:
+        return path
+    if len(parts) < 2 or parts[-2] != SHEET_DIR:
+        return path                      # not a sidecar; nothing to resolve
+    stem = os.path.splitext(parts[-1])[0]
+    if "__" not in stem:
+        return path
+    book = stem.rsplit("__", 1)[0]       # <workbook>__<sheet> -> <workbook>
+    base = os.sep.join(parts[:-2])
+    for ext in XL_EXTS:
+        for cand in (os.path.join(base, book + ext),
+                     os.path.join(base, book + ext.upper())):
+            if os.path.exists(cand):
+                return cand
+    return path                          # workbook gone: the sidecar is all we have
+
+
 def explode_workbooks(directory, recursive=False):
     """Every sheet of every Excel workbook in `directory` → a sidecar CSV in
     <directory>\\_xl_sheets\\<workbook>__<sheet>.csv, so the rest of the loader

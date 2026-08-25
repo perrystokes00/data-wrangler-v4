@@ -745,9 +745,16 @@ def load_single_file(engine, schema, path, table, cmap, progress=None,
     # promoted rows; the two catalog writes happen after the counts are
     # known, because an unverified load has no business claiming anything.
     _inv = None
+    # THE WORKBOOK, NOT THE SIDECAR. An .xlsx is exploded into
+    # _xl_sheets/<workbook>__<sheet>.csv and loaded from there, so `path`
+    # is scratch that nothing catalogues and the next scan rewrites.
+    # Stamping its id gave every row a dangling pointer while the
+    # workbook sat registered under a different one. Resolves to `path`
+    # unchanged for a real CSV.
+    _src_path = pdl.workbook_for_sheet_csv(path)
     try:
         from dataview.import_data.file_gate import inventory_id as _iid
-        _inv = _iid(_os.path.abspath(path))
+        _inv = _iid(_os.path.abspath(_src_path))
     except Exception:
         pass
     if _inv:
@@ -802,7 +809,7 @@ def load_single_file(engine, schema, path, table, cmap, progress=None,
         # via file_gate — the same path a LAS takes) AND records the result
         # in dataview.dv_global_file_catalog (staged/promoted/held), both
         # keyed by the id already stamped on the rows.
-        _rec = record_load(engine, path, target=table.upper(),
+        _rec = record_load(engine, _src_path, target=table.upper(),
                            staged=int(n_staged or 0), promoted=int(after - before),
                            held=sum(int(n) for _p, n in held) if held else 0,
                            fingerprint=None, register=True, log=_say)
