@@ -2460,7 +2460,7 @@ def render_match_map(ss, server, database, schema="dataview"):
             _remember(eng, target.upper(), fp, cmap)
             _remember_skips(eng, target.upper(), skip_cols)     # persist skip decisions
             fe = fn_editors.get(skey)
-            rules, blocked = [], []
+            rules, blocked, empty_const = [], [], []
             _mapped = {str(v).lower() for v in cmap.values()}
             if fe is not None:
                 for _, fr in fe.iterrows():
@@ -2474,8 +2474,32 @@ def render_match_map(ss, server, database, schema="dataview"):
                     if tc in _mapped:
                         blocked.append(tc)
                         continue
+                    _arg = str(fr["Argument"] or "")
+                    # A BLANK CONSTANT CANNOT SUCCEED, SO IT CANNOT BE SAVED.
+                    # The proposal pre-fills constant with arg="" whenever no
+                    # source column matches, and Save took it literally: it
+                    # compiles to '' and stamps an empty string. On a plain
+                    # column that is a silent wrong value; on an FK column it is
+                    # a 547 three layers away naming a constraint rather than the
+                    # rule -- dv_well.depth_datum and dv_well_core.source both
+                    # landed that way, and the second one after the first was
+                    # diagnosed. The one case where the rule is MANDATORY (a NOT
+                    # NULL column with no source) is the one case its default
+                    # value is guaranteed to be rejected.
+                    if str(fr["Function"]).lower() == "constant" and not _arg.strip():
+                        empty_const.append(tc)
+                        continue
                     rules.append({"target": fr["Target column"], "fn": fr["Function"],
-                                  "arg": fr["Argument"] or ""})
+                                  "arg": _arg})
+            if empty_const:
+                st.warning(
+                    f"**{target}** — rule(s) for "
+                    + ", ".join(f"`{c}`" for c in empty_const)
+                    + " were NOT saved: `constant` with an empty Argument stamps "
+                      "an empty string, which fails any FK and is a wrong value "
+                      "anywhere else. Type the value into the **Argument** cell "
+                      "and press Enter before Save — a cell still being edited "
+                      "is not read by the form.")
             if blocked:
                 st.info(f"**{target}** — rule(s) for " + ", ".join(f"`{c}`" for c in blocked)
                         + " were dropped: a source column is mapped to that column, so the "
