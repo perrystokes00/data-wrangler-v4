@@ -4604,6 +4604,8 @@ MAP_COLOURS = [
 ]
 _COLOUR_BY_NAME = {n: h for n, h in MAP_COLOURS}
 _COLOUR_BY_HEX = {h.upper(): n for n, h in MAP_COLOURS}
+# CASE-FOLDED, because people TYPE into the grid. See _colour_hex.
+_COLOUR_BY_FOLD = {n.casefold(): h for n, h in MAP_COLOURS}
 
 
 def _colour_name(hex_colour):
@@ -4619,9 +4621,30 @@ def _colour_name(hex_colour):
 
 
 def _colour_hex(name):
-    """The hex for a palette name, passing an unrecognised value through."""
+    """The hex for a palette name, passing an unrecognised value through.
+
+    CASE-INSENSITIVE, AND A BARE HEX IS A HEX. The grid column is a
+    dropdown, but people type into it, and the lookup that knew only
+    "Red" sent a typed "red" straight through to the malformed-hex
+    refusal below. That refusal warned -- into an st.rerun() that
+    destroys anything rendered before it -- so the cell went back to
+    brown and NOTHING on screen said why. Two bugs, one symptom.
+
+    "red" is not a guess about what was meant: it is the same word as
+    "Red" and the palette holds exactly one of them. An unrecognised
+    WORD still passes through unchanged so the caller can refuse it --
+    nearest-matching would restyle a layer nobody named.
+    """
     s = str(name or "").strip()
-    return _COLOUR_BY_NAME.get(s, s)
+    if s in _COLOUR_BY_NAME:
+        return _COLOUR_BY_NAME[s]
+    hit = _COLOUR_BY_FOLD.get(s.casefold())
+    if hit:
+        return hit
+    bare = s.lstrip("#")
+    if len(bare) == 6 and all(c in "0123456789abcdefABCDEF" for c in bare):
+        return "#" + bare.upper()
+    return s
 
 def _darken(hex_colour, factor=0.5):
     """A darker shade of a #rrggbb colour, for a pipeline's casing.
@@ -8260,12 +8283,20 @@ def run(engine=None):
                     # row on every Apply would be six UPDATEs per layer for no
                     # reason, and would stamp row_changed on layers nobody
                     # touched.
+                    # EVERY OUTCOME IS STASHED, NEVER RENDERED HERE. st.rerun()
+                    # two lines down RAISES, so an st.warning written in this
+                    # block is destroyed before it reaches the screen. That is
+                    # how a typed "red" came to revert to brown in silence: the
+                    # refusal fired, explained itself, and the explanation was
+                    # thrown away. Same scar as bulk_dir_loader's UWI gate.
+                    _msgs = []
                     try:
                         from dataview.mapping.dv_spatial_loader import set_style
                         _re_n = 0
                         for _n, r in _grid.iterrows():
                             _k = str(r["id"])
-                            _c = _colour_hex(str(r.get("Colour") or "").strip())
+                            _raw = str(r.get("Colour") or "").strip()
+                            _c = _colour_hex(_raw)
                             _was = str(_by_id.get(_k, {}).get("style_color")
                                        or "#888888").upper()
                             if not _c or _c.upper() == _was:
@@ -8274,17 +8305,32 @@ def run(engine=None):
                             # folium takes any string and draws nothing, which
                             # reads as "the layer is broken".
                             if not _re.fullmatch(r"#[0-9A-Fa-f]{6}", _c):
-                                st.warning("%s: %r is not a #rrggbb colour — "
-                                           "left unchanged."
-                                           % (r["Layer"], _c))
+                                _msgs.append(("warning",
+                                    "**%s**: %r is not a colour name or a "
+                                    "#rrggbb value — left unchanged. Pick from "
+                                    "the list, or type a name such as `Red`."
+                                    % (r["Layer"], _raw)))
                                 continue
+                            # A FALSE RETURN IS A FAILED WRITE, not a no-op:
+                            # set_style swallows its own exception. Untold, a
+                            # failed UPDATE looks exactly like an unchanged row.
                             if set_style(engine, _k, color=_c):
                                 _re_n += 1
+                            else:
+                                _msgs.append(("error",
+                                    "**%s**: the database refused the colour "
+                                    "change." % r["Layer"]))
                         if _re_n:
                             st.cache_data.clear()
+                            _msgs.append(("success",
+                                "Restyled %d layer(s)." % _re_n))
                     except Exception as _se:
-                        st.warning("Colour changes not saved: %s" % _se)
+                        _msgs.append(("error",
+                                      "Colour changes not saved: %s" % _se))
+                    st.session_state["wm_shp_msgs"] = _msgs
                     st.rerun()
+            for _lvl, _txt in (st.session_state.pop("wm_shp_msgs", None) or []):
+                getattr(st, _lvl, st.info)(_txt)
             # READ THE APPLIED SET, not the editor. The grid holds unsubmitted
             # edits; the map must draw what was last APPLIED or a half-ticked
             # grid would redraw on some other widget's rerun.
