@@ -8254,23 +8254,32 @@ def run(engine=None):
                                                                 width="small"),
                         "Features": st.column_config.NumberColumn(
                             disabled=True, format="%d", width="small"),
-                        # A DROPDOWN OF NAMES. Streamlit has no colour COLUMN
-                        # -- st.color_picker is a standalone widget and cannot
-                        # live in a data_editor -- and a text field of hex is a
-                        # field nobody can skim. Names are the interface; the
-                        # stored value stays hex, which is what the map draws.
+                        # A TEXT COLUMN, AND THIS WAS MEASURED. It was a
+                        # SelectboxColumn, which loses the edit: in one submit,
+                        # with a Selectbox and a Text column edited in the same
+                        # batch, the grid DISPLAYED both changes and Python
+                        # received only the text one -- SEL=[Brown, Brown]
+                        # TXT=[Red, Brown]. The pick renders to the canvas and
+                        # reaches the server late, so a form submit captures the
+                        # value the cell used to have. The layer reverted to its
+                        # stored colour and nothing anywhere reported a failure,
+                        # because as far as Python was concerned nothing changed.
                         #
-                        # Options carry any hex ALREADY in use that has no name,
-                        # because a SelectboxColumn drops a value outside its
-                        # options -- the layer would silently show blank and
-                        # Apply would clear a colour nobody meant to change.
-                        "Colour": st.column_config.SelectboxColumn(
+                        # Worse for the person using it: a single click on a
+                        # Selectbox cell followed by typing does NOTHING AT ALL.
+                        # No character is accepted, the cell keeps its value, and
+                        # the only way in is double-click and pick from a
+                        # thirty-item list. Typing "red" is the obvious gesture
+                        # and it silently did nothing.
+                        #
+                        # A text cell takes what is typed, commits it on Enter,
+                        # and _colour_hex resolves the name -- case-insensitively,
+                        # and a bare or hashed hex too. Anything it cannot resolve
+                        # is refused BY NAME below, where a refusal is visible.
+                        "Colour": st.column_config.TextColumn(
                             width="medium",
-                            options=[n for n, _h in MAP_COLOURS] + sorted(
-                                {_colour_name(_by_id[k].get("style_color"))
-                                 for k in _order}
-                                - {n for n, _h in MAP_COLOURS}),
-                            help="Applied on submit."),
+                            help="Double-click to edit. A palette name such as "
+                                 "Red or Field Green, or a #rrggbb value."),
                         # The id rides along so a row maps back to its layer
                         # without trusting row ORDER, which a sort would break.
                         "id": None,
@@ -8329,6 +8338,11 @@ def run(engine=None):
                                       "Colour changes not saved: %s" % _se))
                     st.session_state["wm_shp_msgs"] = _msgs
                     st.rerun()
+            # THE NAMES, because the dropdown that used to list them is gone.
+            # Only the base sixteen: the category defaults are derived names
+            # nobody types on purpose, and thirty in a caption is a wall.
+            st.caption("Colours: " + ", ".join(n for n, _h in MAP_COLOURS[:16])
+                       + " — or any #rrggbb.")
             for _lvl, _txt in (st.session_state.pop("wm_shp_msgs", None) or []):
                 getattr(st, _lvl, st.info)(_txt)
             # READ THE APPLIED SET, not the editor. The grid holds unsubmitted
