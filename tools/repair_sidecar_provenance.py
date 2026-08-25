@@ -41,21 +41,41 @@ def iid(path):
 def sidecar_map(directory):
     """{sidecar_id: (workbook_id, workbook_name)} for every sheet of every
     workbook in `directory`."""
-    from openpyxl import load_workbook
+    # READ THE SIDECARS THAT EXIST, and only reconstruct the ones that do not.
+    # Reconstructing a sidecar NAME means mirroring explode_workbooks' sheet-name
+    # sanitising -- a fourth copy of a rule, and the reason a first cut globbed
+    # only .xlsx and reported "nothing to repair" while 6,918 rows still cited
+    # TeapotDomeFormationLogTops.xls's sidecar. The files on disk carry the
+    # real names; workbook_for_sheet_csv already owns the mapping back.
+    import pandas as pd
+    from dataview.import_data.page_dir_loader import workbook_for_sheet_csv
     out = {}
-    for book in sorted(glob.glob(os.path.join(directory, "*.xlsx"))):
+
+    for side in sorted(glob.glob(os.path.join(directory, SHEET_DIR, "*.csv"))):
+        book = workbook_for_sheet_csv(side)
+        if book and os.path.abspath(book) != os.path.abspath(side):
+            out[iid(os.path.abspath(side))] = (iid(os.path.abspath(book)),
+                                               os.path.basename(book))
+
+    # Fallback for a sidecar already deleted: rebuild the name from the sheet
+    # list. Every format the loader accepts, not just .xlsx.
+    books = []
+    for ext in (".xlsx", ".xlsm", ".xltx", ".xls"):
+        books += glob.glob(os.path.join(directory, "*" + ext))
+        books += glob.glob(os.path.join(directory, "*" + ext.upper()))
+    for book in sorted(set(books)):
         if os.path.basename(book).startswith("~$"):
             continue
         stem = os.path.splitext(os.path.basename(book))[0]
         try:
-            wb = load_workbook(book, read_only=True)
+            sheets = pd.ExcelFile(book).sheet_names
         except Exception as e:
-            print(f"   ! {os.path.basename(book)} unreadable: {e}")
+            print("   ! %s unreadable: %s" % (os.path.basename(book), e))
             continue
-        for sheet in wb.sheetnames:
-            side = os.path.join(directory, SHEET_DIR, f"{stem}__{sheet}.csv")
-            out[iid(os.path.abspath(side))] = (iid(os.path.abspath(book)),
-                                               os.path.basename(book))
+        for sheet in sheets:
+            side = os.path.join(directory, SHEET_DIR, "%s__%s.csv" % (stem, sheet))
+            out.setdefault(iid(os.path.abspath(side)),
+                           (iid(os.path.abspath(book)), os.path.basename(book)))
     return out
 
 
