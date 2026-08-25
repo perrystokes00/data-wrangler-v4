@@ -25,6 +25,8 @@ from collections import defaultdict, deque
 
 from sqlalchemy import text
 
+from dataview.core import reset_protection as _rp
+
 # Bump this whenever the reset logic changes. app_v3 displays it next to the
 # Reset button so you can SEE which version is live after a deploy + restart.
 RESET_VERSION = ("2026-08-08 truncate full-wipe "
@@ -37,9 +39,11 @@ RESET_VERSION = ("2026-08-08 truncate full-wipe "
 # Spatial domain (per-feature geography): fields, leases/tracts, boundaries,
 # pipelines, seismic sets. full=True clears these via the all-tables sweep;
 # these entries make the targeted full=False path clear them too.
-_CLEAR_PREFIXES = ("dv_well",)
-_CLEAR_EXACT = {"dv_business_associate", "dv_field",
-                "dv_seis_set", "dv_land_tract", "dv_boundary", "dv_pipeline"}
+# ONE SOURCE OF TRUTH. These lived here AND in clear_catalog.PROTECTED,
+# and drifted -- see dataview/core/reset_protection.py for why that is the
+# same failure as MIRROR_TABLES vs LINEAGE. selftest pins that they agree.
+_CLEAR_PREFIXES = _rp.CLEAR_PREFIXES
+_CLEAR_EXACT = _rp.CLEAR_EXACT
 
 
 def _should_clear(name: str) -> bool:
@@ -51,7 +55,7 @@ def _should_clear(name: str) -> bool:
 
 # Controlled-vocabulary + geographic reference tables that should SURVIVE a
 # reset — they're seeded standards the pipeline FKs into, not loaded data.
-_REFERENCE_EXACT = {"dv_country", "dv_province_state", "dv_county"}
+_REFERENCE_EXACT = _rp.REFERENCE_EXACT
 
 # LEARNED STATE — survives a full wipe, and is NOT reference data.
 #
@@ -78,7 +82,7 @@ _REFERENCE_EXACT = {"dv_country", "dv_province_state", "dv_county"}
 # Kept separate from _REFERENCE_EXACT deliberately: those are seeded
 # standards that could be re-seeded from source; these could not be
 # recovered at all. Two different reasons to survive, so two sets.
-_PRESERVE_EXACT = {"dv_column_map", "dv_column_synonym", "dv_target_attribute"}
+_PRESERVE_EXACT = _rp.PROTECTED
 
 
 def _is_reference(name: str) -> bool:

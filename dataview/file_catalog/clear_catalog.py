@@ -70,12 +70,9 @@ DV_SCHEMA  = "dataview"
 # DV_TABLES is IMPORTED from build_catalog_mirror.MIRROR_TABLES, and the day
 # somebody adds a table there this guarantee would vanish silently. The same
 # weakness in purge_source.py was fixed the same way, for the same reason.
-PROTECTED = {
-    "dv_column_map",
-    "dv_column_synonym",
-    "dv_target_attribute",
-    "dv_global_file_catalog",
-}
+# ONE SOURCE OF TRUTH -- shared with demo_reset, which used to carry its own
+# copy and disagreed about dv_global_file_catalog. See reset_protection.
+from dataview.core.reset_protection import PROTECTED
 
 # Catalog-derived dv_* tables = the promote allowlist, IMPORTED so this tool
 # and promote can never disagree about what the catalog owns.

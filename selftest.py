@@ -841,6 +841,41 @@ def tier_units(res, verbose=False):
     check("synth: no fabricated provenance or derived cells, ctx cannot "
           "overrule either", _synth_provenance)
 
+    # 12b. THE TWO RESET PATHS MUST SPARE THE SAME NAMES. demo_reset clears
+    #      loaded data, clear_catalog resets the document pipeline, and each
+    #      used to carry its own copy of "what must survive" -- so protected
+    #      meant something different depending on which button was pressed.
+    #      They disagreed about dv_global_file_catalog for weeks, and
+    #      demo_reset's own comment said they must not. Same shape as
+    #      MIRROR_TABLES vs LINEAGE, same failure: silent, and in the
+    #      direction of losing something. Code-only, so it runs with no
+    #      database -- which is the half that would otherwise go unchecked.
+    def _reset_lists_agree():
+        from dataview.core import demo_reset as _dr
+        from dataview.file_catalog import clear_catalog as _cc
+        from dataview.core import reset_protection as _rp
+        assert _dr._PRESERVE_EXACT == _cc.PROTECTED == _rp.PROTECTED, (
+            "reset paths disagree about what to protect: "
+            "demo_reset=%s clear_catalog=%s"
+            % (sorted(_dr._PRESERVE_EXACT), sorted(_cc.PROTECTED)))
+        for _n in ("dv_column_map", "dv_column_synonym",
+                   "dv_target_attribute", "dv_global_file_catalog"):
+            assert _rp.is_protected(_n), _n + " lost its protection"
+            assert not _rp.should_clear(_n), _n + " is both cleared and protected"
+        # A TARGETED RESET MUST REACH EVERY DOMAIN THAT FKs INTO dv_well.
+        # dv_prod_*, dv_seis_* and dv_strat_interval each survived full=False
+        # while their parents were deleted -- an FK failure at best, 18,169
+        # orphaned production rows at worst.
+        for _n in ("dv_well", "dv_well_checkshot", "dv_prod_entity",
+                   "dv_prod_volume", "dv_seis_line", "dv_seis_horizon",
+                   "dv_strat_interval"):
+            assert _rp.should_clear(_n), _n + " survives a targeted reset"
+        for _n in ("dv_r_uom", "dv_country", "dv_province_state"):
+            assert _rp.is_reference(_n) and not _rp.should_clear(_n), _n
+    check("reset: demo_reset and clear_catalog protect the same names, and "
+          "a targeted reset reaches every FK-linked domain",
+          _reset_lists_agree)
+
     # 13. A LOAD THAT CANNOT REGISTER ITS FILE MUST SAY SO. The promote stamps
     #     every inserted row with the file's INVENTORY_ID before registration
     #     is attempted, so a failed register_file leaves those rows citing a
