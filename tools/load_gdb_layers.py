@@ -49,7 +49,15 @@ SELECTION = [
      ["WELL", "Well_Name", "FORMATION", "SEC"]),
     ("OIL_PIPELINE",             "Oil Pipelines",          "PIPELINE", ["Layer"]),
     ("GAS_Pipelines",            "Gas Pipelines",          "PIPELINE", ["Layer"]),
-    ("PLS",                      "PLS Section Lines",      "LEASE",    ["PLS_", "SYMBOL"]),
+    # BOUNDARY, NOT LEASE. This is the PLS township-and-range SURVEY grid --
+    # FEATURE='SECTION', with ArcInfo coverage topology (FNODE_/TNODE_/
+    # LPOLY_/RPOLY_) and no owner, lease number or operator on any feature.
+    # Filed under LEASE it put a "Leases" heading on the map over data that
+    # says nothing about who holds anything, which is a claim the dataset
+    # cannot support: there is no ownership anywhere in this .gdb (all 137
+    # layers searched) and dv_land_tract is empty. Ownership here lives on
+    # dv_well.lease_name / operator_name, and it is one federal reserve.
+    ("PLS",                      "PLS Section Lines",      "BOUNDARY", ["PLS_", "SYMBOL"]),
     ("Contours_10ft",            "Topography (10 ft)",     "OTHER",    []),
     ("Facilities",               "Facilities",             "OTHER",    ["Layer"]),
 ]
