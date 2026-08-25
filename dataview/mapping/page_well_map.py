@@ -4699,17 +4699,27 @@ def _add_shapefile_layer(m, engine, layer):
     if str(layer.get("layer_category") or "").upper() == "PIPELINE":
         _grp = folium.FeatureGroup(name=f"{icon_ch} {layer_name}", show=True)
 
-        def _casing(_, c=_darken(color, 0.45), w=weight + 3.0, o=opacity):
+        # PROPORTIONS, LEARNED THE HARD WAY. The first cut was casing
+        # weight+3.0 darkened to 0.45: a 5.5px near-black stroke around a
+        # 2.5px body. It read as one thick dark line, and CHANGING THE COLOUR
+        # DID NOTHING VISIBLE because the casing swallowed the hue -- two
+        # complaints, one cause. The casing is an EDGE, not the pipe: barely
+        # wider than the body, and dark enough to separate it from the basemap
+        # without dominating it.
+        _bw = max(1.0, min(float(weight or 1.5), 2.0))
+
+        def _casing(_, c=_darken(color, 0.62), w=_bw + 1.2, o=opacity):
             return {"color": c, "weight": w, "opacity": o, "fillOpacity": 0}
 
-        def _body(_, c=color, w=max(weight, 1.5), o=opacity):
+        def _body(_, c=color, w=_bw, o=opacity):
             return {"color": c, "weight": w, "opacity": o, "fillOpacity": 0}
 
-        def _ticks(_, w=max(weight * 0.5, 0.8)):
+        def _ticks(_, w=max(0.6, _bw * 0.35)):
             # Short dash, long gap: ticks along the pipe rather than a dashed
-            # line, which would read as "proposed" or "buried".
-            return {"color": "#FFFFFF", "weight": w, "opacity": 0.75,
-                    "dashArray": "1,9", "fillOpacity": 0}
+            # line, which would read as "proposed" or "buried". Softened to
+            # 0.55 so they mark the pipe instead of speckling it.
+            return {"color": "#FFFFFF", "weight": w, "opacity": 0.55,
+                    "dashArray": "1,10", "fillOpacity": 0}
 
         folium.GeoJson(gj, style_function=_casing).add_to(_grp)
         folium.GeoJson(gj, style_function=_body).add_to(_grp)
