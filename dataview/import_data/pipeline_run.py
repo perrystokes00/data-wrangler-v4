@@ -2073,14 +2073,45 @@ def _stage_promote(engine, apply, log):
                     _u = "\nUNION ALL\n".join(
                         f"SELECT INVENTORY_ID FROM dataview.{t} "
                         f"WHERE INVENTORY_ID IS NOT NULL" for t in _dv)
+                    # AND MARK IT CATALOGED, on the same evidence.
+                    #
+                    # THIS IS WHAT ENDED THE LOOP. catalog_rules selects WHERE
+                    # CATALOG_STATUS IS NULL OR = 'UNCATALOGED' and nothing on
+                    # this path wrote CATALOGED back, so a file that promoted
+                    # perfectly was re-selected on the next pass and every pass
+                    # after. Insert-only promote meant nothing DUPLICATED,
+                    # which is why it read as a hang rather than a bug.
+                    #
+                    # MATERIALISE THE LINEAGE FIRST. The first cut left this as
+                    # a correlated EXISTS over a 42-table UNION ALL and widened
+                    # the WHERE to catch reset rows -- so it re-evaluated that
+                    # union per catalog row and ran for 282 SECONDS on every
+                    # promote pass, which looked exactly like the loop it was
+                    # meant to fix. One pass over each dv_ table into a keyed
+                    # temp table, then a join, is the same answer in seconds.
+                    con.execute(_t("IF OBJECT_ID('tempdb..#lin_stamp') IS NOT NULL "
+                                   "DROP TABLE #lin_stamp"))
+                    con.execute(_t(
+                        f"SELECT DISTINCT INVENTORY_ID AS iid INTO #lin_stamp "
+                        f"FROM ({_u}) z"))
+                    # AN INDEX, NOT A PRIMARY KEY. SELECT INTO carries the
+                    # source column's NULLability across, and a PK cannot sit
+                    # on a nullable column -- "Cannot define PRIMARY KEY
+                    # constraint on nullable column". The index is what the
+                    # join needs anyway.
+                    con.execute(_t(
+                        "CREATE INDEX ix_lin_stamp ON #lin_stamp (iid)"))
                     _n = con.execute(_t(
-                        f"UPDATE g SET g.PROMOTED_AT = SYSUTCDATETIME() "
-                        f"FROM file_catalog.GLOBAL_FILE_CATALOG g "
-                        f"WHERE g.PROMOTED_AT IS NULL AND EXISTS "
-                        f"(SELECT 1 FROM ({_u}) d "
-                        f" WHERE d.INVENTORY_ID = g.INVENTORY_ID)")).rowcount
-                    log(f"  [promote] PROMOTED_AT stamped on {max(_n, 0):,} "
-                        f"file(s) with rows in dv_ (lineage evidence)")
+                        "UPDATE g SET g.PROMOTED_AT = ISNULL(g.PROMOTED_AT, SYSUTCDATETIME()), "
+                        "          g.CATALOG_STATUS = 'CATALOGED' "
+                        "FROM file_catalog.GLOBAL_FILE_CATALOG g "
+                        "JOIN #lin_stamp l ON l.iid = g.INVENTORY_ID "
+                        "WHERE g.PROMOTED_AT IS NULL "
+                        "   OR ISNULL(g.CATALOG_STATUS,'') <> 'CATALOGED'")).rowcount
+                    con.execute(_t("DROP TABLE #lin_stamp"))
+                    log(f"  [promote] PROMOTED_AT + CATALOGED stamped on "
+                        f"{max(_n, 0):,} file(s) with rows in dv_ "
+                        f"(lineage evidence) — these leave the queue")
                 else:
                     log("  [promote] PROMOTED_AT not stamped — no dv_ table in "
                         "LINEAGE carries INVENTORY_ID in this database")
