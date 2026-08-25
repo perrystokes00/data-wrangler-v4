@@ -678,12 +678,23 @@ def _catalog_json():
     path = ss.get("bdl_cat")
     if not path or not os.path.exists(path):
         return None
-    if ss.get("_cat_key") != path or "_cat_parsed" not in ss:
+    # KEYED ON THE FILE, NOT JUST ITS NAME. The path never changes, so keying
+    # on it alone meant regenerating the catalog under a running app did
+    # nothing -- the parse from the first page load kept being served, and the
+    # only cure was a cold start. That is how a table created after the JSON
+    # was written stays missing from the target dropdown even after the JSON
+    # is fixed. mtime and size are enough; this is a local build artifact.
+    try:
+        _stat = os.stat(path)
+        _key = (path, _stat.st_mtime_ns, _stat.st_size)
+    except OSError:
+        _key = (path, None, None)
+    if ss.get("_cat_key") != _key or "_cat_parsed" not in ss:
         import json
         FKC, COLS, KIND, _shape = pdl.load_catalog(path)
         raw = json.load(open(path, encoding="utf-8"))
         ss["_cat_parsed"] = (FKC, COLS, KIND, raw)
-        ss["_cat_key"] = path
+        ss["_cat_key"] = _key
     return ss["_cat_parsed"]
 
 

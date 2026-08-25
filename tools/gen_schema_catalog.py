@@ -20,6 +20,7 @@ Usage:
   # SQL auth instead of Windows auth:
   python gen_schema_catalog.py --user sa --pwd ****
 """
+import sys
 import argparse, json, sys, os, datetime
 from collections import defaultdict, OrderedDict
 
@@ -65,6 +66,11 @@ FROM   INFORMATION_SCHEMA.COLUMNS c
 JOIN   INFORMATION_SCHEMA.TABLES  t
        ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
 WHERE  c.TABLE_SCHEMA = ? AND t.TABLE_TYPE = 'BASE TABLE'
+       -- A DATED BACKUP IS NOT A LOAD TARGET. These are snapshots of the
+       -- app's own learned-mapping tables; catalogued, they appear in the
+       -- Data Assistant's target dropdown, where picking one writes real
+       -- data into a table nothing reads. '_' is a LIKE wildcard: bracketed.
+       AND c.TABLE_NAME NOT LIKE '%[_]bak[_]%'
 ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION
 """
 
@@ -106,6 +112,13 @@ def kind_of(table):
     if tl.startswith("dv_r_"):  return "reference"
     if tl in ENTITY_TABLES:     return "entity"
     return "data"
+
+
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 
 def main():

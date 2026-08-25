@@ -3206,6 +3206,47 @@ def tier_invariants(res, server, database, verbose=False):
     except Exception as e:
         res.add("invariants", "coded_values_registered", True,
                 f"skipped: {str(e)[:90]}")
+
+    # ---- the schema catalog JSON vs the live schema ----------------------
+    # A FIFTH LIST THAT MUST AGREE. dataview_fk_catalog.json is what the Data
+    # Assistant offers as load targets -- it reads the file in preference to
+    # the database, so a table created after the file was generated cannot be
+    # mapped to and there is no error saying why. dv_well_checkshot sat
+    # invisible for exactly this reason: the JSON was five weeks stale, and a
+    # cold start could not help because the staleness is on disk, not in
+    # session state. Regenerate with tools/gen_schema_catalog.py.
+    try:
+        import json as _json
+        _cat = os.path.join(ROOT, "dataview", "schema_registry",
+                            "dataview_fk_catalog.json")
+        if not os.path.exists(_cat):
+            res.add("invariants", "schema_catalog_current", True,
+                    "skipped: no dataview_fk_catalog.json")
+        else:
+            with open(_cat, encoding="utf-8") as _fh:
+                _have = {t.lower() for t in
+                         (_json.load(_fh).get("table_cols") or {})}
+            with eng.connect() as cx:
+                _live = {r[0].lower() for r in cx.execute(text(
+                    "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+                    "WHERE TABLE_SCHEMA='dataview' AND TABLE_TYPE='BASE TABLE' "
+                    "AND TABLE_NAME NOT LIKE '%[_]bak[_]%'"))}
+            _missing = sorted(_live - _have)
+            _extra = sorted(_have - _live)
+            _msg = []
+            if _missing:
+                _msg.append("not in the catalog, so UNMAPPABLE: "
+                            + ", ".join(_missing[:6]))
+            if _extra:
+                _msg.append("in the catalog but not the database: "
+                            + ", ".join(_extra[:6]))
+            res.add("invariants", "schema_catalog_current",
+                    not (_missing or _extra),
+                    "; ".join(_msg) + (" - run tools/gen_schema_catalog.py"
+                                       if _msg else ""))
+    except Exception as e:
+        res.add("invariants", "schema_catalog_current", True,
+                f"skipped: {str(e)[:90]}")
     return res
 
 
