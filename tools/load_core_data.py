@@ -1,4 +1,17 @@
-r"""Load the RMOTC core photos onto their well, their core run and their depth.
+r"""The core domain for a well: runs, plug analyses and photographs.
+
+THIS LOADER OWNS THREE TABLES -- dv_well_core, dv_well_core_sample and
+dv_well_core_photo -- and nothing else may write them. Core data is not a
+flat table that happens to be in Excel: what joins its parts is a DOMAIN
+fact. A plug at 5454.2 ft belongs to core run 5 because of where it sits; a
+photo shot on the 14th belongs to core 6 because that is what was cut that
+day. The Bulk Tabular Loader maps columns onto a target and has no way to
+know either, and expressing it as column mappings would be worse than a
+loader that simply says it.
+
+The ownership matters more than the convenience. Two writers on one table
+is how MIRROR_TABLES and LINEAGE came apart, and how demo_reset and
+clear_catalog came to disagree about what to protect. One door.
 
 WHAT MAKES THIS LOADABLE AT ALL. The photos carry no well in their names, and
 for a while it looked like they never could be placed. They can, because the CD
@@ -30,7 +43,7 @@ and this table is read by people looking at rock.
 
     python tools/load_core_photos.py                 # plan only
     python tools/load_core_photos.py --apply
-    python tools/load_core_photos.py --remove --apply
+    python tools/load_core_data.py --remove --apply
 """
 import argparse
 import datetime
@@ -53,6 +66,7 @@ CD = os.path.join(
     "training", "Teapot_Dome", "DataSets", "Core", "CD Files")
 WELL_NUM = "48-X-28"
 SOURCE = "PHOTO"                       # registered in dv_r_source
+SOURCE_LAB = "LAB"                     # laboratory analysis report
 CREATED_BY = "CORE_PHOTO_LOADER"
 SLAB_RE = re.compile(r"^(\d{3,5})\s*-\s*(\d{3,5})\s*(uv)?", re.I)
 SEQ_RE = re.compile(r"(\d{3,5})(?=\.[A-Za-z]+$)")
@@ -102,6 +116,95 @@ def _cores():
                     "cut": _f(r[4]), "rec": _f(r[5]),
                     "lith": (str(r[6]).strip() if r[6] is not None else None)})
     return out
+
+
+# The stacked lab header is four rows deep (11-14) and the data starts at
+# 16, so the columns are taken BY POSITION, from the layout printed on the
+# sheet. Reading row 0 as the header -- which is what the Bulk Tabular
+# Loader does -- yields "Unnamed: 0 .. Unnamed: 10" and nothing to map.
+SAMPLE_COLS = {0: "core_num", 1: "sample_id", 2: "depth", 3: "stress_psi",
+               4: "k_air", 5: "k_klink", 6: "porosity_pct",
+               7: "grain_density", 8: "sw_pct", 9: "so_pct",
+               10: "total_sat_pct"}
+PP_BOOK = os.path.join("CORE P&P ANALYSES",
+                       "RMOTC DOE 48x28 Well Core Data W-85011 7-27-04.xls")
+
+
+def _num(v):
+    """A float, or (None, note) when the lab wrote a limit instead.
+
+    "<0.0001" IS NOT 0.0001 AND IT IS NOT ZERO. It means the plug was below
+    what the permeameter could resolve, and either number is a measurement
+    the lab declined to make. Stored NULL with the limit kept in the remark,
+    because a tight-gas permeability of 0.0001 plots, exports and gets
+    quoted -- and a NULL is visible while a fabricated number is not.
+    """
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "nat", "none"):
+        return None, None
+    if s.startswith("<") or s.startswith(">"):
+        return None, "reported as %s" % s
+    try:
+        return float(s), None
+    except ValueError:
+        return None, None
+
+
+def _samples(cores):
+    """[{...}] plug analyses from the vertical and horizontal sheets.
+
+    THE CORE NUMBER IS IN THE SHEET. Column 0 of every row is the core the
+    plug was cut from -- the lab recorded it -- so the plug is placed by
+    what was written down rather than by matching its depth to an interval.
+    Depth is still checked against that core and a disagreement is reported
+    rather than silently trusted either way.
+    """
+    import pandas as pd
+    p = os.path.join(CD, PP_BOOK)
+    if not os.path.exists(p):
+        return [], ["no %s" % PP_BOOK]
+    by_num = {c["num"]: c for c in cores}
+    out, notes = [], []
+    for sheet, orient in (("Vertical Data", "VERTICAL PLUG"),
+                          ("Horizontal Data", "HORIZONTAL PLUG")):
+        try:
+            raw = pd.read_excel(p, sheet_name=sheet, header=None)
+        except Exception as e:
+            notes.append("%s unreadable: %s" % (sheet, e))
+            continue
+        for _i, r in raw.iterrows():
+            try:
+                cnum = int(float(str(r[0]).strip()))
+            except (TypeError, ValueError):
+                continue            # title, header and blank rows
+            d, _ = _num(r[2])
+            sid = str(r[1]).strip()
+            if d is None or not sid or sid.lower() == "nan":
+                continue
+            core = by_num.get(cnum)
+            if not core:
+                notes.append("sample %s cites core %d, which is not in the "
+                             "accounting sheet" % (sid, cnum))
+                continue
+            rem = []
+            vals = {}
+            for idx, key in SAMPLE_COLS.items():
+                if key in ("core_num", "sample_id", "depth"):
+                    continue
+                v, note = _num(r[idx]) if idx < len(r) else (None, None)
+                vals[key] = v
+                if note:
+                    rem.append("%s %s" % (key, note))
+            # DEPTH AGAINST ITS OWN CORE. The lab said which run; if the
+            # depth falls outside it, say so rather than move the plug.
+            if core["top"] is not None and core["base"] is not None:
+                if not (core["top"] - 1 <= d <= core["base"] + 1):
+                    rem.append("depth %.1f ft is outside core %d (%.0f-%.0f)"
+                               % (d, cnum, core["top"], core["base"]))
+            out.append({"core": core, "sample_id": sid, "depth": d,
+                        "orient": orient, "vals": vals,
+                        "remark": "; ".join(rem)})
+    return out, notes
 
 
 def _exif_date(path):
@@ -209,16 +312,37 @@ def plan(engine):
             "tray": int(seq.group(1)) if seq else 0,
             "date": d, "date_src": "EXIF",
         })
-    return uwi, wname, cores, rows, held
+    samples, snotes = _samples(cores)
+    for s in snotes:
+        held.append(("core analyses", "SAMPLE", s))
+    return uwi, wname, cores, rows, held, samples
 
 
-def write(engine, uwi, cores, rows):
+def write(engine, uwi, cores, rows, samples=()):
     from sqlalchemy import text
     core_id = lambda n: "%s-C%02d" % (WELL_NUM, n)
-    n_core = n_photo = 0
+
+    # COUNTED BEFORE AND AFTER, NOT FROM rowcount. An "IF NOT EXISTS ...
+    # INSERT" that SKIPS does not report 0: the core and photo statements
+    # came back -1 each, so a re-run announced "-12 core run(s)" and
+    # "-184 photo(s)" -- which reads as a deletion -- and the sample
+    # statement returned positive garbage that summed to 1,904 against a
+    # table holding 112 rows. Neither number was survivable, and clamping
+    # them would only have hidden the second one. Two counts and a
+    # subtraction cannot be wrong about what landed.
+    _TABLES = ("dv_well_core", "dv_well_core_photo", "dv_well_core_sample")
+
+    def _counts(cx):
+        return {t: cx.execute(text(
+            "SELECT COUNT(*) FROM dataview.[%s] WHERE uwi = :u" % t),
+            {"u": uwi}).scalar() for t in _TABLES}
     with engine.begin() as c:
+        _before = _counts(c)
         for cr in cores:
-            n_core += c.execute(text("""
+            # A SKIPPED "IF NOT EXISTS" RETURNS -1, NOT 0. Summing it made a
+            # re-run report "-12 core run(s)": a count that goes negative is
+            # a report that lies, and it reads as a deletion.
+            c.execute(text("""
                 IF NOT EXISTS (SELECT 1 FROM dataview.dv_well_core
                                WHERE uwi = :u AND core_id = :cid)
                 INSERT INTO dataview.dv_well_core
@@ -234,14 +358,14 @@ def write(engine, uwi, cores, rows):
                  "pct": (100.0 * cr["rec"] / cr["cut"]
                          if cr["cut"] and cr["rec"] else None),
                  "dt": cr["date"], "lith": cr["lith"],
-                 "src": SOURCE, "by": CREATED_BY}).rowcount
+                 "src": SOURCE, "by": CREATED_BY})
         for r in rows:
             w, h, dpi, kb, sha = _image_meta(r["f"])
             nm = os.path.basename(r["f"])
             # PHOTO_ID IS THE HASH, not the file name. Two CDs can carry the
             # same "0001.JPG"; the same bytes are the same photograph however
             # the folder is renamed, and a re-run must not duplicate rows.
-            n_photo += c.execute(text("""
+            c.execute(text("""
                 IF NOT EXISTS (SELECT 1 FROM dataview.dv_well_core_photo
                                WHERE uwi = :u AND photo_id = :pid)
                 INSERT INTO dataview.dv_well_core_photo
@@ -262,7 +386,34 @@ def write(engine, uwi, cores, rows):
                  "rm": "core %d %s; photo date from %s"
                        % (r["core"]["num"], r["core"]["lith"] or "",
                           r["date_src"]),
-                 "src": SOURCE, "by": CREATED_BY}).rowcount
+                 "src": SOURCE, "by": CREATED_BY})
+        for s in samples:
+            v = s["vals"]
+            def _pc(x):
+                # PERCENT IN, FRACTION STORED. The column is *_frac and the
+                # sheet prints percent; loading 6.9 into a fraction would
+                # read as 690% porosity and still plot.
+                return None if x is None else x / 100.0
+            c.execute(text("""
+                IF NOT EXISTS (SELECT 1 FROM dataview.dv_well_core_sample
+                               WHERE uwi = :u AND core_id = :cid
+                                 AND sample_id = :sid)
+                INSERT INTO dataview.dv_well_core_sample
+                      (uwi, core_id, sample_id, sample_type, sample_depth,
+                       depth_ouom, porosity_frac, permeability_air_md,
+                       permeability_klinkenberg_md, grain_density_g_cc,
+                       water_saturation_frac, oil_saturation_frac,
+                       active_ind, remark, source, row_created_by)
+                VALUES (:u, :cid, :sid, :st, :dep, 'FT', :phi, :ka, :kk,
+                        :rho, :sw, :so, 'Y', :rm, :src, :by)"""),
+                {"u": uwi, "cid": core_id(s["core"]["num"]),
+                 "sid": s["sample_id"], "st": s["orient"],
+                 "dep": s["depth"], "phi": _pc(v.get("porosity_pct")),
+                 "ka": v.get("k_air"), "kk": v.get("k_klink"),
+                 "rho": v.get("grain_density"),
+                 "sw": _pc(v.get("sw_pct")), "so": _pc(v.get("so_pct")),
+                 "rm": s["remark"] or None,
+                 "src": SOURCE_LAB, "by": CREATED_BY})
         # The rollups the core table keeps for the photos beneath it.
         c.execute(text("""
             UPDATE k SET photo_count = x.n,
@@ -275,7 +426,10 @@ def write(engine, uwi, cores, rows):
                              FROM dataview.dv_well_core_photo p
                             WHERE p.uwi = k.uwi AND p.core_id = k.core_id) x
              WHERE k.uwi = :u"""), {"u": uwi, "cd": CD, "by": CREATED_BY})
-    return n_core, n_photo
+        _after = _counts(c)
+    return (_after["dv_well_core"] - _before["dv_well_core"],
+            _after["dv_well_core_photo"] - _before["dv_well_core_photo"],
+            _after["dv_well_core_sample"] - _before["dv_well_core_sample"])
 
 
 def remove(engine, uwi):
@@ -284,10 +438,14 @@ def remove(engine, uwi):
         p = c.execute(text("DELETE FROM dataview.dv_well_core_photo "
                            "WHERE uwi = :u AND row_created_by = :by"),
                       {"u": uwi, "by": CREATED_BY}).rowcount
+        s = c.execute(text("DELETE FROM dataview.dv_well_core_sample "
+                           "WHERE uwi = :u AND row_created_by = :by"),
+                      {"u": uwi, "by": CREATED_BY}).rowcount
+        # LAST, because the photos and the samples both hang off it.
         k = c.execute(text("DELETE FROM dataview.dv_well_core "
                            "WHERE uwi = :u AND row_created_by = :by"),
                       {"u": uwi, "by": CREATED_BY}).rowcount
-    return p, k
+    return p, s, k
 
 
 def main(argv=None):
@@ -306,14 +464,16 @@ def main(argv=None):
         if not a.apply:
             print("Would delete this loader's rows for %s. Add --apply." % uwi)
             return 0
-        p, k = remove(engine, uwi)
-        print("Deleted %d photo(s) and %d core run(s)." % (p, k))
+        p, s, k = remove(engine, uwi)
+        print("Deleted %d photo(s), %d plug analysis(es) and %d core run(s)."
+              % (p, s, k))
         return 0
 
-    uwi, wname, cores, rows, held = plan(engine)
+    uwi, wname, cores, rows, held, samples = plan(engine)
     print("Well        : %s  (%s %s)" % (uwi, wname, WELL_NUM))
     print("Core runs   : %d from CORE ACCOUNTING.xls" % len(cores))
     print("Photos      : %d placed, %d held" % (len(rows), len(held)))
+    print("Plug tests  : %d from the P&P workbook" % len(samples))
     print()
     from collections import Counter
     for k, n in sorted(Counter(
@@ -328,9 +488,10 @@ def main(argv=None):
     if not a.apply:
         print("\nPLAN ONLY -- nothing written. Re-run with --apply.")
         return 0
-    n_core, n_photo = write(engine, uwi, cores, rows)
-    print("\nWrote %d core run(s) and %d photo(s)." % (n_core, n_photo))
-    print("Undo with:  python tools/load_core_photos.py --remove --apply")
+    n_core, n_photo, n_samp = write(engine, uwi, cores, rows, samples)
+    print("\nWrote %d core run(s), %d photo(s), %d plug analysis(es)."
+          % (n_core, n_photo, n_samp))
+    print("Undo with:  python tools/load_core_data.py --remove --apply")
     return 0
 
 
