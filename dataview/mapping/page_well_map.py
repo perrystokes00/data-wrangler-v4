@@ -5614,6 +5614,27 @@ def _render_mud_log(engine, uwi):
         st.caption("Could not read the mud log export: %s" % _pexc)
         return
 
+    # FULL SCREEN IS A FILE, NOT A CONTROL. Streamlit has no full-screen for
+    # an image it did not draw, and the overlay it does have loses to the
+    # two-second map fragment anyway. A self-contained page sidesteps both:
+    # save it, double-click it, F11. It carries the DATA and draws in the
+    # browser, so it stays legible at any scale instead of being a picture of
+    # a log at one size -- 0.17 MB against 260 inches of PNG.
+    try:
+        import importlib as _il
+        _mh = _il.import_module("mudlog_html")
+        _html = _mh.build_html(_ex)
+        st.download_button(
+            "⤢  Save as a full-screen page (HTML)",
+            data=_html.encode("utf-8"),
+            file_name="mudlog_%s.html"
+                      % (_ex.header.get("Well Name", "well").replace(" ", "")),
+            mime="text/html", key="ml_html_dl",
+            help="Opens in any browser with no server. Scroll the log, drag "
+                 "the column dividers, zoom, and press F11 for full screen.")
+    except Exception as _hexc:
+        st.caption("Full-screen page unavailable: %s" % _hexc)
+
     c1, c2 = st.columns([3, 1])
     _top = c1.slider("Depth window (ft)", float(_lo), float(_hi),
                      (float(max(_lo, 5250.0)), float(min(_hi, 5400.0))),

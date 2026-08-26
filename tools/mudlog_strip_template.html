@@ -1,0 +1,791 @@
+<title>48X28 Strip Log</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+/* Palette off the log itself: the blue the descriptions are printed in, the
+   red of core points, the green of formation tops. */
+:root {
+  --paper:     #FCFCFD;
+  --surface:   #F1F3F7;
+  --surface-2: #E7EBF2;
+  --ink:       #131922;
+  --ink-soft:  #4A5666;
+  --ink-faint: #7C8899;
+  --rule:      #C7CEDA;
+  --grid:      #E6EAF0;
+  --grid-50:   #B9C2CF;
+  --accent:    #1B4F9C;
+  --accent-ink:#FFFFFF;
+  --core:      #A3231E;
+  --top:       #1F6B3A;
+  --descr:     #0F3D8C;
+  --curve:     #14181F;
+  /* The log sheet stays white in BOTH themes: this is paper, and a mud log
+     read on a dark ground is a different document. Named, not a literal. */
+  --sheet:     #FFFFFF;
+  --sheet-ink: #14181F;
+  --sheet-rule:#C9CFD8;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:     #0E1219;
+    --surface:   #161C25;
+    --surface-2: #1E2631;
+    --ink:       #E6EBF2;
+    --ink-soft:  #A6B2C2;
+    --ink-faint: #74808F;
+    --rule:      #2C3643;
+    --grid:      #E6EAF0;
+    --grid-50:   #B9C2CF;
+    --accent:    #6FA3E8;
+    --accent-ink:#0C1119;
+    --core:      #A3231E;
+    --top:       #1F6B3A;
+    --descr:     #0F3D8C;
+    --curve:     #14181F;
+    --sheet:     #FFFFFF;
+    --sheet-ink: #14181F;
+    --sheet-rule:#C9CFD8;
+  }
+}
+:root[data-theme="dark"] {
+  --paper:     #0E1219;
+  --surface:   #161C25;
+  --surface-2: #1E2631;
+  --ink:       #E6EBF2;
+  --ink-soft:  #A6B2C2;
+  --ink-faint: #74808F;
+  --rule:      #2C3643;
+  --grid:      #E6EAF0;
+  --grid-50:   #B9C2CF;
+  --accent:    #6FA3E8;
+  --accent-ink:#0C1119;
+  --core:      #A3231E;
+  --top:       #1F6B3A;
+  --descr:     #0F3D8C;
+  --curve:     #14181F;
+  --sheet:     #FFFFFF;
+  --sheet-ink: #14181F;
+  --sheet-rule:#C9CFD8;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── rail ─────────────────────────────────────────────────────────── */
+.rail { position: sticky; top: 0; z-index: 30; background: var(--surface);
+        border-bottom: 1px solid var(--rule); }
+.rail-top { display: flex; flex-wrap: wrap; align-items: center;
+            gap: 8px 18px; padding: 7px 14px; }
+.brand { display: flex; align-items: baseline; gap: 10px; margin-right: auto; }
+.brand strong { font-size: .95rem; font-weight: 600; letter-spacing: -.01em; }
+.brand span { font-family: "IBM Plex Mono", ui-monospace, monospace;
+              font-size: .68rem; color: var(--ink-faint);
+              letter-spacing: .05em; text-transform: uppercase; }
+.depth-now { font-family: "IBM Plex Mono", ui-monospace, monospace;
+             font-size: .95rem; font-weight: 600; color: var(--accent);
+             font-variant-numeric: tabular-nums; min-width: 6.2em;
+             text-align: right; }
+.grp { display: flex; align-items: center; gap: 7px; }
+.grp > .lbl { font-family: "IBM Plex Mono", ui-monospace, monospace;
+              font-size: .64rem; text-transform: uppercase;
+              letter-spacing: .09em; color: var(--ink-faint); }
+select, .btn { font: inherit; font-size: .8rem; padding: 3px 8px;
+               background: var(--paper); color: var(--ink);
+               border: 1px solid var(--rule); border-radius: 3px;
+               cursor: pointer; }
+.btn:hover, select:hover { background: var(--surface-2); }
+input[type="range"] { width: 120px; accent-color: var(--accent); }
+.val { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .76rem;
+       color: var(--ink-soft); font-variant-numeric: tabular-nums;
+       min-width: 4.6em; display: inline-block; text-align: right; }
+:where(button, a, select, input, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ── the sheet ────────────────────────────────────────────────────── */
+.sheet-wrap { background: var(--sheet); overflow-x: auto; }
+/* No reserved gutter any more: the strip is positioned from the sheet's own
+   right edge in layout(), so it cannot land on the log however wide the
+   columns are. */
+.sheet { position: relative; margin: 0; }
+
+.heads { position: sticky; top: 0; z-index: 20; height: 26px;
+         background: var(--surface-2); border-bottom: 1px solid var(--rule); }
+.heads .h { position: absolute; top: 0; height: 26px; display: flex;
+            align-items: center; justify-content: center;
+            font-family: "IBM Plex Mono", ui-monospace, monospace;
+            font-size: .62rem; letter-spacing: .05em; text-transform: uppercase;
+            color: var(--ink-soft); white-space: nowrap; overflow: hidden;
+            user-select: none; }
+/* THE HANDLE IS THE AFFORDANCE. A divider you can drag has to look draggable
+   before the pointer is on it, or nobody finds it. */
+.heads .grip { position: absolute; top: 0; height: 26px; width: 11px;
+               margin-left: -5px; cursor: col-resize; z-index: 22;
+               display: flex; align-items: center; justify-content: center; }
+.heads .grip::before { content: ""; width: 1px; height: 26px;
+                       background: var(--rule); }
+.heads .grip.end::before { background: var(--ink-faint); }
+.heads .grip:hover::before, .heads .grip.on::before {
+  width: 3px; background: var(--accent); }
+body.resizing { cursor: col-resize; user-select: none; }
+
+.track { position: absolute; top: 0; bottom: 0;
+         border-left: 1px solid var(--sheet-rule); }
+.track:first-of-type { border-left: 0; }
+/* A 4% inset each side: a curve pinned at 0 or at full scale would
+   otherwise be drawn hard against the column edge and read as clipped. */
+.track svg { position: absolute; top: 0; bottom: 0; left: 4%; right: 4%;
+             width: 92%; height: 100%; display: block; }
+.track svg.full { left: 0; right: 0; width: 100%; }
+.lbl-abs { position: absolute; left: 0; right: 0;
+           font-size: 11px; line-height: 1.2; }
+
+.dtick { position: absolute; left: 0; right: 0; text-align: center;
+         font-family: "IBM Plex Mono", ui-monospace, monospace;
+         font-size: 10px; color: var(--sheet-ink); background: var(--sheet);
+         font-variant-numeric: tabular-nums; }
+.descr { position: absolute; color: var(--descr); font-size: 11px;
+         line-height: 1.25; padding-right: 6px; }
+.eng   { position: absolute; color: var(--sheet-ink); font-size: 10px;
+         line-height: 1.2; background: var(--sheet); padding: 0 3px; }
+.ann   { position: absolute; font-size: 10.5px; line-height: 1.2;
+         background: var(--sheet); padding: 0 3px; }
+.ann.hide, .eng.hide, .descr.hide { display: none; }
+.ann.core { color: var(--core); }
+.ann.top  { color: var(--top); font-weight: 600; }
+
+.cursor-line { position: fixed; left: 0; right: 0; height: 0;
+               border-top: 1px dashed var(--accent); z-index: 25;
+               pointer-events: none; opacity: .55; }
+
+/* ── ladder ───────────────────────────────────────────────────────── */
+.ladder { position: fixed; top: 92px; bottom: 12px; width: 116px;
+          z-index: 15; pointer-events: none; }
+.ladder-in { position: relative; height: 100%;
+             background: color-mix(in srgb, var(--surface) 96%, transparent);
+             border: 1px dashed var(--rule); border-radius: 4px;
+             box-shadow: 0 2px 10px rgba(0,0,0,.06);
+             pointer-events: auto; }
+.ladder .title { position: absolute; top: -17px; left: 0; right: 0;
+                 text-align: center;
+                 font-family: "IBM Plex Mono", ui-monospace, monospace;
+                 font-size: .56rem; letter-spacing: .1em;
+                 text-transform: uppercase; color: var(--ink-faint); }
+.ladder .tick { position: absolute; left: 0; right: 0; height: 0;
+                border-top: 1px solid var(--top); }
+.ladder .tick.hide b { display: none; }
+.ladder .tick b { position: absolute; left: 4px; top: -8px;
+                  font-family: "IBM Plex Mono", ui-monospace, monospace;
+                  font-size: .62rem; font-weight: 500; color: var(--top);
+                  background: var(--surface); padding: 0 3px;
+                  white-space: nowrap; cursor: pointer; }
+.ladder .tick b:hover { color: var(--accent); text-decoration: underline; }
+.ladder .here { position: absolute; left: 0; right: 0; height: 2px;
+                background: var(--accent); }
+.ladder .cap { position: absolute; left: 0; right: 0; text-align: center;
+               font-family: "IBM Plex Mono", ui-monospace, monospace;
+               font-size: .58rem; color: var(--ink-faint); }
+.ladder .cap.t { top: 3px; } .ladder .cap.b { bottom: 3px; }
+@media (max-width: 980px) { .ladder { display: none; } }
+
+.foot { padding: 24px 18px 44px; max-width: 76ch; margin: 0 auto;
+        color: var(--ink-soft); font-size: .9rem; line-height: 1.6; }
+.foot h2 { margin: 0 0 8px; font-size: 1rem; color: var(--ink);
+           font-weight: 600; }
+.foot p { margin: 0 0 11px; }
+.foot code { font-family: "IBM Plex Mono", ui-monospace, monospace;
+             font-size: .88em; }
+.foot .k { color: var(--top); font-weight: 500; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+
+<div class="rail">
+  <div class="rail-top">
+    <div class="brand">
+      <strong>48 X 28 — mud log</strong>
+      <span id="hdr"></span>
+    </div>
+
+    <div class="grp">
+      <span class="lbl">Go to</span>
+      <select id="jump" aria-label="Jump to a formation top"></select>
+    </div>
+
+    <div class="grp">
+      <span class="lbl">Scale</span>
+      <button class="btn" type="button" id="zout" aria-label="Zoom out">&minus;</button>
+      <input type="range" id="zoom" min="1" max="30" step="0.5" value="4"
+             aria-label="Pixels per foot">
+      <button class="btn" type="button" id="zin" aria-label="Zoom in">+</button>
+      <span class="val" id="zval"></span>
+    </div>
+
+    <div class="grp">
+      <button class="btn" type="button" id="reset">Reset columns</button>
+    </div>
+
+    <div class="depth-now" id="now">—</div>
+  </div>
+  <div class="heads" id="heads"></div>
+</div>
+
+<div class="sheet-wrap"><div class="sheet" id="sheet"></div></div>
+<div class="cursor-line" id="cursor" hidden></div>
+
+<div class="ladder" aria-hidden="true">
+  <div class="ladder-in" id="ladder">
+    <div class="title">whole hole</div>
+    <div class="cap t" id="capT"></div>
+    <div class="here" id="here"></div>
+    <div class="cap b" id="capB"></div>
+  </div>
+</div>
+
+<div class="foot">
+  <h2>About this strip</h2>
+  <p>
+    <strong>Drag the dividers in the header</strong> to resize any column —
+    widen the descriptions to read them, or the gas track to separate C1 from
+    TG. <code>Reset columns</code> puts them back.
+  </p>
+  <p>
+    The scale slider is real feet-per-inch, not image zoom: the log is drawn
+    from the data, so it stays sharp at any size and the text stays selectable.
+    <code>+</code> / <code>&minus;</code> or Ctrl-scroll also work, and the
+    depth you are looking at is held while it rescales.
+  </p>
+  <p>
+    <span class="k">Everything here was written by the viewer</span> —
+    <code>File → Export → Write all data to an ASCII file</code>. Curve names,
+    units and sample step; the ROP scale and the four depths it changes at;
+    703 coded lithology intervals; 22 coded oil shows; all three text tracks.
+    Dashed red lines across ROP mark a scale change and say what it became.
+  </p>
+</div>
+
+<script>
+(function () {
+  var D = __DATA__;
+  // BUMPED: a layout saved by v1 beats the new defaults, so the column
+  // that was too wide would still be too wide on reload and the fix
+  // would look like it had not landed. Version the key when the
+  // defaults change -- the same trap as a widget key that never
+  // re-defaults.
+  var KEY = "mudlog-live-v4";
+  var LO = D.range[0], HI = D.range[1], SPAN = HI - LO;
+
+  var sheet = document.getElementById("sheet");
+  var heads = document.getElementById("heads");
+  var now = document.getElementById("now");
+  var zoom = document.getElementById("zoom");
+  var zval = document.getElementById("zval");
+  var jump = document.getElementById("jump");
+  var ladder = document.getElementById("ladder");
+  var here = document.getElementById("here");
+
+  var TRACKS = [
+    {key: "rop",   name: "ROP min/ft",    w: 15},
+    {key: "depth", name: "Depth",         w: 4},
+    {key: "lith",  name: "Lith",          w: 4},
+    {key: "descr", name: "Descriptions",  w: 40},
+    {key: "gas",   name: "Gas TG C1–C4",  w: 15},
+    {key: "ann",   name: "Shows · tops · cores · ops", w: 18},
+  ];
+  // COLUMN WIDTHS ARE PIXELS THE COLUMN OWNS. They used to be shares of a
+  // fixed total, so narrowing one silently widened every other -- drag the
+  // right edge in and the whole log reflowed. A column now keeps the width
+  // you gave it and the sheet is however wide they add up to, which is how
+  // every table on a computer has behaved for forty years.
+  var state = {ppf: 4, w: null};
+  try {
+    var s = JSON.parse(localStorage.getItem(KEY) || "null");
+    if (s && s.w && s.w.length === TRACKS.length) { state = s; }
+  } catch (e) { /* blocked storage: defaults are fine */ }
+
+  function defaultWidths() {
+    // First run only: spread the proportions across whatever room there is.
+    // After that the numbers are absolute and nothing rescales them.
+    var avail = Math.max(700, (sheet.parentNode.clientWidth || 1200)
+                              - (window.innerWidth > 980 ? 152 : 8));
+    var total = TRACKS.reduce(function (a, t) { return a + t.w; }, 0);
+    return TRACKS.map(function (t) {
+      return Math.round(t.w / total * avail);
+    });
+  }
+
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+  }
+
+  function byDepth(nodeList) {
+    var a = Array.prototype.slice.call(nodeList);
+    a.sort(function (x, y) { return x.dataset.depth - y.dataset.depth; });
+    return a;
+  }
+
+  var ladderTicks = [];
+  var annNodes = null, engNodes = null, descrNodes = null;
+  var SVGNS = "http://www.w3.org/2000/svg";
+  function svg(tag, attrs) {
+    var el = document.createElementNS(SVGNS, tag);
+    for (var k in attrs) { el.setAttribute(k, attrs[k]); }
+    return el;
+  }
+
+  // ── curve helpers ───────────────────────────────────────────────────
+  function scaleAt(c, d) {
+    var lo = null, hi = null;
+    for (var i = 0; i < c.scales.length; i++) {
+      if (c.scales[i][0] <= d) { lo = c.scales[i][1]; hi = c.scales[i][2]; }
+      else break;
+    }
+    if (lo === null && c.scales.length) { lo = c.scales[0][1]; hi = c.scales[0][2]; }
+    return [lo, hi];
+  }
+
+  function polylines(c, log) {
+    // Normalised into 0..1 against THE SCALE IN FORCE AT EACH DEPTH, so a
+    // piecewise-scaled curve stays continuous. Nulls break the line rather
+    // than being joined across.
+    var out = [], cur = [];
+    for (var i = 0; i < c.v.length; i++) {
+      var v = c.v[i];
+      var d = c.d0 + i * c.step;
+      if (v === null) { if (cur.length > 1) out.push(cur); cur = []; continue; }
+      var sc = scaleAt(c, d), lo = sc[0], hi = sc[1], x;
+      if (lo === null || hi === null || hi === lo) { continue; }
+      if (log) {
+        var l0 = Math.log10(Math.max(lo, 1e-6));
+        x = (Math.log10(Math.max(v, Math.max(lo, 1e-6))) - l0)
+            / (Math.log10(hi) - l0);
+      } else { x = (v - lo) / (hi - lo); }
+      x = Math.max(0, Math.min(1, x));
+      cur.push(x.toFixed(4) + "," + (d - LO).toFixed(2));
+    }
+    if (cur.length > 1) out.push(cur);
+    return out;
+  }
+
+  // ── build once; resize and zoom are pure layout ─────────────────────
+  var els = {};
+  function build() {
+    sheet.textContent = "";
+    heads.textContent = "";
+
+    TRACKS.forEach(function (t, i) {
+      var div = document.createElement("div");
+      div.className = "track";
+      div.dataset.key = t.key;
+      sheet.appendChild(div);
+      els[t.key] = div;
+
+      var h = document.createElement("div");
+      h.className = "h";
+      h.textContent = t.name;
+      h.title = t.name;
+      heads.appendChild(h);
+      t.head = h;
+
+      if (i === TRACKS.length - 1) {
+        var ge = document.createElement("div");
+        ge.className = "grip end";
+        ge.dataset.i = TRACKS.length;
+        ge.tabIndex = 0;
+        ge.setAttribute("role", "separator");
+        ge.setAttribute("aria-label", "Resize " + t.name + " from its outer edge");
+        heads.appendChild(ge);
+        t.gripEnd = ge;
+      }
+      if (i > 0) {
+        var g = document.createElement("div");
+        g.className = "grip";
+        g.dataset.i = i;
+        g.tabIndex = 0;
+        g.setAttribute("role", "separator");
+        g.setAttribute("aria-label", "Resize " + TRACKS[i - 1].name);
+        heads.appendChild(g);
+        t.grip = g;
+      }
+    });
+
+    // grid + depth ticks -- SVG in depth space so it scales for free
+    TRACKS.forEach(function (t) {
+      if (t.key === "depth") { return; }
+      var g = svg("svg", {preserveAspectRatio: "none",
+                          viewBox: "0 0 1 " + SPAN});
+      var step = 10;
+      for (var d = Math.ceil(LO / step) * step; d <= HI; d += step) {
+        var heavy = (d % 50 === 0);
+        g.appendChild(svg("line", {
+          x1: 0, x2: 1, y1: d - LO, y2: d - LO,
+          stroke: heavy ? "var(--grid-50)" : "var(--grid)",
+          "stroke-width": heavy ? 0.9 : 0.5,
+          "vector-effect": "non-scaling-stroke"}));
+      }
+      g.setAttribute("class", "full");
+      t.grid = g;
+      els[t.key].appendChild(g);
+    });
+
+    // ROP
+    var rop = D.rop;
+    if (rop) {
+      var g = svg("svg", {preserveAspectRatio: "none",
+                          viewBox: "0 0 1 " + SPAN});
+      polylines(rop, false).forEach(function (pts) {
+        g.appendChild(svg("polyline", {
+          points: pts.join(" "), fill: "none", stroke: "var(--curve)",
+          "stroke-width": 1, "vector-effect": "non-scaling-stroke"}));
+      });
+      rop.scales.forEach(function (s) {
+        if (s[0] <= LO || s[0] >= HI) { return; }
+        g.appendChild(svg("line", {
+          x1: 0, x2: 1, y1: s[0] - LO, y2: s[0] - LO, stroke: "var(--core)",
+          "stroke-width": 1.4, "stroke-dasharray": "5 4",
+          "vector-effect": "non-scaling-stroke"}));
+        var lab = document.createElement("div");
+        lab.className = "eng";
+        lab.style.color = "var(--core)";
+        lab.style.left = "2px";
+        lab.dataset.depth = s[0];
+        lab.textContent = "scale " + s[1] + "–" + s[2];
+        els.rop.appendChild(lab);
+      });
+      els.rop.appendChild(g);
+    }
+
+    // engineering readings sit in the ROP track, as they do on the original
+    var ENG = /^\s*(WOB|RPM|PP|SPM|WT|VIS|WL|FC|PH|CL|Ca|MW|FL)\b/i;
+    D.eng.forEach(function (r) {
+      if (!ENG.test(r[1])) { return; }
+      var e = document.createElement("div");
+      e.className = "eng";
+      e.style.right = "3px";
+      e.dataset.depth = r[0];
+      e.textContent = r[1].split("\n").join(" · ");
+      els.rop.appendChild(e);
+    });
+
+    // depth ticks
+    for (var d = Math.ceil(LO / 50) * 50; d <= HI; d += 50) {
+      var t = document.createElement("div");
+      t.className = "dtick";
+      t.dataset.depth = d;
+      t.textContent = d;
+      els.depth.appendChild(t);
+    }
+
+    // lithology
+    var gl = svg("svg", {preserveAspectRatio: "none",
+                         viewBox: "0 0 1 " + SPAN});
+    D.lith.forEach(function (r) {
+      gl.appendChild(svg("rect", {
+        x: 0, y: r[0] - LO, width: 1, height: Math.max(r[1] - r[0], 0.4),
+        fill: D.lithColour[r[2]] || "#DDDDDD"}));
+    });
+    gl.setAttribute("class", "full");
+    els.lith.appendChild(gl);
+
+    // descriptions
+    D.descr.forEach(function (r) {
+      var e = document.createElement("div");
+      e.className = "descr";
+      e.dataset.depth = r[0];
+      e.style.left = "4px";
+      e.textContent = r[1];
+      els.descr.appendChild(e);
+    });
+
+    // gas
+    var gg = svg("svg", {preserveAspectRatio: "none",
+                         viewBox: "0 0 1 " + SPAN});
+    D.gas.forEach(function (c) {
+      polylines(c, true).forEach(function (pts) {
+        gg.appendChild(svg("polyline", {
+          points: pts.join(" "), fill: "none",
+          stroke: D.gasColour[c.name] || "#333",
+          "stroke-width": c.name === "TG" ? 1.2 : 0.8,
+          "vector-effect": "non-scaling-stroke"}));
+      });
+    });
+    els.gas.appendChild(gg);
+
+    // shows, tops, cores, operations
+    var ga = svg("svg", {preserveAspectRatio: "none",
+                         viewBox: "0 0 1 " + SPAN});
+    D.shows.forEach(function (r) {
+      ga.appendChild(svg("circle", {
+        cx: 0.03, cy: r[0] - LO, r: 0.02,
+        fill: D.showColour[r[1]] || "#9AA3AE",
+        "vector-effect": "non-scaling-stroke"}));
+    });
+    var topAt = {};
+    D.tops.forEach(function (r) { topAt[r[0]] = r[1]; });
+    var seen = {};
+    D.eng2.concat(D.eng).forEach(function (r) {
+      if (ENG.test(r[1])) { return; }
+      var k = r[0] + "|" + r[1];
+      if (seen[k]) { return; }
+      seen[k] = 1;
+      var isTop = topAt[r[0]] === r[1];
+      var isCore = /^\s*Core/i.test(r[1]);
+      ga.appendChild(svg("line", {
+        x1: 0, x2: 1, y1: r[0] - LO, y2: r[0] - LO,
+        stroke: isCore ? "var(--core)" : "var(--top)",
+        "stroke-width": isTop ? 1.6 : 0.9,
+        "vector-effect": "non-scaling-stroke"}));
+      var e = document.createElement("div");
+      e.className = "ann " + (isCore ? "core" : (isTop ? "top" : ""));
+      e.dataset.depth = r[0];
+      e.style.left = "8px";
+      e.textContent = r[1].split("\n").join(" ");
+      els.ann.appendChild(e);
+    });
+    ga.setAttribute("class", "full");
+    els.ann.appendChild(ga);
+
+    // tops: jump list and ladder
+    jump.appendChild(new Option("Formation top…", ""));
+    D.tops.forEach(function (r) {
+      jump.appendChild(new Option(r[1] + "  " + r[0].toFixed(0) + " ft", r[0]));
+      var tk = document.createElement("div");
+      tk.className = "tick";
+      tk.style.top = ((r[0] - LO) / SPAN * 100) + "%";
+      var b = document.createElement("b");
+      b.textContent = r[1];
+      b.tabIndex = 0;
+      b.addEventListener("click", function () { goTo(r[0]); });
+      b.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); goTo(r[0]); }
+      });
+      tk.appendChild(b);
+      ladder.appendChild(tk);
+      ladderTicks.push({d: r[0], el: tk});
+    });
+    document.getElementById("capT").textContent = LO.toFixed(0);
+    document.getElementById("capB").textContent = HI.toFixed(0);
+  }
+
+  // ── layout: the only thing resize and zoom touch ────────────────────
+  function layout() {
+    if (!state.w) { state.w = defaultWidths(); }
+    var W = state.w.reduce(function (a, b) { return a + b; }, 0);
+    sheet.style.width = W + "px";
+    sheet.style.height = (SPAN * state.ppf) + "px";
+    var x = 0;
+    TRACKS.forEach(function (t, i) {
+      var w = state.w[i];
+      var el = els[t.key];
+      el.style.left = x + "px";
+      el.style.width = w + "px";
+      t.head.style.left = x + "px";
+      t.head.style.width = w + "px";
+      if (t.grip) { t.grip.style.left = x + "px"; }
+      x += w;
+      if (t.gripEnd) { t.gripEnd.style.left = (x - 1) + "px"; }
+    });
+    // Absolutely-positioned text is the one thing that cannot ride the SVG
+    // viewBox, because scaling it would stretch the glyphs. It is placed in
+    // pixels here instead.
+    var nodes = sheet.querySelectorAll("[data-depth]");
+    for (var i = 0; i < nodes.length; i++) {
+      var d = +nodes[i].dataset.depth;
+      var y = (d - LO) * state.ppf;
+      nodes[i].style.top = (nodes[i].className === "dtick"
+                            ? y - 7 : y - 1) + "px";
+    }
+    placeLadder();
+    thin();
+    zval.textContent = state.ppf.toFixed(1) + " px/ft";
+  }
+
+  // Sit just off the log's right edge, and give up and hug the window only
+  // when the log is wide enough that there is no room beside it.
+  function placeLadder() {
+    var lad = document.querySelector(".ladder");
+    var r = sheet.getBoundingClientRect();
+    var want = r.right + 14;
+    var max = window.innerWidth - 116 - 10;
+    lad.style.left = Math.max(10, Math.min(want, max)) + "px";
+  }
+
+  // A LABEL THAT OVERPRINTS ITS NEIGHBOUR IS WORSE THAN ONE THAT IS NOT DRAWN.
+  // At 2 px/ft the annotations stack a few pixels apart and turn into a grey
+  // smear. The depth LINE always stays, so nothing is lost -- only the name is
+  // deferred until you zoom in far enough to read it.
+  function thinGroup(nodes, minPx) {
+    var last = -1e9;
+    for (var i = 0; i < nodes.length; i++) {
+      var y = (+nodes[i].dataset.depth - LO) * state.ppf;
+      if (y - last < minPx) { nodes[i].classList.add("hide"); }
+      else { nodes[i].classList.remove("hide"); last = y; }
+    }
+  }
+
+  function thin() {
+    if (!annNodes) { return; }
+    thinGroup(annNodes, 15);
+    thinGroup(engNodes, 26);
+    thinGroup(descrNodes, 15);
+    // the ladder is a fixed height, so its spacing is in its own pixels
+    var h = ladder.getBoundingClientRect().height || 600;
+    var lastY = -1e9;
+    ladderTicks.forEach(function (t) {
+      var y = (t.d - LO) / SPAN * h;
+      if (y - lastY < 13) { t.el.classList.add("hide"); }
+      else { t.el.classList.remove("hide"); lastY = y; }
+    });
+  }
+
+  // ── depth readout ───────────────────────────────────────────────────
+  function railH() {
+    return document.querySelector(".rail").getBoundingClientRect().height;
+  }
+  function currentDepth() {
+    var r = sheet.getBoundingClientRect();
+    var y = railH() + 12 - r.top;
+    return LO + Math.max(0, Math.min(SPAN * state.ppf, y)) / state.ppf;
+  }
+  function readDepth() {
+    var d = currentDepth();
+    now.textContent = d.toFixed(0) + " ft";
+    here.style.top = ((d - LO) / SPAN * 100) + "%";
+  }
+  function goTo(depth) {
+    // INSTANT, NOT SMOOTH. Two reasons, and the first one is fatal: this
+    // browser moves about 27 px in two seconds for behavior:"smooth", so
+    // every jump silently did nothing -- the readout sat at the top of the
+    // hole while the control reported success. The second reason stands even
+    // where smooth works: the roll is 20,000 px tall and animating a jump
+    // from the Niobrara to the Tensleep is a long wait for no information.
+    var r = sheet.getBoundingClientRect();
+    var y = window.scrollY + r.top + (depth - LO) * state.ppf - railH() - 10;
+    window.scrollTo(0, Math.max(0, y));
+    readDepth();
+  }
+
+  // ── zoom, holding the depth under the rail ──────────────────────────
+  function setZoom(ppf) {
+    ppf = Math.max(1, Math.min(30, Math.round(ppf * 2) / 2));
+    var at = currentDepth();
+    state.ppf = ppf;
+    zoom.value = ppf;
+    layout();
+    save();
+    goTo(at);
+    readDepth();
+  }
+  zoom.addEventListener("input", function () { setZoom(+zoom.value); });
+  document.getElementById("zin").addEventListener("click",
+    function () { setZoom(state.ppf * 1.35); });
+  document.getElementById("zout").addEventListener("click",
+    function () { setZoom(state.ppf / 1.35); });
+  window.addEventListener("wheel", function (e) {
+    if (!(e.ctrlKey || e.metaKey)) { return; }
+    e.preventDefault();
+    setZoom(state.ppf * (e.deltaY < 0 ? 1.18 : 1 / 1.18));
+  }, {passive: false});
+  window.addEventListener("keydown", function (e) {
+    if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) { return; }
+    if (e.key === "+" || e.key === "=") { setZoom(state.ppf * 1.35); }
+    else if (e.key === "-" || e.key === "_") { setZoom(state.ppf / 1.35); }
+    else if (e.key === "0") { setZoom(4); }
+  });
+
+  // ── column resize ───────────────────────────────────────────────────
+  // A drag moves width BETWEEN the two neighbours and leaves the rest alone,
+  // so the sheet never changes total width and columns you already set do not
+  // shuffle when you adjust a different pair.
+  var drag = null;
+  heads.addEventListener("pointerdown", function (e) {
+    var g = e.target.closest(".grip");
+    if (!g) { return; }
+    e.preventDefault();
+    var i = +g.dataset.i;
+    // Every divider resizes THE COLUMN TO ITS LEFT. The outer handle is just
+    // the divider after the last column, so it needs no special case.
+    drag = {i: i, x: e.clientX, g: g, a: state.w[i - 1]};
+    g.classList.add("on");
+    document.body.classList.add("resizing");
+    g.setPointerCapture(e.pointerId);
+  });
+  heads.addEventListener("pointermove", function (e) {
+    if (!drag) { return; }
+    // ONLY the column being dragged changes. Everything to its right shifts
+    // along; nothing is rescaled.
+    state.w[drag.i - 1] = Math.max(24, drag.a + (e.clientX - drag.x));
+    layout();
+  });
+  function endDrag() {
+    if (!drag) { return; }
+    drag.g.classList.remove("on");
+    document.body.classList.remove("resizing");
+    drag = null;
+    save();
+  }
+  heads.addEventListener("pointerup", endDrag);
+  heads.addEventListener("pointercancel", endDrag);
+  // Keyboard: a divider that can only be dragged is a divider some people
+  // cannot move at all.
+  heads.addEventListener("keydown", function (e) {
+    var g = e.target.closest(".grip");
+    if (!g) { return; }
+    var step = e.key === "ArrowLeft" ? -1 : (e.key === "ArrowRight" ? 1 : 0);
+    if (!step) { return; }
+    e.preventDefault();
+    var i = +g.dataset.i;
+    state.w[i - 1] = Math.max(24, state.w[i - 1] + step * 12);
+    layout();
+    save();
+  });
+
+  document.getElementById("reset").addEventListener("click", function () {
+    state.w = defaultWidths();
+    layout();
+    save();
+  });
+
+  jump.addEventListener("change", function () {
+    if (jump.value) { goTo(+jump.value); jump.value = ""; }
+  });
+
+  document.querySelector(".sheet-wrap").addEventListener("scroll", function () {
+    placeLadder();
+  }, {passive: true});
+
+  var pending = false;
+  window.addEventListener("scroll", function () {
+    if (pending) { return; }
+    pending = true;
+    requestAnimationFrame(function () { readDepth(); pending = false; });
+  }, {passive: true});
+  window.addEventListener("resize", function () { layout(); readDepth(); });
+
+  var h = D.header;
+  document.getElementById("hdr").textContent =
+    (h["Logged Interval From"] || "") + "–" + (h["Logged Interval To"] || "") +
+    " · driller's depth · KB " + (h["K.B. Elevation"] || "?");
+
+  build();
+  annNodes = byDepth(els.ann.querySelectorAll(".ann"));
+  engNodes = byDepth(els.rop.querySelectorAll(".eng"));
+  descrNodes = byDepth(els.descr.querySelectorAll(".descr"));
+  zoom.value = state.ppf;
+  layout();
+  readDepth();
+  // Second pass after the scrollbar exists: the sheet is what CAUSES it, so
+  // the width the first layout measured is already out of date.
+  requestAnimationFrame(function () { layout(); readDepth(); });
+  window.addEventListener("load", function () { layout(); readDepth(); });
+})();
+</script>
