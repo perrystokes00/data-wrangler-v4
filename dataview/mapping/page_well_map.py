@@ -5187,6 +5187,38 @@ def _colour_hex(name):
         return "#" + bare.upper()
     return s
 
+# ONE COLOUR PER 2D SURVEY. Every line used to be the same orange-brown,
+# so a map with several surveys on it showed one indistinguishable mesh --
+# which is exactly when you most need to know whose line you are looking at.
+#
+# Not the full MAP_COLOURS: these have to stay apart from each other AND
+# from what is already on the map -- wells are red, fields green, leases
+# blue, boundaries slate. These six are chosen against that.
+_SEIS_SURVEY_COLOURS = [
+    "#B36A00",   # the original orange-brown, so a single-survey map is
+                 # unchanged and nobody has to relearn it
+    "#7B2D8B",   # purple
+    "#00796B",   # teal
+    "#C2185B",   # magenta
+    "#827717",   # olive
+    "#283593",   # navy
+]
+
+
+def _survey_colour(name):
+    """A stable colour for a survey name.
+
+    crc32, NOT hash(). Python salts hash() per process, so the colours
+    would be reshuffled on every restart -- a map that recolours itself
+    overnight teaches nothing and looks like a bug. This is the same trap
+    the layer grid hit and the same fix.
+    """
+    import zlib
+    _k = str(name or "")
+    return _SEIS_SURVEY_COLOURS[
+        zlib.crc32(_k.encode("utf-8")) % len(_SEIS_SURVEY_COLOURS)]
+
+
 def _darken(hex_colour, factor=0.5):
     """A darker shade of a #rrggbb colour, for a pipeline's casing.
 
@@ -10363,9 +10395,19 @@ def run(engine=None):
                         _lk = "%s|%s" % (_sv, _sl.get("line"))
                         if _want_l and _lk not in _want_l:
                             continue
+                        _svc = _survey_colour(_sv)
                         if _sv not in _groups:
+                            # A SWATCH IN THE LAYER-CONTROL LABEL. Leaflet
+                            # sets the label with innerHTML, so the entry
+                            # can carry the colour it controls -- otherwise
+                            # the control names the surveys and the map
+                            # colours them and nothing joins the two.
                             _groups[_sv] = folium.FeatureGroup(
-                                name=("📈 %s lines" % _sv[:44]),
+                                name=("<span style='display:inline-block;"
+                                      "width:10px;height:10px;"
+                                      "background:%s;border-radius:2px;"
+                                      "margin-right:5px'></span>%s lines"
+                                      % (_svc, _sv[:44])),
                                 show=True)
                         # A 2 px LINE IS A 2 px CLICK TARGET. The popup is
                         # the only channel that tells the panel which SEG-Y
@@ -10382,7 +10424,7 @@ def run(engine=None):
                         # Same FeatureGroup, so they switch together and no
                         # layer control entry is duplicated.
                         folium.PolyLine(
-                            locations=_sl["pts"], color="#B36A00", weight=14,
+                            locations=_sl["pts"], color=_svc, weight=14,
                             # "dv-hit" marks the invisible twin so the
                             # picker can thicken the VISIBLE line without
                             # shrinking the click target to match.
@@ -10418,7 +10460,7 @@ def run(engine=None):
                                 max_width=320),
                         ).add_to(_groups[_sv])
                         folium.PolyLine(
-                            locations=_sl["pts"], color="#B36A00", weight=2,
+                            locations=_sl["pts"], color=_svc, weight=2,
                             class_name="dv-seis-2d",
                             opacity=0.9,
                             tooltip=folium.Tooltip(
