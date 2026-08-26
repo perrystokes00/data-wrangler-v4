@@ -114,10 +114,20 @@ def _geography_geojson(features: list, extra_cols=None) -> dict:
     return {"type": "FeatureCollection", "features": feats}
 
 
-def add_geography_layer(m, engine, key: str, show: bool = True) -> int:
+def add_geography_layer(m, engine, key: str, show: bool = True,
+                        show_names=None) -> int:
     """Add one dv_*.geog feature layer as a toggleable FeatureGroup on `m`.
+
     Returns the number of features added (0 = nothing to draw / table absent
-    / query failed — printed, never raised)."""
+    / query failed — printed, never raised).
+
+    show_names: for the per-survey seismic split only, the set of survey
+    names that should start VISIBLE. This is how the second-screen page
+    drives the map: it writes the chosen surveys to the shared prefs file
+    and the map applies them here on its next render. None means "the
+    `show` flag decides", which is every other caller and the old
+    behaviour exactly — an empty SET is different from None and means the
+    page asked for none of them."""
     cfg = _LAYER_KEYS.get(key)
     if cfg is None:
         print(f"[geography_layers] unknown layer key {key!r} "
@@ -162,13 +172,19 @@ def add_geography_layer(m, engine, key: str, show: bool = True) -> int:
         # family in an alphabetical control rather than scattering.
         _icon = label.split()[0]
         parts = [("%s %s (%d)" % (_icon, _nm[:44], len(groups[_nm])),
-                  groups[_nm]) for _nm in order]
+                  groups[_nm], _nm) for _nm in order]
     else:
         parts = [("%s (%s)" % (label, format(len(gj["features"]), ",")),
-                  gj["features"])]
+                  gj["features"], None)]
 
-    for _gname, _feats in parts:
-        fg = folium.FeatureGroup(name=_gname, show=show)
+    for _gname, _feats, _gkey in parts:
+        # A NAME THE PAGE CAN ADDRESS. The group LABEL carries an icon and
+        # a count, so it changes when the data changes; the survey name
+        # does not, which is what makes a stored selection survive a
+        # reload that adds a line.
+        _vis = show if show_names is None or _gkey is None else (
+            _gkey in show_names)
+        fg = folium.FeatureGroup(name=_gname, show=_vis)
         folium.GeoJson(
             {"type": "FeatureCollection", "features": _feats},
             style_function=_style,

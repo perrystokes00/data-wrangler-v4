@@ -319,6 +319,30 @@ def _go_to_place(bounds) -> None:
     st.session_state["_reset_saved_view"] = True
 
 
+MAP_SEIS_PREF = "map_seis"
+
+
+def _map_seis_choice() -> dict:
+    """What the second-screen page asked the map to show.
+
+    {"surveys": [names], "lines": ["survey|line"]}, or empty lists.
+
+    THE CHANNEL IS THE PREFS FILE, on purpose. The seismic page is a
+    SEPARATE Streamlit session with its own session_state, so nothing in
+    Python is shared between the two windows -- the same constraint that
+    made the map push travel in the URL. A file both sessions already
+    read (it holds the saved places) needs no new store, no polling and
+    no JavaScript.
+
+    EMPTY MEANS EVERYTHING. A first-run map with no file, and a page that
+    has never been used, must look exactly like they do today rather than
+    drawing nothing and reading as broken.
+    """
+    _p = (_load_user_prefs().get(MAP_SEIS_PREF) or {})
+    return {"surveys": [str(x) for x in (_p.get("surveys") or [])],
+            "lines": [str(x) for x in (_p.get("lines") or [])]}
+
+
 def _load_user_prefs() -> dict:
     """Return the user prefs dict, or {} if the file doesn't exist / is bad."""
     try:
@@ -4386,6 +4410,73 @@ def render_seis_view(engine):
                        % _want)
 
     _render_seis_pick(_lines, _df3d)
+    _render_map_drive(_seis_candidates(_lines, _df3d))
+
+
+def _render_map_drive(cands):
+    """Choose, on the second screen, which seismic the MAP draws.
+
+    THE OTHER DIRECTION. The map pushes a picked line to this window through a
+    named window and a URL; this sends a CHOICE back. It cannot go back the
+    same way -- re-navigating the map window would reload the heaviest page in
+    the app on every tick of a checkbox -- and it cannot go through
+    session_state, because the two windows are separate Streamlit sessions.
+
+    So it goes through the prefs FILE both sessions already read for saved
+    places. That makes it deliberately NOT live: the map applies this on its
+    next render. Live would mean polling, and a poll that re-renders the map
+    re-serialises the whole thing every couple of seconds -- the map is the
+    expensive object, so the cheap-sounding option is the ruinous one here.
+
+    EMPTY MEANS EVERYTHING, at both ends. Saving nothing restores the default
+    map rather than emptying it, so this can always be undone from here.
+    """
+    if not cands:
+        return
+    _surv = sorted({str(c.get("survey")) for c in cands if c.get("survey")})
+    _lkeys = sorted({"%s|%s" % (c.get("survey"), c.get("line"))
+                     for c in cands if c.get("survey") and c.get("line")})
+    _cur = _map_seis_choice()
+
+    st.divider()
+    st.markdown("#### Drive the map")
+    st.caption("Pick what the map should draw. It takes effect on the map’s "
+               "next render — switch to that window and it is applied.")
+    # DEFAULTS FILTERED TO WHAT EXISTS. A stored survey that has since been
+    # deleted would otherwise raise inside st.multiselect rather than simply
+    # dropping out, and the page would be dead until the file was hand-edited.
+    _ds = [s for s in _cur["surveys"] if s in _surv]
+    _dl = [l for l in _cur["lines"] if l in _lkeys]
+    _sel_s = st.multiselect("Surveys", _surv, default=_ds,
+                            key="mapdrive_surveys",
+                            help="Empty shows every survey.")
+    _sel_l = st.multiselect("Lines", _lkeys, default=_dl,
+                            key="mapdrive_lines",
+                            help="Empty shows every line of the surveys "
+                                 "above. Keyed survey|line because line names "
+                                 "repeat between surveys.")
+    _b1, _b2 = st.columns([1, 1])
+    if _b1.button("✓ Send to map", type="primary", key="mapdrive_save",
+                  use_container_width=True):
+        _p = _load_user_prefs()
+        _p[MAP_SEIS_PREF] = {"surveys": _sel_s, "lines": _sel_l}
+        _save_user_prefs(_p)
+        st.session_state["mapdrive_msg"] = (
+            "Map set to %s survey(s) and %s line(s)."
+            % (len(_sel_s) or "all", len(_sel_l) or "all"))
+        st.rerun()
+    if _b2.button("Show everything", key="mapdrive_clear",
+                  use_container_width=True):
+        _p = _load_user_prefs()
+        _p[MAP_SEIS_PREF] = {"surveys": [], "lines": []}
+        _save_user_prefs(_p)
+        st.session_state["mapdrive_msg"] = "Map restored to every survey."
+        st.rerun()
+    # AFTER the rerun. st.rerun() raises, so anything rendered above it is
+    # discarded -- the scar that hid the colour-grid errors for a session.
+    _mm = st.session_state.pop("mapdrive_msg", None)
+    if _mm:
+        st.success(_mm)
 
 
 def _render_seis_slice(path):
@@ -9782,6 +9873,14 @@ def run(engine=None):
                         from dataview.mapping.geography_layers import (
                             add_lease_layer)
                         add_lease_layer(m, engine, show=True)
+                    elif _geo_keys[_ak] == "seismic":
+                        # None, not an empty set, when nothing was chosen:
+                        # empty means "the page asked for none" and would
+                        # switch every survey off.
+                        _wanted = _map_seis_choice()["surveys"]
+                        add_geography_layer(
+                            m, engine, "seismic", show=True,
+                            show_names=(set(_wanted) if _wanted else None))
                     else:
                         add_geography_layer(m, engine, _geo_keys[_ak],
                                             show=True)
@@ -9806,7 +9905,31 @@ def run(engine=None):
                         add_horizon_contours)
                     add_horizon_contours(m, engine, show=True)
                 if "geo_seismic" in active_db:
+                    # ONE GROUP PER SURVEY, so the lines can be switched at all.
+                    # These were bare PolyLines added straight to the map, so
+                    # they were in no FeatureGroup and the layer control never
+                    # listed them: there was no way to turn one 2D survey off,
+                    # only the whole Seismic chip.
+                    #
+                    # The line filter is keyed "survey|line", not the line name
+                    # alone, because line names repeat across surveys and a bare
+                    # name would switch off somebody else's line.
+                    #
+                    # EMPTY MEANS EVERYTHING, both times. A map whose page has
+                    # never been used must look exactly as it does today.
+                    _sc = _map_seis_choice()
+                    _want_s = set(_sc["surveys"])
+                    _want_l = set(_sc["lines"])
+                    _groups = {}
                     for _sl in _seismic_line_paths(engine):
+                        _sv = str(_sl.get("survey") or "(unnamed survey)")
+                        _lk = "%s|%s" % (_sv, _sl.get("line"))
+                        if _want_l and _lk not in _want_l:
+                            continue
+                        if _sv not in _groups:
+                            _groups[_sv] = folium.FeatureGroup(
+                                name=("📈 %s lines" % _sv[:44]),
+                                show=((not _want_s) or (_sv in _want_s)))
                         folium.PolyLine(
                             locations=_sl["pts"], color="#B36A00", weight=2,
                             opacity=0.9,
@@ -9825,7 +9948,9 @@ def run(engine=None):
                                    f"{_popup_safe(_sl['file'])}</span>"
                                    if _sl.get("file") else ""),
                                 max_width=320),
-                        ).add_to(m)
+                        ).add_to(_groups[_sv])
+                    for _fg in _groups.values():
+                        _fg.add_to(m)
                 if "geo_wellpath" in active_db:
                     # Wellbore paths are a geography layer like any other:
                     # minimum-curvature geometry computed by well_path_sql
