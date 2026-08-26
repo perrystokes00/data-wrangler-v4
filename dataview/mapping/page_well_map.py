@@ -4191,6 +4191,65 @@ def _seis_filter_box(label, key, values, help_text=None):
     return None if sel == "All" else sel
 
 
+def _render_seis_basket():
+    """The lines collected by clicking the map, and what to do with them.
+
+    ONE SECTION AT A TIME, DELIBERATELY. Four SEG-Y files rendered side by
+    side is four file reads and four matplotlib figures on a page that
+    already takes ~25 s to draw, and the second screen exists precisely so
+    a section can be looked at properly rather than in a quarter of a
+    column. So the basket chooses WHICH one is shown, and the whole set can
+    be sent to the map or opened one at a time on the other monitor.
+
+    Hidden entirely below two entries: one line is a pick, not a basket,
+    and a control that appears for every click is clutter.
+    """
+    _multi = list(st.session_state.get("_seis_multi") or [])
+    if len(_multi) < 2:
+        return
+    st.caption("%d lines picked from the map." % len(_multi))
+    _labels = [_seis_label(h) for h in _multi]
+    _cur = (st.session_state.get("_seis_pick") or {}).get("path")
+    _idx = next((i for i, h in enumerate(_multi)
+                 if str(h.get("path")) == str(_cur)), 0)
+    _b1, _b2, _b3 = st.columns([3, 1, 1])
+    _sel = _b1.selectbox("Showing", _labels, index=_idx,
+                         key="seis_basket_sel",
+                         label_visibility="collapsed")
+    # ACT ON CHANGE ONLY, or this overrules the map click that just
+    # arrived -- the same rule the main chooser follows, and for the same
+    # reason: two doors onto one selection, most recent wins.
+    if _sel != st.session_state.get("_seis_basket_last"):
+        st.session_state["_seis_basket_last"] = _sel
+        _hit = _multi[_labels.index(_sel)]
+        if str(_hit.get("path")) != str(_cur):
+            st.session_state["_seis_pick"] = dict(_hit)
+            st.rerun()
+    if _b2.button("Send to map", key="seis_basket_send_btn",
+                  use_container_width=True,
+                  help="Draw only these lines on the map."):
+        _lines = sorted("%s|%s" % (h.get("survey"), h.get("line"))
+                        for h in _multi if h.get("line"))
+        _survs = sorted({str(h.get("survey")) for h in _multi})
+        _p = _load_user_prefs()
+        _p[MAP_SEIS_PREF] = {"mode": "pick", "surveys": _survs,
+                             "lines": _lines}
+        _save_user_prefs(_p)
+        st.session_state["_seis_basket_msg"] = (
+            "Map set to the %d picked line(s)." % len(_lines))
+        st.rerun()
+    if _b3.button("Clear", key="seis_basket_clear",
+                  use_container_width=True):
+        st.session_state.pop("_seis_multi", None)
+        st.session_state.pop("_seis_basket_last", None)
+        st.rerun()
+    # AFTER the rerun -- st.rerun() raises and discards anything already
+    # rendered, the scar that hid the colour-grid errors for a session.
+    _bm = st.session_state.pop("_seis_basket_msg", None)
+    if _bm:
+        st.success(_bm)
+
+
 def _render_seis_pick(lines=None, df3d=None):
     """Filter down to one seismic line or volume, then look at it.
 
@@ -4302,6 +4361,8 @@ def _render_seis_pick(lines=None, df3d=None):
             'style="font-size:0.82rem;text-decoration:none">'
             '&#x2197; seismic page on second screen</a>',
             unsafe_allow_html=True)
+
+    _render_seis_basket()
 
     _pick = st.session_state.get("_seis_pick")
     if not _pick:
@@ -10867,12 +10928,18 @@ def run(engine=None):
                     });
                     mapInst.addControl(new Ctl());
 
-                    // A PICK ENDS THE MODE. Leaving it armed would keep
-                    // every well marker unclickable after the section
-                    // opened, which reads as a frozen map.
-                    mapInst.on("popupopen", function() {
-                        if (mode) { mode = null; paint(); }
-                    });
+                    // THE MODE SURVIVES A PICK, so several lines can be
+                    // collected in a row -- that is the point of a mode.
+                    // It was disarmed on the first popup because leaving
+                    // it armed makes every marker unclickable, which reads
+                    // as a frozen map; the amber button and the pointer
+                    // cursor carry that instead, and one click clears it.
+                    //
+                    // Python cannot see this mode -- it lives in the
+                    // browser precisely so arming costs no rerun -- so it
+                    // cannot know whether to add or replace. It ALWAYS
+                    // adds, and the panel offers Clear. That way the two
+                    // halves never disagree about what is selected.
                 }
                 install();
             })();
@@ -11872,6 +11939,24 @@ def run(engine=None):
                 # re-serialise the whole map a second time, greying the
                 # page twice for one click.
                 st.session_state["_seis_pick"] = _sh
+                # AND KEEP IT, so several lines can be collected by
+                # clicking them in turn. The picker mode lives in the
+                # browser -- that is what makes arming free -- so Python
+                # cannot know whether this click meant "add" or "replace".
+                # It always ADDS and the panel offers Clear, which is the
+                # only version where the two halves cannot disagree about
+                # what is selected.
+                #
+                # DEDUPED ON PATH, and the guard above already ensures a
+                # repeated click on the same line never reaches here --
+                # streamlit-folium returns the same popup on every rerun
+                # until something else is clicked, so without both a
+                # single click would append on every interaction.
+                _multi = list(st.session_state.get("_seis_multi") or [])
+                if not any(str(x.get("path")) == str(_sh.get("path"))
+                           for x in _multi):
+                    _multi.append(dict(_sh))
+                    st.session_state["_seis_multi"] = _multi
 
 
         # scout_uwi (set from popups) is no longer auto-collected into a tray.
