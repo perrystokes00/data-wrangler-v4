@@ -48,20 +48,31 @@ HEADER -- tag/length/value, starting at offset 0x32:
 
 DESCRIPTIONS -- fixed record, 330 of them:
 
-    <float32 depth><uint16 track><uint16 len><len bytes of text>
+    <uint16 track><float32 depth><uint16 subtype><uint16 len><len bytes of text>
 
-    Track 0 is the geologist's sample descriptions (263), track 1 the driller's
-    events (39). The depth is trustworthy: the record at 4316.40 reads
+    THE TRACK TAG COMES FIRST, BEFORE THE DEPTH -- see TRACK_NAMES. 263 records
+    are the geologist's sample descriptions and 67 the driller's engineering
+    remarks. The depth is trustworthy: the record at 4316.40 reads
     "...set 4316.49' of 7" Csg to 4323' KB", quoting its own depth back.
 
     The scan below accepts a record ONLY when its declared length matches
     printable text of exactly that length, so it needs no knowledge of what
-    surrounds a record and cannot drift into the float32 curve arrays that
-    occupy 0x7c000-0xa5000.
+    surrounds a record and cannot drift into the numeric arrays.
 
-What is NOT read yet: the curve arrays (TG, C1-C4, ROP, lithology percentages)
-are float32 blocks around 0x7c000. They are why rop_avg and mud_weight_avg are
-left NULL rather than guessed -- see the note in build().
+What is NOT read: the curve samples. They are in the file -- five float32
+arrays, and two of them are 2,606 samples spanning 545-5755 ft at exactly
+2.0 ft, which is the logged interval -- but the file gives no binding from an
+array to a track. The track TABLE is readable (Depth, % Lithology, Porosity,
+Oil Shows, "TG, C1-C4", Eng. Data ...) and the arrays are findable, and there
+is nothing connecting the two. Calling one of them ROP would be a guess that
+plots, so they are left alone and rop_avg / mud_weight_avg stay NULL. See the
+notes in build().
+
+    0x0765e8  2606 @ 2.0 ft  2.00-122.00  41 distinct, integer-valued
+    0x078f0e  2606 @ 2.0 ft  1.48- 90.00  55 distinct
+    0x054f4e  2400           0.20- 45.00  66 distinct
+    0x07c994  1192           0.18-  4.54  45 distinct
+    0x07dc38   301           0.27-  9.50  42 distinct
 """
 
 import argparse
@@ -98,8 +109,35 @@ T_LOGGER = 0x1450
 T_OPERATOR = 0x1451
 
 HEADER_START = 0x32
-TRACK_SAMPLE = 0
-TRACK_EVENT = 1
+
+# THE TRACK IS NAMED IN THE FILE, and the name is the tag that PRECEDES the
+# depth -- not a position after it. The first version read the uint16 that
+# FOLLOWS the depth and called it a track, which sorted the records into a 0
+# and a 1 that happened to separate descriptions from events. It was a
+# coincidence that held for this file: that field is a subtype, and reading
+# it as the track found 302 of the 330 records and could name none of them.
+#
+# The file declares its own tracks in a definition table at 0x054974, which is
+# where these tags and names come from. "Oil Shows" is declared and carries NO
+# text -- it is a graphical track -- which is why shows have to be read out of
+# the geologist's descriptions rather than looked up.
+TRACK_NAMES = {
+    0x1131: "Curve Track",
+    0x1134: "Eng. Data",
+    0x1135: "Depth",
+    0x1136: "Porosity Type",
+    0x1137: "Porosity",
+    0x1138: "Lithology",
+    0x1141: "Oil Shows",
+    0x1142: "Geol. Descrs.",
+    0x114a: "TG, C1-C4",
+    0x114b: "Eng. Data 2",
+    0x114c: "Intervals",
+    0x114d: "Events",
+    0x114e: "% Lithology",
+}
+TRACK_SAMPLE = 0x1142                     # the geologist's sample descriptions
+TRACK_EVENTS = (0x1134, 0x114b)           # the driller's engineering remarks
 
 
 # --------------------------------------------------------------------------
@@ -133,12 +171,12 @@ def read_records(data):
     that length. That check is what lets this scan the whole file, including
     the float32 curve arrays, without inventing records out of curve values."""
     found = []
-    for off in range(0, len(data) - 8):
+    for off in range(2, len(data) - 8):
         depth, = struct.unpack_from("<f", data, off)
         if not 0.0 < depth < 6500.0:
             continue
-        track, ln = struct.unpack_from("<HH", data, off + 4)
-        if not 0 < ln <= 400 or track > 64:
+        subtype, ln = struct.unpack_from("<HH", data, off + 4)
+        if not 0 < ln <= 400 or subtype > 64:
             continue
         if off + 8 + ln > len(data):
             continue
@@ -147,6 +185,10 @@ def read_records(data):
             continue
         text = text.decode("ascii")
         if len(text.strip()) < 6 or not re.search(r"[A-Za-z]", text):
+            continue
+        # the track tag sits two bytes BEFORE the depth
+        track, = struct.unpack_from("<H", data, off - 2)
+        if track not in TRACK_NAMES:
             continue
         found.append((off, depth, track, text.strip()))
     # Overlapping candidates: the earliest wins and the rest of its bytes are
@@ -324,7 +366,7 @@ def build(engine, path):
     uwi, tops = _facts(engine)
 
     samples = sorted([r for r in recs if r[1] == TRACK_SAMPLE])
-    events = sorted([r for r in recs if r[1] == TRACK_EVENT])
+    events = sorted([r for r in recs if r[1] in TRACK_EVENTS])
 
     kb = _feet(hdr.get(T_ELEV_KB))
     gl = _feet(hdr.get(T_ELEV_GL))

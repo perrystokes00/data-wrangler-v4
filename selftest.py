@@ -1325,6 +1325,33 @@ def tier_units(res, verbose=False):
     check("every tools/ script that imports dataview can find it",
           _tools_can_import_the_repo)
 
+    # 19b. ONE WRITER PER TABLE, for the specialised loaders.
+    #      A specialised loader is only safe because nothing else writes
+    #      its tables: that is what makes its --remove an exact undo and
+    #      "the first one in wins" mean anything. load_well_detail used to
+    #      write dv_well_mud_log and dv_well_shows alongside four other
+    #      tables, and when the mud log got its own parser those two had to
+    #      MOVE rather than be copied -- two loaders inserting into one
+    #      table gives you rows neither one will delete.
+    #
+    #      The registry states the claim in `tables`; this is the check
+    #      that the claim holds. Code-only, so it runs with no database.
+    def _one_writer_per_table():
+        from dataview.import_data import special_loaders as sl
+        bad = sl.check_ownership()
+        assert not bad, "specialised loader registry: " + "; ".join(bad)
+        # and the registry must actually describe importable loaders with
+        # the CLI surface run_loader() drives -- a typo in `module` would
+        # otherwise only surface when someone clicked the button.
+        for spec in sl.SPECIAL:
+            mod = sl._import(spec)
+            assert callable(getattr(mod, "main", None)), (
+                "%s: tools/%s.py has no main() for the Data Assistant to "
+                "call" % (spec["key"], spec["module"]))
+            assert spec["tables"], "%s claims no tables" % spec["key"]
+    check("specialised loaders: one writer per table, and all importable",
+          _one_writer_per_table)
+
     # 20. NO st.expander INSIDE ANOTHER ONE. Streamlit raises
     #     StreamlitAPIException ("Expanders may not be nested inside other
     #     expanders"), and an expander's body executes whether or not it is

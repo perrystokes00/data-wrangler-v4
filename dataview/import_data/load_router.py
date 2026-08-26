@@ -196,8 +196,26 @@ def run(engine=None, dialect=None):
     # re-defaults to B with an empty directory box.
     route = ss.get("lr_route") or "B"
     ss["lr_route"] = route
+
+    # ROUTE S -- specialised loaders. Not a third way to read a folder: a
+    # list of loaders that each own a source the general routes cannot
+    # describe (core photographs keyed by filename, a vendor mud log
+    # binary). See special_loaders.py for why that line is where it is.
+    if route == "S":
+        if st.button("← Back to the main loader", key="lr_s_back_btn"):
+            ss["lr_route"] = "B"; ss["lr_scroll_top"] = True; st.rerun()
+        try:
+            from dataview.import_data import special_loaders as _s
+        except Exception:
+            import special_loaders as _s
+        _s.render(engine)
+        st.divider()
+        if st.button("← Back to the main loader", key="lr_s_back_bottom_btn"):
+            ss["lr_route"] = "B"; ss["lr_scroll_top"] = True; st.rerun()
+        return
+
     if route in ("A", "B"):
-        top = st.columns([1, 1, 3])
+        top = st.columns([1, 1, 1, 2])
         if top[0].button("← Load another folder", key="lr_back_top"):
             _load_another(ss); st.rerun()
         if route == "B":
@@ -211,7 +229,12 @@ def run(engine=None, dialect=None):
                            "file catalog, BCP staging, data-quality report, dry run, verify.")
         if top[1].button(_lbl, key="lr_switch", help=_help):
             _switch_route(ss); st.rerun()
-        top[2].caption(
+        if top[2].button("⚗ Specialised loaders", key="lr_special_btn",
+                         help="Core photographs and analyses, mud logs, well "
+                              "detail -- sources whose files cannot describe "
+                              "themselves, each owning its own tables."):
+            ss["lr_route"] = "S"; ss["lr_scroll_top"] = True; st.rerun()
+        top[3].caption(
             "Route B · main loader — CSV · Excel · LAS · DLIS · LIS · WITSML · PDF · Word"
             if route == "B" else
             "Route A · tabular loader — one table at a time (CSV / Excel)")
