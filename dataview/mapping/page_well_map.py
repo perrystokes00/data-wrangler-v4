@@ -4340,6 +4340,31 @@ def render_seis_view(engine):
         st.session_state["_seis_url_path"] = _want
         if _hit:
             st.session_state["_seis_pick"] = dict(_hit)
+            # AND POINT THE CHOOSER AT IT, or the chooser throws it away.
+            # _render_seis_pick treats a selectbox reading "-- none --" that
+            # differs from _seis_sel_last as a deliberate Clear. On the FIRST
+            # run of this window both conditions hold for free -- the box has
+            # no stored value so it defaults to "-- none --", and _seis_sel_last
+            # is unset -- so the pick the URL had just set was popped before it
+            # could draw. The window opened, showed the right title for one
+            # frame, and then showed nothing.
+            #
+            # The filters are released as well, because the box is built only
+            # from what survives them: on a RE-navigation this session still
+            # holds the previous line's survey and stage, and a new line from
+            # a different survey would not be in the list to be selected. The
+            # map pushed this line, so the map wins -- which is the whole point
+            # of the second screen.
+            #
+            # All of it BEFORE _render_seis_pick draws anything. Assigning a
+            # widget key after its widget exists is scar #6, and it raises on a
+            # later run, on whatever page happens to draw next.
+            for _fk in ("seis_f_dim", "seis_f_survey", "seis_f_stage",
+                        "seis_f_line", "seis_f_product"):
+                st.session_state.pop(_fk, None)
+            _url_lbl = _seis_label(_hit)
+            st.session_state["seis_open_sel"] = _url_lbl
+            st.session_state["_seis_sel_last"] = _url_lbl
         else:
             # NAME THE FILE. "Nothing to show" sends the reader back to the map
             # to click again; the path says whether the catalog moved on.
