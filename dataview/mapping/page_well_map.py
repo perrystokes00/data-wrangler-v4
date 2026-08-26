@@ -4223,8 +4223,30 @@ def _render_seis_gallery(picks):
     except ImportError as _ie:
         st.error("Cannot draw sections: %s" % _ie)
         return
-    for _h in _shown:
-        st.markdown("##### " + _seis_label(_h))
+    for _gi, _h in enumerate(_shown):
+        _hc, _hb = st.columns([5, 1])
+        _hc.markdown("##### " + _seis_label(_h))
+        # A PICTURE IS NOT A BUTTON. st.pyplot renders a static image, so
+        # "click the section you want" cannot work however natural it
+        # looks -- and the alternative on offer was to leave the gallery,
+        # find the line again in the dropdown, and come back. One button
+        # per section instead.
+        #
+        # KEY ENDS "_btn" so _is_action_key excludes it: the persist loop
+        # self-assigns every settable key, a button cannot be set, and the
+        # assignment raises on a LATER run on whatever page draws next.
+        if _hb.button("Show only this", key="seis_gal_pick_%d_btn" % _gi,
+                      use_container_width=True):
+            st.session_state["_seis_pick"] = dict(_h)
+            st.session_state["_seis_basket_last"] = _seis_label(_h)
+            # A REQUEST FLAG, NOT THE WIDGET KEY. seis_basket_all belongs
+            # to a checkbox drawn ABOVE this, so assigning it here is
+            # setting a widget key after instantiation -- Streamlit scar
+            # #6, and it raises on a later run far from the cause. The
+            # flag is consumed next run BEFORE that checkbox is drawn,
+            # which is the legal half of the same move.
+            st.session_state["_seis_gal_close"] = True
+            st.rerun()
         _p = str(_h.get("path") or "")
         if not os.path.exists(_p):
             st.warning("The catalogue points at a file that is not there "
@@ -4322,6 +4344,11 @@ def _render_seis_basket():
         st.session_state.pop("_seis_multi", None)
         st.session_state.pop("_seis_basket_last", None)
         st.rerun()
+    # Consumed BEFORE the checkbox is instantiated -- see the flag's
+    # comment in _render_seis_gallery. Setting a widget key here is legal;
+    # setting it after the widget exists is not.
+    if st.session_state.pop("_seis_gal_close", False):
+        st.session_state["seis_basket_all"] = False
     st.checkbox("▦ Show all %d sections, one after another" % len(_multi),
                 key="seis_basket_all",
                 help="Every picked line stacked down the page. Each one is "
