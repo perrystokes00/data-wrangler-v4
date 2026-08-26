@@ -10116,6 +10116,39 @@ def run(engine=None):
                             _groups[_sv] = folium.FeatureGroup(
                                 name=("📈 %s lines" % _sv[:44]),
                                 show=True)
+                        # A 2 px LINE IS A 2 px CLICK TARGET. The popup is
+                        # the only channel that tells the panel which SEG-Y
+                        # was picked, so a line you cannot reliably hit is a
+                        # section you cannot reliably open -- "how do I pick
+                        # a line on the map" was a fair question about a
+                        # target two pixels wide.
+                        #
+                        # So each line is drawn TWICE: a 14 px twin at 1%
+                        # opacity first, carrying the same popup and tooltip,
+                        # then the real 2 px line on top. Leaflet hit-tests
+                        # the stroke, so the fat one catches everything
+                        # within about 7 px and the map looks unchanged.
+                        # Same FeatureGroup, so they switch together and no
+                        # layer control entry is duplicated.
+                        folium.PolyLine(
+                            locations=_sl["pts"], color="#B36A00", weight=14,
+                            opacity=0.01,
+                            tooltip=folium.Tooltip(
+                                f"<b>📈 2D line</b><br>{_sl['survey']}<br>"
+                                f"{_sl['line']}"),
+                            popup=folium.Popup(
+                                f"<b>📈 2D seismic line</b><br>"
+                                f"<b>{_sl['survey']}</b><br>{_sl['line']}<br>"
+                                f"EPSG {_sl['epsg'] or '—'}<br>"
+                                f"{_sl['traces'] or '?'} traces"
+                                + (f"<br><b>💾 "
+                                   f"{_popup_safe(_sl['file_name'])}</b>"
+                                   f"<br><span style='font-size:10px;"
+                                   f"word-break:break-all'>"
+                                   f"{_popup_safe(_sl['file'])}</span>"
+                                   if _sl.get("file") else ""),
+                                max_width=320),
+                        ).add_to(_groups[_sv])
                         folium.PolyLine(
                             locations=_sl["pts"], color="#B36A00", weight=2,
                             opacity=0.9,
