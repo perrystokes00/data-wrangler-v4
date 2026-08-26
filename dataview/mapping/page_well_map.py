@@ -10939,27 +10939,16 @@ def run(engine=None):
         # pick itself still travels the existing popup path.
         pick_tools = MacroElement()
         pick_tools._name = "dv_seis_picker"
+        # THE CSS IS NOT IN THIS TEMPLATE, and that is not a style choice.
+        # A MacroElement added with m.add_child() only emits its `script`
+        # macro -- an `html` macro reaches the page only from the figure
+        # ROOT. Mine was written as {% macro html %} and silently never
+        # rendered: the buttons appeared (JS builds those), the mode went
+        # amber, and NONE of the pointer-events or highlight rules existed.
+        # Verified by reading the iframe stylesheets back: zero matching
+        # rules. It goes below with the other folium.Element CSS, which is
+        # the pattern in this file that works.
         pick_tools._template = Template(u"""
-            {% macro html(this, kwargs) %}
-            <style>
-            .dv-pick-2d .leaflet-overlay-pane path:not(.dv-seis-2d),
-            .dv-pick-3d .leaflet-overlay-pane path:not(.dv-seis-3d) {
-                pointer-events: none !important;
-            }
-            .dv-pick-2d .leaflet-marker-pane,
-            .dv-pick-3d .leaflet-marker-pane { pointer-events: none; }
-            .dv-pick-2d .leaflet-overlay-pane path.dv-seis-2d:not(.dv-hit) {
-                stroke-width: 5px !important;
-            }
-            .dv-pick-3d .leaflet-overlay-pane path.dv-seis-3d {
-                stroke-width: 4px !important;
-            }
-            .dv-pick-2d .leaflet-container,
-            .dv-pick-3d .leaflet-container { cursor: pointer !important; }
-            .dv-picker-ctl a { font: 700 11px/26px system-ui, sans-serif;
-                text-align: center; }
-            </style>
-            {% endmacro %}
             {% macro script(this, kwargs) %}
             (function() {
                 function findMap() {
@@ -10983,18 +10972,84 @@ def run(engine=None):
                     if (mapInst.__dv_picker_bound) { return; }
                     mapInst.__dv_picker_bound = true;
 
+                    // THE STYLESHEET IS INJECTED FROM HERE, because the
+                    // usual route does not arrive. A folium.Element style
+                    // block added with .add_to(m.get_root().html) is
+                    // DROPPED by st_folium -- checked in the running app,
+                    // in both the iframe and the parent document, and the
+                    // rules are in neither. That is not new: the crosshair
+                    // cursor and the .dv-draw-active click-through rule
+                    // already in this file go the same way and have never
+                    // applied. Injecting from the map's own script puts it
+                    // in the document the SVG actually lives in.
+                    try {
+                        var st = document.createElement("style");
+                        st.textContent =
+  ".dv-pick-2d .leaflet-overlay-pane path:not(.dv-seis-2d),"
++ ".dv-pick-3d .leaflet-overlay-pane path:not(.dv-seis-3d)"
++ "{pointer-events:none !important;}"
++ ".dv-pick-2d .leaflet-marker-pane,"
++ ".dv-pick-3d .leaflet-marker-pane{pointer-events:none;}"
++ ".dv-pick-2d .leaflet-overlay-pane path.dv-seis-2d:not(.dv-hit)"
++ "{stroke-width:5px !important;}"
++ ".dv-pick-3d .leaflet-overlay-pane path.dv-seis-3d"
++ "{stroke-width:4px !important;}"
++ ".dv-pick-2d.leaflet-container,.dv-pick-3d.leaflet-container"
++ "{cursor:pointer !important;}"
++ ".dv-picker-ctl a{font:700 11px/26px system-ui,sans-serif;"
++ "text-align:center;}";
+                        document.head.appendChild(st);
+                    } catch (e) { /* no head yet */ }
+
                     var mode = null;
                     var links = {};
                     var box = mapInst.getContainer();
 
                     function disarmDraw() {
+                        // CLICK "CANCEL", because that is the one that
+                        // works. Measured against Leaflet 1.9.3 with the
+                        // draw plugin actually loaded, arming the rectangle
+                        // and then:
+                        //
+                        //   clicking the enabled toolbar button -> STILL ARMED
+                        //   clicking the Cancel action link     -> disarmed
+                        //
+                        // The toolbar button looks like the obvious target
+                        // and toggling it is what a person does by hand, but
+                        // a synthetic click on it does not reach the handler
+                        // that disables the mode. Cancel does.
+                        try {
+                            var acts = document.querySelectorAll(
+                                ".leaflet-draw-actions a");
+                            for (var i = 0; i < acts.length; i++) {
+                                if (/cancel/i.test(acts[i].textContent)) {
+                                    acts[i].click();
+                                    break;
+                                }
+                            }
+                        } catch (e) { /* no draw toolbar */ }
+                        // AND KEYUP, NOT KEYDOWN. Leaflet.Draw binds its
+                        // Escape cancel to KEYUP -- a keydown is ignored,
+                        // which is why arming the picker turned the button
+                        // amber and left the rectangle tool live, so every
+                        // click still drew a box. A draw handler works at
+                        // the map container, so no amount of
+                        // pointer-events on the paths can stop it: the
+                        // tool has to actually be put away.
                         try {
                             document.dispatchEvent(new KeyboardEvent(
-                                "keydown", {key: "Escape", keyCode: 27,
-                                            which: 27, bubbles: true}));
+                                "keyup", {key: "Escape", keyCode: 27,
+                                          which: 27, bubbles: true}));
                         } catch (e) { /* older browser */ }
                         window.DV_DRAW_ACTIVE = false;
                     }
+                    // AND HOLD THE MODE. If a draw tool is armed while a
+                    // picker is on, the draw wins the very next click and
+                    // the amber button becomes a lie. Cancel it as it
+                    // starts and leave the picker armed.
+                    mapInst.on("draw:drawstart", function() {
+                        if (mode) { setTimeout(disarmDraw, 0); }
+                    });
                     function paint() {
                         box.classList.remove("dv-pick-2d", "dv-pick-3d");
                         if (mode) { box.classList.add("dv-pick-" + mode); }
@@ -11088,6 +11143,31 @@ def run(engine=None):
             .dv-draw-active .leaflet-overlay-pane path {
                 pointer-events: none !important;
             }
+
+            /* -- 2D / 3D picker modes (dv_seis_picker) ---------------- */
+            /* While a picker is armed only that kind of feature takes a
+               click, so a well marker or a county polygon lying over a
+               line cannot steal it -- the half of "a line is hard to hit"
+               that no amount of aiming fixes. */
+            .dv-pick-2d .leaflet-overlay-pane path:not(.dv-seis-2d),
+            .dv-pick-3d .leaflet-overlay-pane path:not(.dv-seis-3d) {
+                pointer-events: none !important;
+            }
+            .dv-pick-2d .leaflet-marker-pane,
+            .dv-pick-3d .leaflet-marker-pane { pointer-events: none; }
+            /* The VISIBLE line thickens; the invisible 14 px hit twin is
+               excluded by dv-hit, or highlighting the line would shrink
+               the target underneath it. */
+            .dv-pick-2d .leaflet-overlay-pane path.dv-seis-2d:not(.dv-hit) {
+                stroke-width: 5px !important;
+            }
+            .dv-pick-3d .leaflet-overlay-pane path.dv-seis-3d {
+                stroke-width: 4px !important;
+            }
+            .dv-pick-2d.leaflet-container,
+            .dv-pick-3d.leaflet-container { cursor: pointer !important; }
+            .dv-picker-ctl a { font: 700 11px/26px system-ui, sans-serif;
+                text-align: center; }
             </style>
         """).add_to(m.get_root().html)
 
