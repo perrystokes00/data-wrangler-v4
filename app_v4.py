@@ -981,6 +981,89 @@ with st.sidebar:
                     st.success("Reset done — " + ",  ".join(
                         f"{k}: {v}" for k, v in _res.items()))
 
+        # ── Reset Teacup ────────────────────────────────────────────────
+        # SCOPED TO THE DEMO SET ONLY, unlike the reset above it, which
+        # empties every table. Three datasets, each identified by what it is
+        # rather than when it arrived: the synthetic wells by their uwis, the
+        # synthetic documents by their folder, the synthetic 2D by its set.
+        # tools/demo_teacup.py owns the scoping and the FK order.
+        with st.expander("\U0001FAD6 Reset Teacup", expanded=False):
+            st.caption("Removes ONLY the Teacup demo data — the synthetic "
+                       "wells, the synthetic documents and the synthetic 2D "
+                       "seismic. Everything else is left alone.")
+            _tc = _teacup_mod()
+            if _tc is None:
+                st.caption("⚠️ tools/demo_teacup.py not importable.")
+            else:
+                try:
+                    _tcc = _tc.counts(S.engine)
+                    _tct = sum(sum(v for v in d.values()
+                                   if isinstance(v, int))
+                               for d in _tcc.values())
+                except Exception as _e:
+                    _tcc, _tct = None, 0
+                    st.caption(f"Counts unavailable: {_e}")
+                if _tcc is not None:
+                    for _ds in ("wells", "docs", "seismic"):
+                        _n = sum(v for v in (_tcc.get(_ds) or {}).values()
+                                 if isinstance(v, int))
+                        st.caption(f"• {_ds}: **{_n:,}** row(s)")
+                if not S.get("_confirm_reset_teacup"):
+                    if st.button("Reset Teacup", key="reset_teacup_open",
+                                 disabled=not _tct,
+                                 use_container_width=True):
+                        S["_confirm_reset_teacup"] = True
+                        st.rerun()
+                else:
+                    st.warning(f"Permanently deletes the **{_tct:,} row(s)** "
+                               "listed above — the demo set only. Continue?")
+                    _tc1, _tc2 = st.columns(2)
+                    with _tc1:
+                        if st.button("✓ Confirm", key="reset_teacup_confirm",
+                                     type="primary",
+                                     use_container_width=True):
+                            try:
+                                S["_reset_teacup_result"] = _tc.reset_all(
+                                    S.engine, apply=True)
+                            except Exception as _te:
+                                S["_reset_teacup_result"] = {
+                                    "error": str(_te)}
+                            S["_confirm_reset_teacup"] = False
+                            st.rerun()
+                    with _tc2:
+                        if st.button("✗ Cancel", key="reset_teacup_cancel",
+                                     use_container_width=True):
+                            S["_confirm_reset_teacup"] = False
+                            st.rerun()
+            _tres = S.get("_reset_teacup_result")
+            if _tres:
+                if "error" in _tres:
+                    st.error(f"Reset Teacup failed: {_tres['error']}")
+                else:
+                    _lines = []
+                    for _ds, _d in _tres.items():
+                        if isinstance(_d, dict):
+                            _lines.append("%s: %s" % (_ds, ",  ".join(
+                                f"{k} {v}" for k, v in _d.items()) or "none"))
+                    st.success("Teacup reset — " + " | ".join(_lines))
+
+
+def _teacup_mod():
+    """tools/demo_teacup, or None. Imported lazily so a missing tool cannot
+    stop the app from starting."""
+    try:
+        # app_v4 imports sys AS _sys, so a bare sys here is unbound -- and the
+        # except below would have swallowed the NameError and reported the
+        # tool missing forever. Import it locally and name it plainly.
+        import os as _o, sys as _s
+        _t = _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), "tools")
+        if _t not in _s.path:
+            _s.path.insert(0, _t)
+        import demo_teacup
+        return demo_teacup
+    except Exception:
+        return None
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # MAIN CONTENT

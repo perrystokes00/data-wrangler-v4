@@ -44,8 +44,23 @@ INDIRECT = [
     ("dv_prod_volume",
      "EXISTS (SELECT 1 FROM dataview.dv_prod_entity e "
      "        WHERE e.prod_entity_id = dataview.dv_prod_volume.prod_entity_id "
-     "          AND e.uwi LIKE :pat)"),
+     "          AND e.uwi {m})"),
 ]
+
+# How a uwi is matched. A PATTERN IS THE WRONG SCOPE FOR A KNOWN SET OF WELLS.
+# The synthetic demo wells span four states (15, 30, 35, 42), so no single
+# LIKE reaches them, and "everything that is not 49" would quietly widen the
+# day real Oklahoma data arrives. A list cannot widen: it names its rows.
+#
+# RTRIM ON BOTH SIDES. uwi is char(14) and this project has already lost six
+# weeks to a comparison that padded one side and not the other. The demo UWIs
+# are all exactly 14, so the transform is a no-op today -- it is here so the
+# match stays right if a shorter one ever arrives.
+_INDIRECT_TABLES = {t for t, _p in INDIRECT}
+
+MATCH_LIKE = "LIKE :pat"
+MATCH_LIST = ("IN (SELECT LTRIM(RTRIM(value)) "
+              "FROM STRING_SPLIT(CAST(:pat AS nvarchar(max)), ','))")
 # These must be deleted after their own children above.
 AFTER_INDIRECT = {"dv_prod_entity"}
 
@@ -120,7 +135,7 @@ def _delete_order(cx, tables):
     return out
 
 
-def _plan(cx, pat):
+def _plan(cx, pat, match=None):
     """[(table, where, count)] in an order the foreign keys accept."""
     import sqlalchemy as sa
     kids = _children(cx)
@@ -136,8 +151,10 @@ def _plan(cx, pat):
         by_uwi.append(t)
     by_uwi = _delete_order(cx, by_uwi + ["dv_well"])
 
-    steps = list(INDIRECT)                      # indirect children first
-    steps += [(t, "uwi LIKE :pat") for t in by_uwi]
+    m = match or MATCH_LIKE
+    steps = [(t, p.format(m=m)) for t, p in INDIRECT]   # indirect first
+    steps += [(t, ("RTRIM(uwi) " if m is MATCH_LIST else "uwi ") + m)
+              for t in by_uwi]
 
     out = []
     for t, w in steps:
@@ -151,8 +168,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Delete wells matching a UWI pattern, children first. "
                     "Counts only unless --apply.")
-    ap.add_argument("--like", required=True,
-                    help=r"UWI pattern, e.g. \"49025%%\" for Teapot Dome")
+    g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--like",
+                   help=r"UWI pattern, e.g. \"49025%%\" for Teapot Dome")
+    g.add_argument("--uwi-file",
+                   help="file of UWIs, one per line -- an exact scope that "
+                        "cannot widen the way a pattern can")
     ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args(argv)
@@ -161,14 +182,29 @@ def main(argv=None):
     import sqlalchemy as sa
     engine = make_engine(a.database)
 
-    with engine.connect() as cx:
-        plan = _plan(cx, a.like)
+    if a.uwi_file:
+        with open(a.uwi_file, encoding="utf-8") as fh:
+            uwis = [x.strip() for x in fh if x.strip()]
+        if not uwis:
+            print("No UWIs in %s -- nothing to do." % a.uwi_file)
+            return 1
+        pat, match = ",".join(uwis), MATCH_LIST
+        what = "%d UWIs from %s" % (len(uwis), a.uwi_file)
+    else:
+        pat, match = a.like, MATCH_LIKE
+        what = repr(a.like)
 
-    print(f"Wells matching {a.like!r}, and everything below them:\n")
+    with engine.connect() as cx:
+        plan = _plan(cx, pat, match)
+
+    print(f"Wells matching {what}, and everything below them:\n")
     total = 0
     for t, w, n in plan:
         total += n
-        via = "" if w.startswith("uwi") else "   <- via dv_prod_entity"
+        # Test the TABLE, not the predicate text: with a uwi list the
+        # predicate starts "RTRIM(uwi)", so a startswith check labelled all
+        # 27 tables indirect.
+        via = "   <- via dv_prod_entity" if t in _INDIRECT_TABLES else ""
         print(f"   {t:30s} {n:10,}{via}")
     print(f"\n   {'TOTAL':30s} {total:10,} row(s)")
 
@@ -187,14 +223,15 @@ def main(argv=None):
     with engine.begin() as cx:
         for t, w, _n in plan:
             r = cx.execute(sa.text(
-                f"DELETE FROM dataview.{t} WHERE {w}"), {"pat": a.like})
+                f"DELETE FROM dataview.{t} WHERE {w}"), {"pat": pat})
             print(f"   deleted {r.rowcount:10,} from {t}")
     print("\nDone, in one transaction.")
 
     with engine.connect() as cx:
         left = cx.execute(sa.text(
-            "SELECT COUNT(*) FROM dataview.dv_well WHERE uwi LIKE :p"),
-            {"p": a.like}).scalar()
+            "SELECT COUNT(*) FROM dataview.dv_well WHERE "
+            + ("RTRIM(uwi) " + MATCH_LIST if a.uwi_file else "uwi LIKE :pat")),
+            {"pat": pat}).scalar()
         orphan = cx.execute(sa.text("""
             SELECT COUNT(*) FROM dataview.dv_prod_volume v
              WHERE NOT EXISTS (SELECT 1 FROM dataview.dv_prod_entity e
