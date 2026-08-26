@@ -5536,6 +5536,124 @@ def _photo_to_b64(file_path: str, _mtime: float = 0.0) -> str:
         return ""
 
 
+def _render_photo_gallery(engine, uwis):
+    """Core photographs at full size, on demand.
+
+    WHY THIS IS NOT IN THE TICKET. The ticket embeds base64 THUMBNAILS at
+    320x160 -- it has to, because 48-X-28's 184 photographs are 75 MB on disk
+    and 100 MB as base64 in one page, past what a browser will hold. There is
+    therefore nothing in the ticket to enlarge: the big pixels were never sent.
+
+    st.image reads the file from disk at request time instead, so nothing is
+    embedded and nothing is capped. Streamlit puts its own fullscreen control
+    on every image, which is the enlarge: click the icon and the slab fills the
+    screen at native resolution.
+
+    ONE CORE RUN AT A TIME. 184 images in one page is slow whether they are
+    embedded or served, and a core is read run by run anyway.
+    """
+    if engine is None or not uwis:
+        return
+    try:
+        import pandas as _pd
+        from sqlalchemy import text as _text
+    except Exception:
+        return
+
+    frames = []
+    for _u in uwis:
+        try:
+            with engine.connect() as _con:
+                _df = _pd.read_sql(_text("""
+                    SELECT p.uwi, p.core_id, p.photo_type, p.lighting,
+                           p.top_depth, p.base_depth, p.tray_num,
+                           p.file_path, p.file_name,
+                           c.core_num
+                    FROM dataview.dv_well_core_photo p
+                    LEFT JOIN dataview.dv_well_core c
+                           ON c.uwi = p.uwi AND c.core_id = p.core_id
+                    WHERE p.uwi = :u AND p.active_ind = 'Y'
+                    ORDER BY p.top_depth, p.base_depth, p.lighting, p.tray_num
+                """), _con, params={"u": _u})
+            if not _df.empty:
+                frames.append(_df)
+        except Exception:
+            continue
+    if not frames:
+        return
+    photos = _pd.concat(frames, ignore_index=True)
+
+    st.markdown("#### Core photographs")
+    st.caption(
+        "%d photograph(s). Pick a core run, then use the fullscreen control "
+        "on any image to enlarge it." % len(photos))
+
+    def _run_label(r):
+        n = r.get("core_num")
+        cid = r.get("core_id") or "?"
+        return ("Core %d" % int(n)) if _pd.notna(n) and n else str(cid)
+
+    photos["_run"] = photos.apply(_run_label, axis=1)
+    runs = list(dict.fromkeys(photos["_run"].tolist()))
+
+    cols = st.columns([2, 1, 1])
+    # KEY DELIBERATELY NOT "cp_run". _is_action_key() treats anything ending
+    # "_run" as a button -- something whose value cannot be set -- so the
+    # persist loop skips it and the selectbox silently resets on every page
+    # switch. selftest's both-directions sweep caught it; the fix is a name
+    # that does not collide, not an exception list that grows.
+    run = cols[0].selectbox("Core run", runs, key="cp_corerun")
+    sub = photos[photos["_run"] == run]
+
+    kinds = ["All"] + sorted({str(x) for x in sub["photo_type"].dropna()})
+    kind = cols[1].selectbox("Type", kinds, key="cp_kind")
+    if kind != "All":
+        sub = sub[sub["photo_type"].astype(str) == kind]
+
+    lights = ["All"] + sorted({str(x) for x in sub["lighting"].dropna()})
+    light = cols[2].selectbox("Lighting", lights, key="cp_light")
+    if light != "All":
+        sub = sub[sub["lighting"].astype(str) == light]
+
+    # WHITE AND UV ARE THE SAME ROCK. Sorting by depth puts each pair
+    # side by side, which is how they are meant to be compared -- the cut
+    # shows under ultraviolet and not under white light.
+    sub = sub.sort_values(["top_depth", "base_depth", "lighting"],
+                          na_position="last")
+    if sub.empty:
+        st.caption("No photographs match that combination.")
+        return
+
+    missing = 0
+    grid = st.columns(3)
+    shown = 0
+    for _i, r in sub.reset_index(drop=True).iterrows():
+        fp = r.get("file_path") or ""
+        if not fp or not os.path.exists(fp):
+            missing += 1
+            continue
+        td, bd = r.get("top_depth"), r.get("base_depth")
+        if _pd.notna(td) and _pd.notna(bd) and bd:
+            dep = "%.0f-%.0f ft" % (td, bd)
+        elif _pd.notna(td):
+            dep = "%.0f ft" % td
+        else:
+            dep = ""
+        cap = " · ".join(x for x in (dep, str(r.get("photo_type") or ""),
+                                     str(r.get("lighting") or "")) if x)
+        with grid[shown % 3]:
+            try:
+                st.image(fp, caption=cap, use_container_width=True)
+            except Exception as _imgexc:
+                # SAY WHICH FILE. A silently skipped photograph reads as a
+                # core that was never photographed.
+                st.caption("%s: %s" % (r.get("file_name") or fp, _imgexc))
+        shown += 1
+    if missing:
+        st.caption("%d photograph(s) registered but not found on disk."
+                   % missing)
+
+
 def _photos_html(photos_df) -> str:
     if photos_df.empty:
         return "<div style='padding:6px 12px;font-size:12px;color:#999;background:#fff'>No photos registered</div>"
@@ -12697,6 +12815,12 @@ def run(engine=None):
                 st.rerun()
 
             st.markdown(all_html, unsafe_allow_html=True)
+            # The ticket's photos are thumbnails and always will be; this is
+            # where the full-size ones live. See _render_photo_gallery.
+            try:
+                _render_photo_gallery(engine, _summary_uwis)
+            except Exception as _galexc:
+                st.caption("Core photo gallery unavailable: %s" % _galexc)
             if st.button("✕ Close scout ticket", key="close_summary_bottom",
                          use_container_width=True):
                 st.session_state["show_summary"] = False
