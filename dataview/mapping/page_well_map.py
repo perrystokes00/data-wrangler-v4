@@ -9885,8 +9885,26 @@ def run(engine=None):
         if "db_basins" in active_db:
             _add_basins(m, _qry_basins(engine))
         if "db_seismic_3d" in active_db:
-            _msg.info("🟦 Loading 3D seismic surveys…")
-            _add_seismic_3d(m, _qry_seismic_3d(engine))
+            # THE SECOND SEISMIC CHIP, and it has to obey the same choice.
+            # "Clear from map" gated the geography footprints and the 2D lines
+            # and left THIS drawing, because 3D surveys arrive on their own
+            # chip by a different path (FILE_SEIS_HEADER bboxes, not
+            # dv_seis_set.geog). Clearing the seismic and still seeing seismic
+            # reads as a broken button, and the button was fine -- it simply
+            # did not know about this layer.
+            _msc3 = _map_seis_choice()
+            if _msc3["mode"] != "none":
+                _df3 = _qry_seismic_3d(engine)
+                # A PICK NARROWS THIS TOO. Filtering the frame keeps
+                # _add_seismic_3d unchanged and means the survey names the
+                # page offers are the ones that act here.
+                if _msc3["mode"] == "pick" and _msc3["surveys"]:
+                    _keep = set(_msc3["surveys"])
+                    if "survey_name" in _df3.columns:
+                        _df3 = _df3[_df3["survey_name"].astype(str).isin(_keep)]
+                if not _df3.empty:
+                    _msg.info("🟦 Loading 3D seismic surveys…")
+                    _add_seismic_3d(m, _df3)
 
         # ── Native-geography layers (dv_*.geog) via geography_layers module ──
         _geo_keys = {"geo_fields": "fields", "geo_leases": "leases",
