@@ -334,13 +334,24 @@ def _map_seis_choice() -> dict:
     read (it holds the saved places) needs no new store, no polling and
     no JavaScript.
 
-    EMPTY MEANS EVERYTHING. A first-run map with no file, and a page that
-    has never been used, must look exactly like they do today rather than
-    drawing nothing and reading as broken.
+    "mode" is "all", "none" or "pick", and it exists because EMPTY CANNOT
+    MEAN BOTH. Empty lists have to mean everything -- a first-run map with no
+    file must look exactly as it does today rather than drawing nothing and
+    reading as broken -- which left no way to say "draw no seismic at all"
+    from the page. Two different intentions were collapsed into one encoding,
+    so clearing the map from the second screen was impossible.
+
+    A file written before this key existed has no "mode": lists present means
+    it was a deliberate pick, absent means all. So old files keep working and
+    nothing has to be migrated.
     """
     _p = (_load_user_prefs().get(MAP_SEIS_PREF) or {})
-    return {"surveys": [str(x) for x in (_p.get("surveys") or [])],
-            "lines": [str(x) for x in (_p.get("lines") or [])]}
+    _s = [str(x) for x in (_p.get("surveys") or [])]
+    _l = [str(x) for x in (_p.get("lines") or [])]
+    _mode = str(_p.get("mode") or "").lower()
+    if _mode not in ("all", "none", "pick"):
+        _mode = "pick" if (_s or _l) else "all"
+    return {"mode": _mode, "surveys": _s, "lines": _l}
 
 
 def _load_user_prefs() -> dict:
@@ -4440,8 +4451,15 @@ def _render_map_drive(cands):
 
     st.divider()
     st.markdown("#### Drive the map")
-    st.caption("Pick what the map should draw. It takes effect on the map’s "
-               "next render — switch to that window and it is applied.")
+    # SAY WHAT IS IN FORCE. The multiselects show what you are ABOUT to send,
+    # not what the map is doing, and the two differ the moment you touch a
+    # box -- so without this line a cleared map looks identical to a full one.
+    _state = {"all": "every survey", "none": "**nothing** — cleared",
+              "pick": "%d survey(s), %d line(s)"
+                      % (len(_cur["surveys"]), len(_cur["lines"]))
+              }[_cur["mode"]]
+    st.caption("The map is currently drawing %s. Pick below and send — it "
+               "takes effect on the map’s next render." % _state)
     # DEFAULTS FILTERED TO WHAT EXISTS. A stored survey that has since been
     # deleted would otherwise raise inside st.multiselect rather than simply
     # dropping out, and the page would be dead until the file was hand-edited.
@@ -4455,23 +4473,39 @@ def _render_map_drive(cands):
                             help="Empty shows every line of the surveys "
                                  "above. Keyed survey|line because line names "
                                  "repeat between surveys.")
-    _b1, _b2 = st.columns([1, 1])
+    # THREE BUTTONS BECAUSE THERE ARE THREE STATES. With only Send and Show
+    # everything, "none" was unreachable: an empty selection had to mean ALL
+    # (so a never-used page leaves the map alone), which left no way to clear
+    # the seismic from the map at all -- and clearing it is the first thing
+    # you want when you are about to choose what goes back on.
+    def _write(mode, surveys, lines, msg):
+        _p = _load_user_prefs()
+        _p[MAP_SEIS_PREF] = {"mode": mode, "surveys": surveys,
+                             "lines": lines}
+        _save_user_prefs(_p)
+        st.session_state["mapdrive_msg"] = msg
+        st.rerun()
+
+    _b1, _b2, _b3 = st.columns([1.2, 1, 1])
     if _b1.button("✓ Send to map", type="primary", key="mapdrive_save",
                   use_container_width=True):
-        _p = _load_user_prefs()
-        _p[MAP_SEIS_PREF] = {"surveys": _sel_s, "lines": _sel_l}
-        _save_user_prefs(_p)
-        st.session_state["mapdrive_msg"] = (
-            "Map set to %s survey(s) and %s line(s)."
-            % (len(_sel_s) or "all", len(_sel_l) or "all"))
-        st.rerun()
-    if _b2.button("Show everything", key="mapdrive_clear",
+        _write("pick" if (_sel_s or _sel_l) else "all", _sel_s, _sel_l,
+               "Map set to %s survey(s) and %s line(s)."
+               % (len(_sel_s) or "all", len(_sel_l) or "all"))
+    # KEYS END "_btn" BECAUSE THEY ARE BUTTONS. The persist loop self-assigns
+    # every settable key to survive a page switch, and a button cannot be set
+    # -- the assignment raises on a LATER run, on whatever page draws next, so
+    # the crash lands nowhere near here. "mapdrive_none" matched no action
+    # suffix and selftest's both-ways sweep caught it before it ever ran.
+    if _b2.button("✖ Clear from map", key="mapdrive_hide_btn",
+                  use_container_width=True,
+                  help="Draw no seismic at all. The Seismic chip on the map "
+                       "stays as it is; this empties what it would draw."):
+        _write("none", _sel_s, _sel_l,
+               "Seismic cleared from the map.")
+    if _b3.button("Show everything", key="mapdrive_all_btn",
                   use_container_width=True):
-        _p = _load_user_prefs()
-        _p[MAP_SEIS_PREF] = {"surveys": [], "lines": []}
-        _save_user_prefs(_p)
-        st.session_state["mapdrive_msg"] = "Map restored to every survey."
-        st.rerun()
+        _write("all", [], [], "Map restored to every survey.")
     # AFTER the rerun. st.rerun() raises, so anything rendered above it is
     # discarded -- the scar that hid the colour-grid errors for a session.
     _mm = st.session_state.pop("mapdrive_msg", None)
@@ -9876,11 +9910,14 @@ def run(engine=None):
                     elif _geo_keys[_ak] == "seismic":
                         # None, not an empty set, when nothing was chosen:
                         # empty means "the page asked for none" and would
-                        # switch every survey off.
-                        _wanted = _map_seis_choice()["surveys"]
-                        add_geography_layer(
-                            m, engine, "seismic", show=True,
-                            show_names=(set(_wanted) if _wanted else None))
+                        # switch every survey off. That distinction is why
+                        # the choice carries a MODE -- see _map_seis_choice.
+                        _msc = _map_seis_choice()
+                        if _msc["mode"] != "none":
+                            _wanted = _msc["surveys"]
+                            add_geography_layer(
+                                m, engine, "seismic", show=True,
+                                show_names=(set(_wanted) if _wanted else None))
                     else:
                         add_geography_layer(m, engine, _geo_keys[_ak],
                                             show=True)
@@ -9921,7 +9958,12 @@ def run(engine=None):
                     _want_s = set(_sc["surveys"])
                     _want_l = set(_sc["lines"])
                     _groups = {}
-                    for _sl in _seismic_line_paths(engine):
+                    # "none" draws nothing rather than drawing everything
+                    # hidden: a FeatureGroup per survey sitting unticked in
+                    # the layer control still costs the geometry in the
+                    # payload, and the page asked for the map to be clear.
+                    for _sl in ([] if _sc["mode"] == "none"
+                                else _seismic_line_paths(engine)):
                         _sv = str(_sl.get("survey") or "(unnamed survey)")
                         _lk = "%s|%s" % (_sv, _sl.get("line"))
                         if _want_l and _lk not in _want_l:
