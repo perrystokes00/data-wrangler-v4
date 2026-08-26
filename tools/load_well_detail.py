@@ -33,6 +33,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -46,7 +47,6 @@ MUDLOG = os.path.join(
     r"C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler",
     "training", "Teapot_Dome", "DataSets", "Core", "CD Files", "mudlog",
     "48X28.LOG")
-MUD_ID = WELL_NUM + "-MUDLOG1"
 SECTION_FT = 5280.0
 
 
@@ -93,63 +93,41 @@ def _facts(engine):
 
 
 def parse_mudlog(path=MUDLOG):
-    """The ASCII header of a MUD.LOG binary, as a dict. {} if unreadable.
+    """The legal location out of the MUD.LOG header. {} if unreadable.
 
-    READ, NOT TRANSCRIBED. Hard-coding "T39N" would work for this well and
-    quietly mislabel the next one, and the whole point of a loader is that the
-    next CD needs no edit.
+    THE BINARY IS PARSED BY load_mudlog.read_header, NOT HERE. This module
+    used to carry its own reader that swept printable runs out of the first
+    3000 bytes with regexes, and it was wrong in three ways at once: it
+    sorted four separate depth fields and took the min and max (right answer,
+    by luck, and it threw away both elevations), and it stripped a trailing
+    capital off two strings that was really the next record's tag byte.
+
+    The file is tag/length/value. Reading it by tag is not an improvement on
+    the regexes, it is the difference between reading a field and finding a
+    number that looks like one -- so there is one reader, and the loader that
+    owns dv_well_mud_log owns it.
+
+    Reading the same file from two loaders is fine; WRITING a table from two
+    is not. load_mudlog writes the log, this writes the legal location.
     """
     if not os.path.exists(path):
         return {}
-    head = open(path, "rb").read(3000)
-    # THE FIELDS ARE SEPARATE RUNS, and joining them first is what made the
-    # first version wrong twice: "490' FSL" became the top of the logged
-    # interval, and "Gel - Chem Steel - Tensleep" yielded a mud logger
-    # called "Chem Steel". Both looked entirely plausible in the output.
-    # Keeping the runs apart lets a depth be a whole field rather than a
-    # number found inside a sentence.
-    runs = [m.group().decode("ascii", "replace").strip()
-            for m in re.finditer(rb"[ -~]{4,}", head)]
-    runs = [r for r in runs if r]
-    txt = " ".join(runs)
-    out = {"file_path": path, "format": None}
-    m = re.search(r"MUD\.LOG\s+([\w.]+)", txt)
-    if m:
-        out["format"] = m.group(1)
+    from load_mudlog import read_header, T_LOCATION, T_LATLONG
+    hdr = read_header(open(path, "rb").read())
+    out = {"file_path": path}
     m = re.search(r"(\d+)'\s*FSL\s+(\d+)'\s*FWL\s*Sec\.?\s*(\d+),?\s*"
-                  r"T(\d+)\s*([NS]),?\s*R(\d+)\s*([EW])", txt, re.I)
+                  r"T(\d+)\s*([NS]),?\s*R(\d+)\s*([EW])",
+                  hdr.get(T_LOCATION, ""), re.I)
     if m:
         out.update(fsl=float(m.group(1)), fwl=float(m.group(2)),
                    section=int(m.group(3)), township=int(m.group(4)),
-                   township_dir=m.group(5).upper(), range_num=int(m.group(6)),
-                   range_dir=m.group(7).upper())
-    m = re.search(r"Lat\s+([\d.]+)\s+Long\s+(-?[\d.]+)", txt)
+                   township_dir=m.group(5).upper(),
+                   range_num=int(m.group(6)), range_dir=m.group(7).upper())
+    m = re.search(r"Lat\s+([\d.]+)\s+Long\s+(-?[\d.]+)",
+                  hdr.get(T_LATLONG, ""))
     if m:
+        # Teapot Dome is west of Greenwich; the header omits the sign.
         out.update(lat=float(m.group(1)), lon=-abs(float(m.group(2))))
-    # A DEPTH IS A WHOLE FIELD, not a number inside one. Only runs that are
-    # entirely a depth count, so the footages in the location line cannot
-    # be mistaken for the top of the log.
-    deps = sorted({float(r[:-1]) for r in runs
-                   if re.fullmatch(r"\d+(\.\d+)?'", r)})
-    if len(deps) >= 2:
-        out.update(top_depth=deps[0], base_depth=deps[-1])
-    m = re.search(r"(Gel\s*-\s*\w+)", txt, re.I)
-    if m:
-        out["mud_type"] = m.group(1)
-    # THE NAME FOLLOWS THE OPERATOR, positionally. Searching the whole
-    # header for "Firstname Lastname" finds "Chem Steel" out of the mud
-    # type first -- a wrong name that reads perfectly well. Kept as text
-    # because dv_business_associate is empty, and inventing a BA id to
-    # satisfy an FK would be worse than a remark.
-    for i, r in enumerate(runs):
-        if r.upper().startswith("RMOTC") and i + 1 < len(runs):
-            cand = runs[i + 1]
-            # Trailing single capitals are field terminators in this
-            # format ("Mark MillikenQ"), not part of the name.
-            cand = re.sub(r"[A-Z]$", "", cand).strip()
-            if re.fullmatch(r"[A-Z][a-z]+ [A-Z][a-z]+", cand):
-                out["logger"] = cand
-            break
     return out
 
 
@@ -183,19 +161,6 @@ def build(f, mud):
             "footage_1": mud["fsl"], "footage_2": mud["fwl"],
             "principal_meridian": "6TH", "source": "MUDLOG"}))
 
-    # -- the mud log itself ---------------------------------------------
-    if mud:
-        out.append(("dv_well_mud_log", {
-            "uwi": uwi, "mud_log_id": MUD_ID,
-            "log_date": datetime.date(2004, 5, 18),
-            "top_depth": mud.get("top_depth"), "base_depth": mud.get("base_depth"),
-            "depth_ouom": "FT", "mud_type": mud.get("mud_type"),
-            "file_path": mud["file_path"],
-            "remark": "MUD.LOG %s binary; header parsed. Mud logger: %s. "
-                      "Curves are in the vendor format and not extracted."
-                      % (mud.get("format") or "?", mud.get("logger") or "n/a"),
-            "source": "MUDLOG"}))
-
     # -- aliases: the names this well is actually called ----------------
     for i, (nm, typ) in enumerate([
             ("48-X-28", "OPERATOR"), ("48X28", "OPERATOR"),
@@ -205,38 +170,6 @@ def build(f, mud):
             "alias_name": nm, "alias_type": typ,
             "remark": "spelling seen in the RMOTC source documents",
             "source": "OPERATOR"}))
-
-    # -- shows: SYNTHETIC, hung off the real mud log, in cored sand -----
-    si = 0
-    for nm, t, _sid, _iid in tops:
-        if "SANDSTONE" not in nm.upper() or "TENSLEEP" not in nm.upper():
-            continue
-        b = next((d for _n, d, _s, _i in tops if d > t + 0.5), None)
-        if b is None:
-            continue
-        if not any(ct < b and cb > t for ct, cb in f["cores"]):
-            continue                     # only where there is core to justify it
-        si += 1
-        inside = [p for p in plugs if t <= p[0] <= b and p[1]]
-        phi = (sum(p[1] for p in inside) / len(inside)) if inside else None
-        strong = bool(phi and phi > 0.08)
-        out.append(("dv_well_shows", {
-            "uwi": uwi, "mud_log_id": MUD_ID,
-            "show_id": "%s-SHOW%d" % (WELL_NUM, si),
-            "show_type": "OIL" if strong else "TRACE OIL",
-            "show_rating": "GOOD" if strong else "POOR",
-            "top_depth": t, "base_depth": b, "depth_ouom": "FT",
-            "strat_unit_name": nm, "lithology": "SANDSTONE",
-            "total_gas_units": 320.0 if strong else 65.0,
-            "c1_pct": 78.0, "c2_pct": 11.0, "c3_pct": 6.0,
-            "ic4_pct": 1.8, "nc4_pct": 2.1, "ic5_pct": 0.6, "nc5_pct": 0.5,
-            "fluorescence_color": "GOLD" if strong else "DULL YELLOW",
-            "fluorescence_intensity": "BRIGHT" if strong else "WEAK",
-            "cut_color": "STRAW",
-            "remark": "SYNTHETIC show; interval and rating follow the measured "
-                      "core porosity (%s) in cored rock"
-                      % (("%.1f%%" % (phi * 100)) if phi else "no plug"),
-            "source": "SYNTH"}))
 
     # -- pressures: SYNTHETIC, but equal to the DST already loaded ------
     pi = 0
@@ -351,9 +284,11 @@ def _remove(engine, uwi):
     from sqlalchemy import text
     gone = Counter()
     with engine.begin() as c:
-        # shows hang off the mud log, so they go first.
-        for t in ["dv_well_shows", "dv_well_mud_log", "dv_well_pressure",
-                  "dv_strat_interval", "dv_well_alias", "dv_well_legal"]:
+        # dv_well_shows and dv_well_mud_log are NOT here: load_mudlog.py
+        # owns them now, and a --remove that deleted another loader's
+        # tables would undo work this run never did.
+        for t in ["dv_well_pressure", "dv_strat_interval",
+                  "dv_well_alias", "dv_well_legal"]:
             gone[t] = c.execute(text(
                 "DELETE FROM dataview.[%s] WHERE uwi = :u AND row_created_by = :b"
                 % t), {"u": uwi, "b": BY}).rowcount
@@ -385,26 +320,32 @@ def main(argv=None):
 
     mud = parse_mudlog()
     if not mud:
-        print("No mud log at %s -- legal and mud log will be skipped." % MUDLOG)
+        print("No mud log at %s -- the legal location will be skipped."
+              % MUDLOG)
     else:
-        print("Mud log header : MUD.LOG %s" % (mud.get("format") or "?"))
+        # Only what this loader actually reads. The logged interval, mud
+        # type and mud logger are load_mudlog's to report; printing them
+        # here from a dict that no longer carries them showed
+        # "MUD.LOG ?" and "None - None ft", which reads as a parse
+        # failure rather than a field that moved.
+        print("Legal location, from the MUD.LOG header (read by tag)")
         if "section" in mud:
             q1, q2 = _quarter(mud["fsl"], mud["fwl"])
-            print("  legal        : %s%s Sec %d T%d%s R%d%s  (%.0f' FSL, %.0f' FWL)"
+            print("  legal        : %s%s Sec %d T%d%s R%d%s"
+                  "  (%.0f' FSL, %.0f' FWL)"
                   % (q1, q2, mud["section"], mud["township"],
                      mud["township_dir"], mud["range_num"], mud["range_dir"],
                      mud["fsl"], mud["fwl"]))
-        print("  logged        : %s - %s ft, %s"
-              % (mud.get("top_depth"), mud.get("base_depth"),
-                 mud.get("mud_type")))
-        print("  mud logger    : %s" % (mud.get("logger") or "n/a"))
+        if "lat" in mud:
+            print("  header coords: %.6f, %.6f" % (mud["lat"], mud["lon"]))
+        print("  the mud log itself: python tools/load_mudlog.py")
     rows = build(f, mud)
     from collections import Counter
     n = Counter(t for t, _d in rows)
     print()
     for t in sorted(n):
-        real = "real" if t in ("dv_well_legal", "dv_well_mud_log",
-                               "dv_well_alias") else "synthetic"
+        real = ("real" if t in ("dv_well_legal", "dv_well_alias")
+                else "synthetic")
         print("   %-24s %5d   %s" % (t, n[t], real))
     print("   %-24s %5d" % ("TOTAL", sum(n.values())))
     if not a.apply:
