@@ -10401,7 +10401,20 @@ def run(engine=None):
                                    f"<br><span style='font-size:10px;"
                                    f"word-break:break-all'>"
                                    f"{_popup_safe(_sl['file'])}</span>"
-                                   if _sl.get("file") else ""),
+                                   if _sl.get("file") else "")
+                                # SAY WHERE THE SECTION WENT. This popup IS
+                                # the successful click -- printing the path
+                                # is how the file travels back to Python --
+                                # but a white box appearing over the map
+                                # reads as something getting IN THE WAY, and
+                                # the section it just opened is off-screen
+                                # below the map. Reported as "it draws a box
+                                # when I click on a line", which cost an
+                                # afternoon of looking for a drawing tool.
+                                + "<br><span style='font-size:10px;"
+                                  "color:#0f766e'>&#9660; section opening "
+                                  "in the Seismic panel below the map"
+                                  "</span>",
                                 max_width=320),
                         ).add_to(_groups[_sv])
                         folium.PolyLine(
@@ -10421,7 +10434,20 @@ def run(engine=None):
                                    f"<br><span style='font-size:10px;"
                                    f"word-break:break-all'>"
                                    f"{_popup_safe(_sl['file'])}</span>"
-                                   if _sl.get("file") else ""),
+                                   if _sl.get("file") else "")
+                                # SAY WHERE THE SECTION WENT. This popup IS
+                                # the successful click -- printing the path
+                                # is how the file travels back to Python --
+                                # but a white box appearing over the map
+                                # reads as something getting IN THE WAY, and
+                                # the section it just opened is off-screen
+                                # below the map. Reported as "it draws a box
+                                # when I click on a line", which cost an
+                                # afternoon of looking for a drawing tool.
+                                + "<br><span style='font-size:10px;"
+                                  "color:#0f766e'>&#9660; section opening "
+                                  "in the Seismic panel below the map"
+                                  "</span>",
                                 max_width=320),
                         ).add_to(_groups[_sv])
                     for _fg in _groups.values():
@@ -11187,16 +11213,33 @@ def run(engine=None):
 
                     // THE MODE SURVIVES A PICK, so several lines can be
                     // collected in a row -- that is the point of a mode.
-                    // It was disarmed on the first popup because leaving
-                    // it armed makes every marker unclickable, which reads
-                    // as a frozen map; the amber button and the pointer
-                    // cursor carry that instead, and one click clears it.
                     //
                     // Python cannot see this mode -- it lives in the
                     // browser precisely so arming costs no rerun -- so it
                     // cannot know whether to add or replace. It ALWAYS
                     // adds, and the panel offers Clear. That way the two
                     // halves never disagree about what is selected.
+
+                    // CLICK, CLICK, CLICK -- NO POPUP IN THE WAY. The popup
+                    // cannot simply be removed: streamlit-folium reports
+                    // last_object_clicked_popup, the popup TEXT, and that
+                    // is the only channel carrying which SEG-Y was hit. It
+                    // also has a second job -- a click WITHOUT popup text
+                    // falls through to the grid-cell toggler, so a silent
+                    // line would start selecting H3 cells underneath it.
+                    //
+                    // So it still opens, and closes again in the same
+                    // frame. Leaflet has already written the content by
+                    // popupopen, which is what streamlit-folium reads.
+                    // Only while a picker is ARMED: outside that mode a
+                    // popup is the useful thing a click gives you.
+                    mapInst.on("popupopen", function(e) {
+                        if (!mode) { return; }
+                        setTimeout(function() {
+                            try { mapInst.closePopup(e.popup); }
+                            catch (err) { /* already gone */ }
+                        }, 0);
+                    });
                 }
                 install();
             })();
