@@ -1352,6 +1352,45 @@ def tier_units(res, verbose=False):
     check("specialised loaders: one writer per table, and all importable",
           _one_writer_per_table)
 
+    # 19c. NO DOUBLED CARRIAGE RETURNS. file_viewer.py was committed with
+    #      1,185 of its 1,287 lines ending \r\r\n -- a CRLF written
+    #      into a file that already had one, which is what a tool does when
+    #      it opens a CRLF file in text mode on Windows and writes its own
+    #      line endings.
+    #
+    #      IT SURVIVED BECAUSE THE OBVIOUS CHECK CANNOT SEE IT. The
+    #      line-ending test this codebase uses is count(CRLF) against total
+    #      newlines, and that PASSES on a doubled file: every LF still has a
+    #      CR in front of it. Same shape as the invariant keyed on
+    #      FILE_NAME -- right question, wrong key. Python's universal
+    #      newlines swallow the extra CR, so nothing ever failed; the file
+    #      simply grew another CR every time a tool rewrote it.
+    def _no_doubled_carriage_returns():
+        root = os.path.dirname(os.path.abspath(__file__))
+        doubled = bytes([13, 13, 10])
+        bad = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in (".venv", ".git", "__pycache__",
+                                        "node_modules", "_attic")]
+            for name in filenames:
+                if not name.endswith(".py"):
+                    continue
+                p = os.path.join(dirpath, name)
+                try:
+                    data = open(p, "rb").read()
+                except OSError:
+                    continue
+                n = data.count(doubled)
+                if n:
+                    bad.append("%s (%d lines)"
+                               % (os.path.relpath(p, root), n))
+        assert not bad, (
+            "doubled carriage returns in: " + ", ".join(bad)
+            + " -- collapse them with re.sub of one-or-more CR before LF")
+    check("no .py file has doubled carriage returns",
+          _no_doubled_carriage_returns)
+
     # 20. NO st.expander INSIDE ANOTHER ONE. Streamlit raises
     #     StreamlitAPIException ("Expanders may not be nested inside other
     #     expanders"), and an expander's body executes whether or not it is
