@@ -43,6 +43,48 @@ WITSML_EXTS = {".xml"}
 JSON_LOG_EXTS = {".json"}
 LOG_EXTS    = LAS_EXTS | DLIS_EXTS | LIS_EXTS
 
+# MUD LOGS. Catalogued for IDENTITY ONLY -- the catalog has no extractor for a
+# MUD.LOG binary and is not getting one; tools/load_mudlog.py owns that format
+# and writes dv_well_mud_log directly. What the catalog row buys is an
+# INVENTORY_ID, so those dv_ rows can name the file they came from and
+# promotion_lineage can answer "did this file's data reach the database".
+#
+# DELIBERATELY NOT IN ALL_EXTS. ".log" is the most generic extension on a
+# Windows machine -- every application writes one -- so a blank Formats-to-scan
+# box must not walk them. It is in KNOWN_EXTS instead: opt-in by typing it,
+# which is the same shape as the tabular exclusion and for the same reason.
+#
+# _extract_fields returns a skip_reason for these, so they land with
+# HEADER_EXTRACTED='S' and DRAIN. Without that they would sit pending forever
+# and make a finished run look unfinished -- exactly the failure TABULAR_EXTS
+# exists to prevent.
+MUDLOG_EXTS = {".log"}
+
+# THE SHAPE OF A SKIPPED FILE, in one place. _extract_fields has two ways to
+# decline a file -- too large, and a format the catalog does not own -- and
+# both must return every key the caller reads or the caller gets a KeyError
+# instead of a skip. Two hand-written copies of a 25-key dict is two things
+# that must agree; this is one.
+_EMPTY_FIELDS = {
+    "file_category": "UNKNOWN",
+    "report_type":   "UNKNOWN",
+    "confidence":    0.0,
+    "uwi": None, "well_name": None, "operator": None,
+    "well_field": None, "state": None, "county": None,
+    "latitude": None, "longitude": None,
+    "total_depth": None, "spud_date": None,
+    "rig_release": None, "survey_type": None,
+    "contractor": None,
+    "survey_name": None, "line_name": None,
+    "seis_set_type": None, "survey_date": None,
+    "bbox_min_lat": None, "bbox_max_lat": None,
+    "bbox_min_lon": None, "bbox_max_lon": None,
+    "epsg_code": None, "sample_interval": None,
+    "trace_count": None, "shot_first": None,
+    "shot_last": None,
+    "skip_reason": None,
+}
+
 
 def _clean_survey_name(raw: str) -> str:
     """Strip volume/acquisition metadata from a SEG-Y survey name so the same
@@ -398,6 +440,16 @@ def _extract_fields(fpath: str, fext: str) -> dict:
     for skip_reason before attempting any further processing. Skipped files
     are written with HEADER_EXTRACTED='S' so they are not re-attempted.
     """
+    # ── Mud logs: catalogued for identity, never extracted here ──────────
+    # tools/load_mudlog.py owns this format. The catalog row exists so the
+    # dv_well_mud_log rows have an INVENTORY_ID to cite; there is nothing for
+    # the catalog to parse. Skipped BEFORE the size gate so it is reported as
+    # what it is rather than as TOO_LARGE.
+    if fext in MUDLOG_EXTS:
+        return dict(_EMPTY_FIELDS,
+                    skip_reason="MUD_LOG: owned by tools/load_mudlog.py, "
+                                "catalogued for identity only")
+
     # ── Size gate — check before ANY extraction attempt ───────────────────────
     # Large files can hang extractors that parse entire file structures
     # (openpyxl XML parse, pdfplumber on scanned PDFs). Check file size
@@ -419,28 +471,9 @@ def _extract_fields(fpath: str, fext: str) -> dict:
         try:
             _size_mb = Path(fpath).stat().st_size / (1024 * 1024)
             if _size_mb > _limit_mb:
-                return {
-                    "file_category": "UNKNOWN",
-                    "report_type":   "UNKNOWN",
-                    "confidence":    0.0,
-                    "uwi": None, "well_name": None, "operator": None,
-                    "well_field": None, "state": None, "county": None,
-                    "latitude": None, "longitude": None,
-                    "total_depth": None, "spud_date": None,
-                    "rig_release": None, "survey_type": None,
-                    "contractor": None,
-                    "survey_name": None, "line_name": None,
-                    "seis_set_type": None, "survey_date": None,
-                    "bbox_min_lat": None, "bbox_max_lat": None,
-                    "bbox_min_lon": None, "bbox_max_lon": None,
-                    "epsg_code": None, "sample_interval": None,
-                    "trace_count": None, "shot_first": None,
-                    "shot_last": None,
-                    "skip_reason": (
-                        f"TOO_LARGE: {_size_mb:.1f} MB exceeds "
-                        f"{_limit_mb} MB limit for {fext}"
-                    ),
-                }
+                return dict(_EMPTY_FIELDS, skip_reason=(
+                    f"TOO_LARGE: {_size_mb:.1f} MB exceeds "
+                    f"{_limit_mb} MB limit for {fext}"))
         except OSError:
             pass  # Can't stat — let extraction proceed and fail naturally
     fields = {
@@ -1433,6 +1466,7 @@ for e in CSV_EXTS:      EXT_GROUP[e] = "CSV / Table"
 for e in IMAGE_EXTS:    EXT_GROUP[e] = "Image"
 for e in WITSML_EXTS:   EXT_GROUP[e] = "WITSML"
 for e in JSON_LOG_EXTS: EXT_GROUP[e] = "OSDU / JSON Well Log"
+for e in MUDLOG_EXTS:   EXT_GROUP[e] = "Mud Log"
 
 
 # Extensions whose loader parses the file itself (it resolves the well +

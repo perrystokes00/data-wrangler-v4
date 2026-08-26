@@ -22,6 +22,7 @@ from datetime import datetime
 from dataview.file_catalog.extract_core import (
     PDF_EXTS, LAS_EXTS, DLIS_EXTS, LIS_EXTS, SEGY_EXTS, P190_EXTS, SHP_EXTS,
     OFFICE_EXTS, CSV_EXTS, IMAGE_EXTS, WITSML_EXTS, JSON_LOG_EXTS, LOG_EXTS,
+    MUDLOG_EXTS,
     _extract_fields,
 )
 
@@ -50,7 +51,17 @@ ALL_EXTS = (PDF_EXTS | LOG_EXTS | SEGY_EXTS | P190_EXTS |
 # exactly how 167 dead .csv rows got inventoried. Typing one now gets an
 # explicit redirect to the Bulk Tabular Loader instead of silently arming a
 # scan that cannot finish.
-KNOWN_EXTS = ALL_EXTS
+#
+# MUD LOGS ARE THE ONE THING THAT IS KNOWN BUT NOT DEFAULT. ".log" is the most
+# generic extension on a Windows machine, so walking it by default would
+# inventory every application log on the drive -- but a mud log needs a catalog
+# row to have an INVENTORY_ID, which is what lets dv_well_mud_log name the file
+# its rows came from. So it is opt-in: type it in the Formats-to-scan box and
+# the scan takes it. Unlike the tabular types it is ACCEPTED rather than
+# redirected, because there IS somewhere for it to go -- extract_core skips it
+# with a reason, so it lands HEADER_EXTRACTED='S' and drains, and
+# tools/load_mudlog.py reads the file itself.
+KNOWN_EXTS = ALL_EXTS | MUDLOG_EXTS
 
 # The capture path lives in extract_core (streamlit-free) so pipeline_run
 # can import it without dragging the UI into the CLI or the process pool.

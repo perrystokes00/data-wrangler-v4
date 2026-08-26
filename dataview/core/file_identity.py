@@ -96,6 +96,67 @@ def inventory_id(path: str) -> str:
     ).hexdigest().upper()
 
 
+def catalogued_inventory_id(engine, path, schema="file_catalog",
+                            table="GLOBAL_FILE_CATALOG"):
+    """(inventory_id, reason) for a file that is IN the catalog.
+
+    Returns (id, None) when the catalog holds this file, and (None, reason)
+    when it does not. A caller that gets None must leave INVENTORY_ID NULL and
+    SAY SO -- never fall back to the computed id.
+
+    LOOK UP, DO NOT MINT. That distinction is the whole point of this
+    function. inventory_id() above will happily return forty hex characters
+    for any string, and a dv_ row stamped with an id no catalog row carries is
+    an ORPHAN: it names a source that cannot be resolved, which reads as
+    provenance right up until someone follows it. That is not hypothetical
+    here -- doubled backslashes from a csv escapechar once left 1,317 dv_well
+    rows citing a source nothing could find, because the id was minted from
+    one spelling of the path and the FILE_PATH written with another.
+
+    So the id is computed AND verified. If the computed id is absent but the
+    PATH is present, the two definitions have drifted and that is reported as
+    its own reason rather than papered over -- a silent fallback to whatever
+    the catalog stored would hide exactly the bug this module exists to
+    prevent.
+    """
+    from sqlalchemy import text as _t
+    iid = inventory_id(path)
+    with engine.connect() as c:
+        hit = c.execute(_t(
+            "SELECT TOP 1 INVENTORY_ID FROM [%s].[%s] WHERE INVENTORY_ID = :i"
+            % (schema, table)), {"i": iid}).fetchone()
+        if hit:
+            return str(hit[0]), None
+        # Not found by id. Is the FILE there under a different id?
+        by_path = c.execute(_t(
+            "SELECT TOP 1 INVENTORY_ID FROM [%s].[%s] WHERE FILE_PATH = :p"
+            % (schema, table)), {"p": str(path)}).fetchone()
+    if by_path:
+        return None, ("the catalog holds this path under INVENTORY_ID %s but "
+                      "the canonical id is %s -- the two definitions have "
+                      "drifted; run reconcile_orphans"
+                      % (str(by_path[0])[:12] + "...", iid[:12] + "..."))
+    return None, "not in the file catalog -- scan it first"
+
+
+def catalogued_id_set(engine, schema="file_catalog",
+                      table="GLOBAL_FILE_CATALOG"):
+    """Every INVENTORY_ID the catalog holds, as a set.
+
+    The batch form of catalogued_inventory_id, for a loader stamping hundreds
+    of rows from hundreds of files -- 184 core photographs are 184 separate
+    files, and asking the database once per photograph is 184 round trips to
+    answer a question one query answers. Membership in this set is the same
+    verification: compute the canonical id, and cite it only if the catalog
+    has it.
+    """
+    from sqlalchemy import text as _t
+    with engine.connect() as c:
+        return {str(r[0]) for r in c.execute(_t(
+            "SELECT INVENTORY_ID FROM [%s].[%s] WHERE INVENTORY_ID IS NOT NULL"
+            % (schema, table)))}
+
+
 if __name__ == "__main__":       # sanity check: python -m dataview.core.file_identity
     import sys
     # Verified against WINDOWS path rules explicitly, so this proves the

@@ -365,6 +365,15 @@ def build(engine, path):
     recs = read_records(data)
     uwi, tops = _facts(engine)
 
+    # THE FILE THESE ROWS CAME FROM, by the catalog's own id. This is what
+    # promotion_lineage tests: a file's data reached the database when its
+    # INVENTORY_ID turns up in a dv_ table. Looked up, never minted -- an id
+    # the catalog does not carry is an orphan that reads as provenance until
+    # someone follows it. NULL when the file is not catalogued, and main()
+    # says so rather than letting it pass silently.
+    from dataview.core.file_identity import catalogued_inventory_id
+    inv, inv_why = catalogued_inventory_id(engine, path)
+
     samples = sorted([r for r in recs if r[1] == TRACK_SAMPLE])
     events = sorted([r for r in recs if r[1] in TRACK_EVENTS])
 
@@ -403,6 +412,7 @@ def build(engine, path):
         "mud_type": hdr.get(T_MUD),
         "file_path": path,
         "remark": " ".join(remark),
+        "INVENTORY_ID": inv,
         "source": SRC}))
 
     # -- the shows -----------------------------------------------------
@@ -429,9 +439,10 @@ def build(engine, path):
                       "above (logger's depth): %s"
                       % (txt[:300], ", ".join(ev),
                          _unit_at(tops, depth) or "none"),
+            "INVENTORY_ID": inv,
             "source": SRC}))
     rows.extend(shows)
-    return rows, hdr, samples, events, shows
+    return rows, hdr, samples, events, shows, inv, inv_why
 
 
 # --------------------------------------------------------------------------
@@ -520,7 +531,7 @@ def main(argv=None):
 
     if not os.path.exists(a.path):
         raise SystemExit("No such file: %s" % a.path)
-    rows, hdr, samples, events, shows = build(engine, a.path)
+    rows, hdr, samples, events, shows, inv, inv_why = build(engine, a.path)
 
     print("MUD.LOG header, read by tag")
     print("   well          : %s" % hdr.get(T_WELL))
@@ -537,6 +548,15 @@ def main(argv=None):
     print()
     print("   %d sample descriptions, %d drilling events"
           % (len(samples), len(events)))
+    if inv:
+        print("   INVENTORY_ID  : %s (from the file catalog)" % inv)
+    else:
+        # LOUD, because rows that cite no file are invisible to lineage --
+        # promotion_lineage reports them as "Nothing", which is the one state
+        # that means real failure.
+        print("   INVENTORY_ID  : NULL -- %s" % inv_why)
+        print("                   These rows will not be traceable to the "
+              "file. Scan it with --exts .log to fix.")
     print()
 
     if a.show_all:

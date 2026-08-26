@@ -337,6 +337,46 @@ def write(engine, uwi, cores, rows, samples=()):
             "SELECT COUNT(*) FROM dataview.[%s] WHERE uwi = :u" % t),
             {"u": uwi}).scalar() for t in _TABLES}
     with engine.begin() as c:
+        # THE FILE EACH ROW CAME FROM, by the catalog's own id. This is what
+        # promotion_lineage tests -- a file's data reached the database when
+        # its INVENTORY_ID turns up in a dv_ table -- and without it these
+        # rows report as "Nothing", the one state that means real failure.
+        # dv_well_core and dv_well_core_sample were already NAMED in LINEAGE
+        # and still answered Nothing for 124 real rows, because being listed
+        # is only half the test: the row has to cite the file.
+        #
+        # VERIFIED, NOT MINTED. inventory_id() returns forty hex characters
+        # for any string; citing one the catalog does not carry is an orphan
+        # that reads as provenance until someone follows it. Membership in
+        # this set is the check, fetched once rather than per photograph.
+        from dataview.core.file_identity import (inventory_id,
+                                                 catalogued_id_set)
+        _known_ids = catalogued_id_set(engine)
+
+        def _inv(path):
+            i = inventory_id(path)
+            return i if i in _known_ids else None
+
+        _acct = os.path.join(CD, "CORE ACCOUNTING.xls")
+        _inv_acct = _inv(_acct)
+        _inv_pp = _inv(os.path.join(CD, PP_BOOK))
+        # A DIAGNOSTIC THAT IS NOT PRINTED IS NOT A DIAGNOSTIC. The first
+        # version of this computed the misses and dropped them, so 124 rows
+        # loaded with a NULL INVENTORY_ID and the run reported success --
+        # which is the same shape as the swallowed exception that made a
+        # broken query look like an empty result.
+        #
+        # These two workbooks are .xls, and .xls is in TABULAR_EXTS, which the
+        # File Catalog refuses outright. So they have no catalog row and these
+        # rows cannot name their source. That is a real gap, and it is said
+        # out loud rather than left for a report to discover.
+        for _lbl, _got in (("CORE ACCOUNTING.xls", _inv_acct),
+                           ("the P&P workbook", _inv_pp)):
+            if _got is None:
+                print("   NOTE: %s is not in the file catalog (.xls is "
+                      "excluded), so those rows carry no INVENTORY_ID and "
+                      "promotion_lineage cannot see them." % _lbl)
+
         _before = _counts(c)
         for cr in cores:
             # A SKIPPED "IF NOT EXISTS" RETURNS -1, NOT 0. Summing it made a
@@ -349,16 +389,16 @@ def write(engine, uwi, cores, rows, samples=()):
                       (uwi, core_id, core_num, top_depth, base_depth,
                        depth_ouom, core_length, recovery_length, recovery_pct,
                        length_ouom, core_date, strat_unit_name, active_ind,
-                       source, row_created_by)
+                       source, INVENTORY_ID, row_created_by)
                 VALUES (:u, :cid, :num, :top, :base, 'FT', :cut, :rec, :pct,
-                        'FT', :dt, :lith, 'Y', :src, :by)"""),
+                        'FT', :dt, :lith, 'Y', :src, :inv, :by)"""),
                 {"u": uwi, "cid": core_id(cr["num"]), "num": cr["num"],
                  "top": cr["top"], "base": cr["base"], "cut": cr["cut"],
                  "rec": cr["rec"],
                  "pct": (100.0 * cr["rec"] / cr["cut"]
                          if cr["cut"] and cr["rec"] else None),
                  "dt": cr["date"], "lith": cr["lith"],
-                 "src": SOURCE, "by": CREATED_BY})
+                 "src": SOURCE, "inv": _inv_acct, "by": CREATED_BY})
         for r in rows:
             w, h, dpi, kb, sha = _image_meta(r["f"])
             nm = os.path.basename(r["f"])
@@ -373,10 +413,10 @@ def write(engine, uwi, cores, rows, samples=()):
                        top_depth, base_depth, depth_ouom, tray_num, photo_date,
                        file_path, file_name, file_ext, file_size_kb, file_hash,
                        resolution_dpi, width_px, height_px, active_ind,
-                       remark, source, row_created_by)
+                       remark, source, INVENTORY_ID, row_created_by)
                 VALUES (:u, :cid, :pid, :pt, :lt, :top, :base, 'FT', :tray,
                         :dt, :fp, :fn, :ext, :kb, :sha, :dpi, :w, :h, 'Y',
-                        :rm, :src, :by)"""),
+                        :rm, :src, :inv, :by)"""),
                 {"u": uwi, "cid": core_id(r["core"]["num"]), "pid": sha[:40],
                  "pt": r["photo_type"], "lt": r["lighting"],
                  "top": r["top"], "base": r["base"], "tray": r["tray"],
@@ -386,7 +426,8 @@ def write(engine, uwi, cores, rows, samples=()):
                  "rm": "core %d %s; photo date from %s"
                        % (r["core"]["num"], r["core"]["lith"] or "",
                           r["date_src"]),
-                 "src": SOURCE, "by": CREATED_BY})
+                 # each photograph is its own file, so its own id
+                 "src": SOURCE, "inv": _inv(r["f"]), "by": CREATED_BY})
         for s in samples:
             v = s["vals"]
             def _pc(x):
@@ -403,9 +444,10 @@ def write(engine, uwi, cores, rows, samples=()):
                        depth_ouom, porosity_frac, permeability_air_md,
                        permeability_klinkenberg_md, grain_density_g_cc,
                        water_saturation_frac, oil_saturation_frac,
-                       active_ind, remark, source, row_created_by)
+                       active_ind, remark, source, INVENTORY_ID,
+                       row_created_by)
                 VALUES (:u, :cid, :sid, :st, :dep, 'FT', :phi, :ka, :kk,
-                        :rho, :sw, :so, 'Y', :rm, :src, :by)"""),
+                        :rho, :sw, :so, 'Y', :rm, :src, :inv, :by)"""),
                 {"u": uwi, "cid": core_id(s["core"]["num"]),
                  "sid": s["sample_id"], "st": s["orient"],
                  "dep": s["depth"], "phi": _pc(v.get("porosity_pct")),
@@ -413,7 +455,7 @@ def write(engine, uwi, cores, rows, samples=()):
                  "rho": v.get("grain_density"),
                  "sw": _pc(v.get("sw_pct")), "so": _pc(v.get("so_pct")),
                  "rm": s["remark"] or None,
-                 "src": SOURCE_LAB, "by": CREATED_BY})
+                 "src": SOURCE_LAB, "inv": _inv_pp, "by": CREATED_BY})
         # The rollups the core table keeps for the photos beneath it.
         c.execute(text("""
             UPDATE k SET photo_count = x.n,

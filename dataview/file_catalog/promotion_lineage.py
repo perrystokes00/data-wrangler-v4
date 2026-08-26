@@ -118,6 +118,30 @@ LINEAGE = (
     ("cat_land_tract",          "dv_land_tract",          "lease"),
     ("cat_pipeline",            "dv_pipeline",            "pipeline"),
     ("cat_log_curve",           "dv_log_curve",           "log_curve"),
+
+    # ── ADDED 26 Aug — THE SPECIALISED LOADERS ──────────────────────────────
+    # cat_ is None: these tables have no staging half and never will. They are
+    # written directly by the loaders in dataview/import_data/special_loaders.py
+    # (core, mud log, well detail), which parse formats the File Catalog has no
+    # extractor for -- a slabbed core photograph keyed by its filename, a
+    # four-row stacked lab header, a MUD.LOG 4.4b binary. A cat_ mirror for any
+    # of these would be a table that never holds a row, and cat_ is a DRAIN:
+    # an always-empty mirror is a fifth thing in the four-lists-that-must-agree
+    # with nothing ever in it. None is the existing answer for exactly this
+    # shape -- it is what logs and seismic already do.
+    #
+    # dv_well_core and dv_well_core_sample are NOT here because they are
+    # already named above, which is how this gap was found: they were in
+    # LINEAGE, being reported, and answering "Nothing" for 124 real rows
+    # because the loader never wrote their INVENTORY_ID. The pair being listed
+    # is only half of the test; the rows have to cite the file.
+    (None,                      "dv_well_core_photo",     "core_photo"),
+    (None,                      "dv_well_mud_log",        "mudlog"),
+    (None,                      "dv_well_shows",          "shows"),
+    (None,                      "dv_well_legal",          "legal"),
+    (None,                      "dv_well_alias",          "alias"),
+    (None,                      "dv_well_pressure",       "pressure"),
+    (None,                      "dv_strat_interval",      "strat_interval"),
 )
 
 CAT_SCHEMA = "file_catalog"

@@ -146,7 +146,16 @@ def _quarter(fsl, fwl):
     return q1, q2
 
 
-def build(f, mud):
+def build(f, mud, inv=None):
+    """inv is the INVENTORY_ID of the mud log, or None.
+
+    ONLY THE ROWS THAT CAME FROM THE FILE CITE IT. The legal location and the
+    aliases are read out of the MUD.LOG header, so they name it. The pressures
+    and the strat intervals are SYNTHETIC, derived from DST readings and
+    formation picks already in the database -- they came from no file, and
+    stamping them with the mud log's id would claim a provenance they do not
+    have. A wrong source is worse than a missing one: it survives every check
+    that looks for NULL."""
     uwi, tops, plugs = f["uwi"], f["tops"], f["plugs"]
     out = []
 
@@ -159,7 +168,8 @@ def build(f, mud):
             "township_dir": mud["township_dir"], "range_num": mud["range_num"],
             "range_dir": mud["range_dir"], "quarter_1": q1, "quarter_2": q2,
             "footage_1": mud["fsl"], "footage_2": mud["fwl"],
-            "principal_meridian": "6TH", "source": "MUDLOG"}))
+            "principal_meridian": "6TH", "INVENTORY_ID": inv,
+            "source": "MUDLOG"}))
 
     # -- aliases: the names this well is actually called ----------------
     for i, (nm, typ) in enumerate([
@@ -169,6 +179,7 @@ def build(f, mud):
             "uwi": uwi, "alias_id": "%s-AL%d" % (WELL_NUM, i),
             "alias_name": nm, "alias_type": typ,
             "remark": "spelling seen in the RMOTC source documents",
+            "INVENTORY_ID": inv,
             "source": "OPERATOR"}))
 
     # -- pressures: SYNTHETIC, but equal to the DST already loaded ------
@@ -339,7 +350,13 @@ def main(argv=None):
         if "lat" in mud:
             print("  header coords: %.6f, %.6f" % (mud["lat"], mud["lon"]))
         print("  the mud log itself: python tools/load_mudlog.py")
-    rows = build(f, mud)
+    from dataview.core.file_identity import catalogued_inventory_id
+    _inv, _inv_why = catalogued_inventory_id(engine, MUDLOG)
+    if _inv:
+        print("  INVENTORY_ID : %s" % _inv)
+    else:
+        print("  INVENTORY_ID : NULL -- %s" % _inv_why)
+    rows = build(f, mud, _inv)
     from collections import Counter
     n = Counter(t for t, _d in rows)
     print()
