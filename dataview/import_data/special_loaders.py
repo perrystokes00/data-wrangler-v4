@@ -219,6 +219,102 @@ def row_counts(spec, engine=None):
 # the page
 # --------------------------------------------------------------------------
 
+def _demo():
+    """tools/demo_teapot, or None when it cannot be imported."""
+    try:
+        if _TOOLS not in sys.path:
+            sys.path.insert(0, _TOOLS)
+        if _ROOT not in sys.path:
+            sys.path.insert(0, _ROOT)
+        return __import__("demo_teapot")
+    except Exception:
+        return None
+
+
+def render_demo_panel(engine=None):
+    """Load the Teapot demo set, or take it back out.
+
+    TWO CLICKS TO REMOVE, AND THE COUNTS SHOWN FIRST. This deletes data, and
+    the history of reset buttons in this project is the reason for the
+    ceremony: v3's demo_reset defaulted to full=True, protected none of the
+    learned-mapping tables, and pointed at this same database -- one click
+    destroyed about 2,604 rows belonging to the app that replaced it.
+
+    So nothing here sweeps a table. The removal is each loader's own --remove,
+    scoped to that loader's row_created_by stamp, plus the synthetic seismic
+    set scoped by seis_set_id. What it will delete is listed BEFORE the
+    confirm, so the claim can be read rather than trusted.
+    """
+    d = _demo()
+    if d is None or engine is None:
+        return
+    try:
+        rows = d.counts(engine)
+        total = sum(sum(v.values()) for v in rows.values())
+    except Exception as exc:
+        st.caption("Demo set unavailable: %s" % exc)
+        return
+
+    with st.container(border=True):
+        st.markdown("**Teapot demo set**")
+        st.caption(
+            "Core, mud log, well detail and the synthetic 2D seismic — the "
+            "subset to load on camera and take back out between takes.")
+        if rows:
+            st.caption(" · ".join("`%s` %d" % (t, sum(v.values()))
+                                  for t, v in sorted(rows.items())))
+            st.caption("**%d row(s)** loaded." % total)
+        else:
+            st.caption("Nothing loaded.")
+
+        c = st.columns([1, 1, 3])
+        if c[0].button("Load demo set", key="demo_load_btn",
+                       disabled=bool(rows)):
+            with st.spinner("Loading the demo set…"):
+                out = d.load(apply=True)
+                sok, smsg = d.load_seismic(apply=True)
+            st.session_state["demo_msg"] = (
+                "\n".join("%s: %s" % (m, (o.strip().splitlines() or ["ok"])[-1])
+                           for m, _ok, o in out)
+                + "\nseismic: %s" % (smsg or ("ok" if sok else "failed")))
+            st.rerun()
+
+        # THE ARM IS THE POINT. A destructive action one click away from a
+        # mis-click is how the v3 reset did its damage.
+        if not st.session_state.get("demo_reset_armed"):
+            if c[1].button("Reset demo set", key="demo_reset_btn",
+                           disabled=not rows):
+                st.session_state["demo_reset_armed"] = True
+                st.rerun()
+        else:
+            st.warning(
+                "This will remove **%d row(s)** — exactly the ones listed "
+                "above and nothing else. Wells, reference tables, the rest of "
+                "the file catalog and the learned column mappings are not "
+                "touched." % total)
+            a = st.columns([1, 1, 3])
+            if a[0].button("Yes, remove them", key="demo_reset_go_btn",
+                           type="primary"):
+                with st.spinner("Removing…"):
+                    out = d.reset(apply=True)
+                    seis = d.reset_seismic(engine, apply=True)
+                st.session_state.pop("demo_reset_armed", None)
+                st.session_state["demo_msg"] = (
+                    "\n".join("%s: %s"
+                               % (m, (o.strip().splitlines() or ["ok"])[-1])
+                               for m, _ok, o in out)
+                    + "\n" + "\n".join("seismic %s: %s" % (k, v)
+                                        for k, v in seis.items()))
+                st.rerun()
+            if a[1].button("Cancel", key="demo_reset_no_btn"):
+                st.session_state.pop("demo_reset_armed", None)
+                st.rerun()
+
+        msg = st.session_state.pop("demo_msg", None)
+        if msg:
+            st.code(msg, language="text")
+
+
 def render(engine=None):
     if st is None:
         return
@@ -232,6 +328,8 @@ def render(engine=None):
         # Loud, because the invariant this page rests on has broken.
         st.error("Loader registry: two loaders claim the same table — "
                  + "; ".join(bad))
+
+    render_demo_panel(engine)
 
     for spec in SPECIAL:
         with st.container(border=True):
