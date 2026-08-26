@@ -185,3 +185,6 @@ exports/
 !docs/videos/
 !docs/videos/*.mp4
 !docs/videos/*.jpg
+
+# rendered mud log plots -- regenerate with tools/plot_mudlog.py
+mudlog_*.png
