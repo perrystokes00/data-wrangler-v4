@@ -4421,10 +4421,17 @@ def render_seis_view(engine):
                        % _want)
 
     _render_seis_pick(_lines, _df3d)
-    _render_map_drive(_seis_candidates(_lines, _df3d))
+    # WHAT THE MAP DRAWS, NOT WHAT THE VIEWER OPENS. _seis_candidates
+    # lists files you can open a section from, so it drops any line with
+    # no SEG-Y behind it -- correct for the chooser above, wrong here.
+    # The generated dip/strike grid is geometry with no file, so 17 of 22
+    # drawable lines were missing from the control that decides what the
+    # map draws. Same shape as every other key-on-the-wrong-thing bug:
+    # the question was right and the list answering it was not.
+    _render_map_drive(_lines, _df3d)
 
 
-def _render_map_drive(cands):
+def _render_map_drive(lines, df3d):
     """Tick what the map draws, on the second screen.
 
     THE OTHER DIRECTION. The map pushes a picked line to this window through
@@ -4444,24 +4451,33 @@ def _render_map_drive(cands):
     off, now this one too", which is a column of checkboxes. Inside a form so
     the ticks batch into ONE write instead of a rerun per box (scar #5).
     """
-    if not cands:
-        return
-
-    # ONE ROW PER DRAWABLE THING. A 2D line is a row; a 3D volume has no
-    # lines so it is its own row. The stored shape stays {surveys, lines} --
-    # the map already reads that -- and both are DERIVED from the ticks, so a
-    # survey is on exactly when something of its own is on.
+    # ONE ROW PER DRAWABLE THING, FROM THE SAME TWO SOURCES THE MAP DRAWS.
+    # A 2D line is a row; a 3D volume has no lines so it is its own row. The
+    # stored shape stays {surveys, lines} -- the map already reads that --
+    # and both are DERIVED from the ticks, so a survey is on exactly when
+    # something of its own is on.
     rows = []
-    for c in cands:
-        _sv = str(c.get("survey") or "(unnamed survey)")
-        _ln = str(c.get("line") or "")
-        if _ln:
-            rows.append({"key": "%s|%s" % (_sv, _ln), "survey": _sv,
-                         "line": _ln, "kind": str(c.get("dim") or "2D")})
-        else:
-            rows.append({"key": _sv, "survey": _sv,
-                         "line": "(whole volume)",
-                         "kind": str(c.get("dim") or "3D")})
+    for _sl in (lines or []):
+        _sv = str(_sl.get("survey") or "(unnamed survey)")
+        _ln = str(_sl.get("line") or "")
+        if not _ln:
+            continue
+        rows.append({"key": "%s|%s" % (_sv, _ln), "survey": _sv,
+                     "line": _ln, "kind": "2D"})
+    try:
+        _iter = df3d.iterrows() if df3d is not None else []
+    except AttributeError:
+        _iter = []
+    _seen3d = set()
+    for _i, _r in _iter:
+        _sv = str(_r.get("survey_name") or "").strip()
+        if not _sv or _sv in _seen3d:
+            continue
+        _seen3d.add(_sv)
+        rows.append({"key": _sv, "survey": _sv,
+                     "line": "(whole volume)", "kind": "3D"})
+    if not rows:
+        return
     rows.sort(key=lambda r: (r["survey"], r["line"]))
 
     _cur = _map_seis_choice()
