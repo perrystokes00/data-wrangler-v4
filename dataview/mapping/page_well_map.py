@@ -4488,10 +4488,14 @@ def _render_map_drive(lines, df3d):
     # SAY WHAT IS IN FORCE. The ticks show what you are ABOUT to send, not
     # what the map is doing, and the two differ the moment you touch a box --
     # so without this a cleared map looks identical to a full one.
+    # Same distinction in the live-state line, for the same reason.
+    _on_rows = [r for r in rows if r["key"] in _on]
+    _on_l = len([r for r in _on_rows if r["kind"] != "3D"])
+    _on_v = len(_on_rows) - _on_l
     _state = {"all": "every survey",
               "none": "**nothing** - cleared",
-              "pick": "%d of %d" % (len([r for r in rows
-                                         if r["key"] in _on]), len(rows)),
+              "pick": "%d line(s)%s" % (
+                  _on_l, (" and %d volume(s)" % _on_v) if _on_v else ""),
               }[_cur["mode"]]
     st.caption("The map is drawing %s. Tick and send - it takes effect on "
                "the map's next render." % _state)
@@ -4546,13 +4550,23 @@ def _render_map_drive(lines, df3d):
         # the line filter on survey|line, and two lists a person maintains
         # by hand are two lists that drift.
         _survs = sorted({k.split("|")[0] for k in _keys})
+        # COUNT LINES AND VOLUMES SEPARATELY. "Map set to 18" counted ROWS,
+        # and one of those rows is a 3D VOLUME that draws as a footprint
+        # rectangle rather than a line -- so ticking 18 drew 17 lines and
+        # the message looked like it had lost one. The number was right and
+        # meant something other than what it appeared to mean, which is
+        # worse than being wrong: it sends you looking for a missing line.
+        _n_vol = len(_keys) - len(_lines)
+        _what = "%d line(s)" % len(_lines)
+        if _n_vol:
+            _what += " and %d volume(s)" % _n_vol
         if len(_keys) == len(rows):
             _write("all", [], [], "Map showing every survey.")
         elif not _keys:
             _write("none", [], [], "Nothing ticked - seismic cleared.")
         else:
             _write("pick", _survs, _lines,
-                   "Map set to %d of %d." % (len(_keys), len(rows)))
+                   "Map set to %s." % _what)
     if _none:
         # KEEP THE TICKS. Clear is a mute, not a reset: the selection stays
         # in the file so one Send puts exactly it back.
