@@ -4195,6 +4195,78 @@ SEIS_GALLERY_MAX = 6
 SEIS_GALLERY_TRACES = 240
 
 
+def _render_seis_area_add(lines, df3d=None):
+    """Add every 2D line inside the last drawn shape to the picks.
+
+    THE CIRCLE ALREADY EXISTS and already means something: it drills WELLS.
+    Quietly re-pointing it at seismic would break that for anyone using it,
+    and a tool whose meaning depends on invisible state is the thing this
+    map has repeatedly got wrong. So the shape keeps its job and this OFFERS
+    the seismic reading of it -- draw a circle or a box, then take the lines
+    in it if that is what you wanted.
+
+    IT REUSES _drawn_bounds rather than re-reading all_drawings. That is
+    already the extent the draw handler stored, already deduped against
+    reprocessing, and already what the saved-view feature reads -- a second
+    parse of the same drawing is a second thing to keep in step.
+
+    BOUNDS, AND IT SAYS SO. A circle is stored as its bounding box, so a
+    line clipping a corner counts. Saying "in the drawn area" rather than
+    "in the circle" is the difference between a rounded answer and a wrong
+    one.
+    """
+    _b = st.session_state.get("_drawn_bounds")
+    if not _b or not lines:
+        return
+    try:
+        _la0, _lo0 = float(_b[0][0]), float(_b[0][1])
+        _la1, _lo1 = float(_b[1][0]), float(_b[1][1])
+    except (TypeError, ValueError, IndexError):
+        return
+    _slo, _shi = min(_la0, _la1), max(_la0, _la1)
+    _wlo, _whi = min(_lo0, _lo1), max(_lo0, _lo1)
+
+    # ANY VERTEX INSIDE COUNTS. A 2D line is long and the box is small, so
+    # requiring the whole line would select almost nothing -- what a person
+    # circling part of a field means is "the lines through here".
+    _hitpaths = []
+    for _sl in lines:
+        for _la, _lon in (_sl.get("pts") or []):
+            if _slo <= _la <= _shi and _wlo <= _lon <= _whi:
+                if _sl.get("file"):
+                    _hitpaths.append(str(_sl["file"]))
+                break
+    if not _hitpaths:
+        return
+
+    _have = {str(x.get("path")) for x in
+             (st.session_state.get("_seis_multi") or [])}
+    _new = [p for p in _hitpaths if p not in _have]
+    if not _new:
+        st.caption("All %d line(s) in the drawn area are already picked."
+                   % len(_hitpaths))
+        return
+    if st.button("Add the %d line(s) in the drawn area" % len(_new),
+                 key="seis_area_add_btn", use_container_width=True):
+        # THROUGH _seis_candidates, so the basket holds the same shape of
+        # dict however a line got into it. Two producers of one structure
+        # is how the two halves drift.
+        _by_path = {str(c.get("path")): c
+                    for c in _seis_candidates(lines, df3d)}
+        _multi = list(st.session_state.get("_seis_multi") or [])
+        _added = 0
+        for _p in _new:
+            _c = _by_path.get(_p)
+            if _c:
+                _multi.append(dict(_c))
+                _added += 1
+        if _added:
+            st.session_state["_seis_multi"] = _multi
+            st.session_state["_seis_pick"] = dict(_multi[-1])
+            st.session_state["_seis_basket_last"] = _seis_label(_multi[-1])
+        st.rerun()
+
+
 def _render_seis_gallery(picks):
     """Every picked line's section, stacked down the page.
 
@@ -4472,6 +4544,7 @@ def _render_seis_pick(lines=None, df3d=None):
             '&#x2197; seismic page on second screen</a>',
             unsafe_allow_html=True)
 
+    _render_seis_area_add(lines, df3d)
     _render_seis_basket()
     if st.session_state.get("seis_basket_all"):
         _render_seis_gallery(st.session_state.get("_seis_multi") or [])
@@ -10997,7 +11070,23 @@ def run(engine=None):
 + ".dv-pick-2d.leaflet-container,.dv-pick-3d.leaflet-container"
 + "{cursor:pointer !important;}"
 + ".dv-picker-ctl a{font:700 11px/26px system-ui,sans-serif;"
-+ "text-align:center;}";
++ "text-align:center;}"
+// CROSSHAIR OVER THE MAP, POINTER OVER ANYTHING CLICKABLE. These two
+// rules and the .dv-draw-active one below were written years ago into a
+// folium.Element style block that st_folium discards, so neither has ever
+// applied -- the map has had a default arrow cursor and the draw-through
+// has never worked. They ride along here because this is the injection
+// that demonstrably reaches the map document.
++ ".leaflet-container{cursor:crosshair !important;}"
++ ".leaflet-interactive{cursor:pointer !important;}"
+// !important IS LOAD-BEARING: Leaflet sets cursor:grab on .leaflet-grab
+// on the same element, so without it the crosshair silently loses.
+// Measured: the rule loaded and the cursor was still grab.
+// While a draw tool is live, let the click through the overlay paths so a
+// circle can be drawn on top of a registered layer without the polygon
+// catching it. The class is set by the drag guard on draw:drawstart.
++ ".dv-draw-active .leaflet-overlay-pane path"
++ "{pointer-events:none !important;}";
                         document.head.appendChild(st);
                     } catch (e) { /* no head yet */ }
 
@@ -11117,8 +11206,18 @@ def run(engine=None):
         m.add_child(pick_tools)
 
 
-        # Crosshair cursor over map, pointer over markers
-        folium.Element("""
+        # THESE RULES NOW LIVE IN dv_seis_picker'S INJECTED STYLESHEET.
+        # Everything in this Element is DEAD: st_folium drops a style block
+        # added with add_to(m.get_root().html), verified by reading the
+        # running app back -- the rules appear in neither the map iframe nor
+        # the parent document. So the crosshair cursor and the draw-through
+        # below have never once applied, and the comments describing their
+        # behaviour describe something that never happened.
+        #
+        # Kept, commented, for the reasoning in it -- which is sound and was
+        # worth writing down. Delete the pair together if this is ever
+        # tidied; do not "restore" it, it does not work.
+        _DEAD_MAP_CSS = ("""
             <style>
             .leaflet-container       { cursor: crosshair !important; }
             .leaflet-interactive     { cursor: pointer   !important; }
@@ -11169,7 +11268,7 @@ def run(engine=None):
             .dv-picker-ctl a { font: 700 11px/26px system-ui, sans-serif;
                 text-align: center; }
             </style>
-        """).add_to(m.get_root().html)
+        """)   # NOT rendered: see _DEAD_MAP_CSS above.
 
         # st_folium with width="100%" reserves more vertical space than the map
         # actually uses — the iframe wrapper grows tall while the map stays 500px.
