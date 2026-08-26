@@ -4425,59 +4425,95 @@ def render_seis_view(engine):
 
 
 def _render_map_drive(cands):
-    """Choose, on the second screen, which seismic the MAP draws.
+    """Tick what the map draws, on the second screen.
 
-    THE OTHER DIRECTION. The map pushes a picked line to this window through a
-    named window and a URL; this sends a CHOICE back. It cannot go back the
-    same way -- re-navigating the map window would reload the heaviest page in
-    the app on every tick of a checkbox -- and it cannot go through
+    THE OTHER DIRECTION. The map pushes a picked line to this window through
+    a named window and a URL; this sends a CHOICE back. It cannot go back the
+    same way -- re-navigating the map window would reload the heaviest page
+    in the app every time a box moved -- and it cannot go through
     session_state, because the two windows are separate Streamlit sessions.
 
     So it goes through the prefs FILE both sessions already read for saved
-    places. That makes it deliberately NOT live: the map applies this on its
+    places. That makes it deliberately NOT live: the map applies it on its
     next render. Live would mean polling, and a poll that re-renders the map
     re-serialises the whole thing every couple of seconds -- the map is the
-    expensive object, so the cheap-sounding option is the ruinous one here.
+    expensive object, so the cheap-sounding option is the ruinous one.
 
-    EMPTY MEANS EVERYTHING, at both ends. Saving nothing restores the default
-    map rather than emptying it, so this can always be undone from here.
+    A GRID, NOT TWO MULTISELECTS. Turning one line off in a multiselect means
+    finding its chip and deleting it; the job here is "these on, that one
+    off, now this one too", which is a column of checkboxes. Inside a form so
+    the ticks batch into ONE write instead of a rerun per box (scar #5).
     """
     if not cands:
         return
-    _surv = sorted({str(c.get("survey")) for c in cands if c.get("survey")})
-    _lkeys = sorted({"%s|%s" % (c.get("survey"), c.get("line"))
-                     for c in cands if c.get("survey") and c.get("line")})
+
+    # ONE ROW PER DRAWABLE THING. A 2D line is a row; a 3D volume has no
+    # lines so it is its own row. The stored shape stays {surveys, lines} --
+    # the map already reads that -- and both are DERIVED from the ticks, so a
+    # survey is on exactly when something of its own is on.
+    rows = []
+    for c in cands:
+        _sv = str(c.get("survey") or "(unnamed survey)")
+        _ln = str(c.get("line") or "")
+        if _ln:
+            rows.append({"key": "%s|%s" % (_sv, _ln), "survey": _sv,
+                         "line": _ln, "kind": str(c.get("dim") or "2D")})
+        else:
+            rows.append({"key": _sv, "survey": _sv,
+                         "line": "(whole volume)",
+                         "kind": str(c.get("dim") or "3D")})
+    rows.sort(key=lambda r: (r["survey"], r["line"]))
+
     _cur = _map_seis_choice()
+    _on = set(_cur["lines"]) | set(_cur["surveys"])
 
     st.divider()
     st.markdown("#### Drive the map")
-    # SAY WHAT IS IN FORCE. The multiselects show what you are ABOUT to send,
-    # not what the map is doing, and the two differ the moment you touch a
-    # box -- so without this line a cleared map looks identical to a full one.
-    _state = {"all": "every survey", "none": "**nothing** — cleared",
-              "pick": "%d survey(s), %d line(s)"
-                      % (len(_cur["surveys"]), len(_cur["lines"]))
+    # SAY WHAT IS IN FORCE. The ticks show what you are ABOUT to send, not
+    # what the map is doing, and the two differ the moment you touch a box --
+    # so without this a cleared map looks identical to a full one.
+    _state = {"all": "every survey",
+              "none": "**nothing** - cleared",
+              "pick": "%d of %d" % (len([r for r in rows
+                                         if r["key"] in _on]), len(rows)),
               }[_cur["mode"]]
-    st.caption("The map is currently drawing %s. Pick below and send — it "
-               "takes effect on the map’s next render." % _state)
-    # DEFAULTS FILTERED TO WHAT EXISTS. A stored survey that has since been
-    # deleted would otherwise raise inside st.multiselect rather than simply
-    # dropping out, and the page would be dead until the file was hand-edited.
-    _ds = [s for s in _cur["surveys"] if s in _surv]
-    _dl = [l for l in _cur["lines"] if l in _lkeys]
-    _sel_s = st.multiselect("Surveys", _surv, default=_ds,
-                            key="mapdrive_surveys",
-                            help="Empty shows every survey.")
-    _sel_l = st.multiselect("Lines", _lkeys, default=_dl,
-                            key="mapdrive_lines",
-                            help="Empty shows every line of the surveys "
-                                 "above. Keyed survey|line because line names "
-                                 "repeat between surveys.")
-    # THREE BUTTONS BECAUSE THERE ARE THREE STATES. With only Send and Show
-    # everything, "none" was unreachable: an empty selection had to mean ALL
-    # (so a never-used page leaves the map alone), which left no way to clear
-    # the seismic from the map at all -- and clearing it is the first thing
-    # you want when you are about to choose what goes back on.
+    st.caption("The map is drawing %s. Tick and send - it takes effect on "
+               "the map's next render." % _state)
+
+    import zlib as _z
+    _sig = _z.crc32("|".join(r["key"] for r in rows).encode("utf-8"))
+    with st.form("mapdrive_form"):
+        _grid = st.data_editor(
+            pd.DataFrame([{
+                # ALL TICKED when the map is showing everything, so the
+                # first move is to untick rather than to hunt for what
+                # was on.
+                "Show": (_cur["mode"] == "all") or (r["key"] in _on),
+                "Survey": r["survey"], "Line": r["line"], "Kind": r["kind"],
+                "key": r["key"],
+            } for r in rows]),
+            hide_index=True, use_container_width=True,
+            # ENDS "_editor" ON PURPOSE: _is_action_key excludes data editors
+            # by that suffix, and without it the persist loop self-assigns
+            # the key, the assignment raises, and the error surfaces on
+            # whatever page draws next.
+            key="mapdrive_grid_v%d_editor" % _sig,
+            column_config={
+                "Show": st.column_config.CheckboxColumn(width="small"),
+                "Survey": st.column_config.TextColumn(disabled=True),
+                "Line": st.column_config.TextColumn(disabled=True),
+                "Kind": st.column_config.TextColumn(disabled=True,
+                                                    width="small"),
+                "key": None,
+            })
+        _c1, _c2, _c3 = st.columns([1.3, 1, 1])
+        _send = _c1.form_submit_button("Send to map", type="primary",
+                                       use_container_width=True)
+        _none = _c2.form_submit_button("Clear all",
+                                       use_container_width=True)
+        _all = _c3.form_submit_button("Show everything",
+                                      use_container_width=True)
+
     def _write(mode, surveys, lines, msg):
         _p = _load_user_prefs()
         _p[MAP_SEIS_PREF] = {"mode": mode, "surveys": surveys,
@@ -4486,26 +4522,29 @@ def _render_map_drive(cands):
         st.session_state["mapdrive_msg"] = msg
         st.rerun()
 
-    _b1, _b2, _b3 = st.columns([1.2, 1, 1])
-    if _b1.button("✓ Send to map", type="primary", key="mapdrive_save",
-                  use_container_width=True):
-        _write("pick" if (_sel_s or _sel_l) else "all", _sel_s, _sel_l,
-               "Map set to %s survey(s) and %s line(s)."
-               % (len(_sel_s) or "all", len(_sel_l) or "all"))
-    # KEYS END "_btn" BECAUSE THEY ARE BUTTONS. The persist loop self-assigns
-    # every settable key to survive a page switch, and a button cannot be set
-    # -- the assignment raises on a LATER run, on whatever page draws next, so
-    # the crash lands nowhere near here. "mapdrive_none" matched no action
-    # suffix and selftest's both-ways sweep caught it before it ever ran.
-    if _b2.button("✖ Clear from map", key="mapdrive_hide_btn",
-                  use_container_width=True,
-                  help="Draw no seismic at all. The Seismic chip on the map "
-                       "stays as it is; this empties what it would draw."):
-        _write("none", _sel_s, _sel_l,
+    if _send:
+        _keys = {str(r["key"]) for _i, r in _grid.iterrows() if r["Show"]}
+        _lines = sorted(k for k in _keys if "|" in k)
+        # A SURVEY IS ON WHEN SOMETHING OF ITS OWN IS ON. Derived rather
+        # than asked for twice: the footprint layer keys on survey names and
+        # the line filter on survey|line, and two lists a person maintains
+        # by hand are two lists that drift.
+        _survs = sorted({k.split("|")[0] for k in _keys})
+        if len(_keys) == len(rows):
+            _write("all", [], [], "Map showing every survey.")
+        elif not _keys:
+            _write("none", [], [], "Nothing ticked - seismic cleared.")
+        else:
+            _write("pick", _survs, _lines,
+                   "Map set to %d of %d." % (len(_keys), len(rows)))
+    if _none:
+        # KEEP THE TICKS. Clear is a mute, not a reset: the selection stays
+        # in the file so one Send puts exactly it back.
+        _write("none", _cur["surveys"], _cur["lines"],
                "Seismic cleared from the map.")
-    if _b3.button("Show everything", key="mapdrive_all_btn",
-                  use_container_width=True):
+    if _all:
         _write("all", [], [], "Map restored to every survey.")
+
     # AFTER the rerun. st.rerun() raises, so anything rendered above it is
     # discarded -- the scar that hid the colour-grid errors for a session.
     _mm = st.session_state.pop("mapdrive_msg", None)
@@ -9983,13 +10022,23 @@ def run(engine=None):
                     for _sl in ([] if _sc["mode"] == "none"
                                 else _seismic_line_paths(engine)):
                         _sv = str(_sl.get("survey") or "(unnamed survey)")
+                        # SKIPPED, NOT HIDDEN. An unselected survey used to
+                        # become a FeatureGroup with show=False, which still
+                        # ships every polyline in the payload -- ticking only
+                        # a 3D volume sent five 2D lines to the browser to be
+                        # drawn invisibly. "none" already skips outright, so
+                        # hiding here was the odd one out as well as the
+                        # wasteful one. The page is the control now; it can
+                        # put the survey back.
+                        if _want_s and _sv not in _want_s:
+                            continue
                         _lk = "%s|%s" % (_sv, _sl.get("line"))
                         if _want_l and _lk not in _want_l:
                             continue
                         if _sv not in _groups:
                             _groups[_sv] = folium.FeatureGroup(
                                 name=("📈 %s lines" % _sv[:44]),
-                                show=((not _want_s) or (_sv in _want_s)))
+                                show=True)
                         folium.PolyLine(
                             locations=_sl["pts"], color="#B36A00", weight=2,
                             opacity=0.9,
