@@ -4191,6 +4191,66 @@ def _seis_filter_box(label, key, values, help_text=None):
     return None if sel == "All" else sel
 
 
+SEIS_GALLERY_MAX = 6
+SEIS_GALLERY_TRACES = 240
+
+
+def _render_seis_gallery(picks):
+    """Every picked line's section, stacked down the page.
+
+    THE SAME RENDERER THE SINGLE VIEW USES. file_viewer._segy_plot already
+    draws density + wiggle from an array; a second "compact" plotter would
+    be a parallel worse version of it that drifts the first time one of
+    them gains a feature. This only reads the traces and hands them over.
+
+    DECIMATED, because the cost here is real: N file reads and N matplotlib
+    figures on a page that already takes ~25 s. Every SEIS_GALLERY_TRACES-th
+    trace preserves the structure -- what a stacked view is FOR is comparing
+    shape between lines, not reading a single trace -- and a line of 2,000
+    traces costs the same as one of 240.
+
+    CAPPED, AND IT SAYS SO. Silently drawing the first six of nine reads as
+    three lines that failed.
+    """
+    _shown = [h for h in picks if h.get("path")][:SEIS_GALLERY_MAX]
+    if len(picks) > len(_shown):
+        st.info("Showing the first %d of %d. Clear some, or step through "
+                "them with ◀ ▶." % (len(_shown), len(picks)))
+    try:
+        import segyio
+        import numpy as np
+        from dataview.file_catalog.file_viewer import _segy_plot
+    except ImportError as _ie:
+        st.error("Cannot draw sections: %s" % _ie)
+        return
+    for _h in _shown:
+        st.markdown("##### " + _seis_label(_h))
+        _p = str(_h.get("path") or "")
+        if not os.path.exists(_p):
+            st.warning("The catalogue points at a file that is not there "
+                       "now: `%s`" % _p)
+            continue
+        # ONE BAD FILE MUST NOT TAKE THE PAGE. A gallery is the one place a
+        # single unreadable SEG-Y would cost every other section on screen.
+        try:
+            with segyio.open(_p, ignore_geometry=True) as _f:
+                _n = _f.tracecount
+                _stepn = max(1, _n // SEIS_GALLERY_TRACES)
+                _idxs = list(range(0, _n, _stepn))
+                _data = np.stack([_f.trace[i] for i in _idxs]).T
+                _samp = _f.samples
+            if _stepn > 1:
+                st.caption("every %d%s trace of %s"
+                           % (_stepn,
+                              {1: "st", 2: "nd", 3: "rd"}.get(_stepn % 10,
+                                                              "th"),
+                              format(_n, ",")))
+            _segy_plot(_data, _samp, len(_idxs), _p)
+        except Exception as _ge:
+            st.error("Could not draw %s: %s"
+                     % (_h.get("name") or _p, _ge))
+
+
 def _render_seis_basket():
     """The lines collected by clicking the map, and what to do with them.
 
@@ -4212,10 +4272,29 @@ def _render_seis_basket():
     _cur = (st.session_state.get("_seis_pick") or {}).get("path")
     _idx = next((i for i, h in enumerate(_multi)
                  if str(h.get("path")) == str(_cur)), 0)
-    _b1, _b2, _b3 = st.columns([3, 1, 1])
+    _b1, _bp, _bn, _b2, _b3 = st.columns([3, 0.6, 0.6, 1, 1])
     _sel = _b1.selectbox("Showing", _labels, index=_idx,
                          key="seis_basket_sel",
                          label_visibility="collapsed")
+    # STEP THROUGH THEM. Comparing sections means going back and forth, and
+    # hunting the right entry in a dropdown each time is the wrong gesture
+    # for it. Wraps, so the last one steps round to the first rather than
+    # dead-ending on a disabled button.
+    _step = 0
+    if _bp.button("◀", key="seis_basket_prev_btn",
+                  use_container_width=True, help="Previous line"):
+        _step = -1
+    if _bn.button("▶", key="seis_basket_next_btn",
+                  use_container_width=True, help="Next line"):
+        _step = 1
+    if _step:
+        _to = _multi[(_idx + _step) % len(_multi)]
+        st.session_state["_seis_pick"] = dict(_to)
+        # The dropdown is keyed and would otherwise still read the OLD
+        # entry, whose act-on-change test would then fire and undo this
+        # on the very next run. Move its remembered value with the pick.
+        st.session_state["_seis_basket_last"] = _seis_label(_to)
+        st.rerun()
     # ACT ON CHANGE ONLY, or this overrules the map click that just
     # arrived -- the same rule the main chooser follows, and for the same
     # reason: two doors onto one selection, most recent wins.
@@ -4243,6 +4322,10 @@ def _render_seis_basket():
         st.session_state.pop("_seis_multi", None)
         st.session_state.pop("_seis_basket_last", None)
         st.rerun()
+    st.checkbox("▦ Show all %d sections, one after another" % len(_multi),
+                key="seis_basket_all",
+                help="Every picked line stacked down the page. Each one is "
+                     "a file read and a figure, so it is opt-in.")
     # AFTER the rerun -- st.rerun() raises and discards anything already
     # rendered, the scar that hid the colour-grid errors for a session.
     _bm = st.session_state.pop("_seis_basket_msg", None)
@@ -4363,6 +4446,9 @@ def _render_seis_pick(lines=None, df3d=None):
             unsafe_allow_html=True)
 
     _render_seis_basket()
+    if st.session_state.get("seis_basket_all"):
+        _render_seis_gallery(st.session_state.get("_seis_multi") or [])
+        return
 
     _pick = st.session_state.get("_seis_pick")
     if not _pick:
