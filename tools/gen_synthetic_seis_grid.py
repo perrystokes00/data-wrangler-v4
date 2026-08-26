@@ -125,14 +125,45 @@ def _boundary(engine):
 
 
 def _existing_lines(engine):
-    """[(name, [(lat,lon)...])] for every catalogued 2D line with geometry."""
-    from dataview.core.dw_utils import make_engine  # noqa: F401  (import check)
-    from dataview.mapping.page_well_map import _seismic_line_paths
+    """[(name, [(lat,lon)...])] for every REAL catalogued 2D line with geometry.
+
+    SYNTHETIC LINES ARE EXCLUDED, and that is not tidiness. The azimuths are
+    measured from what is in dv_seis_line, and this tool WRITES to
+    dv_seis_line -- so on a second run it measured its own output and the dip
+    azimuth moved from 54.3 to 79.5 degrees, dragged toward the strike lines it
+    had just made. Run it a third time and it drifts again. A generator that
+    reads its own output has no fixed point; the filter is what makes this
+    idempotent.
+    """
+    from sqlalchemy import text
     out = []
-    for sl in _seismic_line_paths(engine):
-        pts = sl.get("pts") or []
+    with engine.connect() as c:
+        rows = c.execute(text("""
+            SELECT sl.line_name, sl.geog.STAsText()
+              FROM dataview.dv_seis_line sl
+              LEFT JOIN dataview.dv_seis_set ss
+                     ON ss.seis_set_id = sl.seis_set_id
+             WHERE sl.geog IS NOT NULL
+               AND sl.geog.STGeometryType() = 'LineString'
+               AND ISNULL(sl.source, '') <> 'SYNTH'
+               AND ISNULL(ss.source, '') <> 'SYNTH'
+               AND ISNULL(sl.row_created_by, '') <> 'GEN_SYNTH_GRID'
+        """)).fetchall()
+    for nm, wkt in rows:
+        body = str(wkt or "")
+        i, j = body.find("("), body.rfind(")")
+        if i < 0 or j < 0:
+            continue
+        pts = []
+        for pair in body[i + 1:j].split(","):
+            bits = pair.split()
+            if len(bits) >= 2:
+                try:
+                    pts.append((float(bits[1]), float(bits[0])))
+                except ValueError:
+                    pass
         if len(pts) >= 2:
-            out.append((sl.get("line"), pts))
+            out.append((nm, pts))
     return out
 
 
