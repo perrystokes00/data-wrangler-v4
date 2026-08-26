@@ -5586,14 +5586,14 @@ def _render_mud_log(engine, uwi):
         # when someone clicks the button.
         import importlib
         import sys as _sys
-        import tempfile
         _root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__))))
         _tools = os.path.join(_root, "tools")
         if _tools not in _sys.path:
             _sys.path.insert(0, _tools)
-        _pm = importlib.import_module("plot_mudlog")
-        _mx = importlib.import_module("mudlog_export")
+        _pm = importlib.import_module("plot_mudlog")   # puts its helpers on
+        _mx = importlib.import_module("mudlog_export")   # the path for _mh
+        _mh = importlib.import_module("mudlog_html")
     except Exception as _impexc:
         st.caption("Mud log plotter unavailable: %s" % _impexc)
         return
@@ -5621,8 +5621,6 @@ def _render_mud_log(engine, uwi):
     # browser, so it stays legible at any scale instead of being a picture of
     # a log at one size -- 0.17 MB against 260 inches of PNG.
     try:
-        import importlib as _il
-        _mh = _il.import_module("mudlog_html")
         _html = _mh.build_html(_ex)
         st.download_button(
             "⤢  Save as a full-screen page (HTML)",
@@ -5635,24 +5633,24 @@ def _render_mud_log(engine, uwi):
     except Exception as _hexc:
         st.caption("Full-screen page unavailable: %s" % _hexc)
 
-    c1, c2 = st.columns([3, 1])
-    _top = c1.slider("Depth window (ft)", float(_lo), float(_hi),
-                     (float(max(_lo, 5250.0)), float(min(_hi, 5400.0))),
-                     step=10.0, key="ml_window")
-    _scale = c2.slider("in / 100 ft", 3.0, 12.0, 6.0, step=0.5,
-                       key="ml_scale")
+    # THE SAME RENDERER AS THE SAVED PAGE. This drew a static PNG through
+    # plot_mudlog first, which meant the mud log in the app and the mud log in
+    # the downloaded file were two different things -- the app's had no
+    # formation-top strip down the side, did not scroll and could not be
+    # zoomed, and there is no reason for a reader to meet two versions of one
+    # log. One renderer, one behaviour, and the download is the same page
+    # saved rather than a second implementation of it.
     try:
-        _out = os.path.join(tempfile.gettempdir(),
-                            "mudlog_%s_%d_%d.png"
-                            % (str(uwi)[-6:], int(_top[0]), int(_top[1])))
-        _pm.draw(_ex, _top[0], _top[1], _out, scale=_scale, width=17.0,
-                 dpi=110)
-        st.image(_out, use_container_width=True)
-        st.caption("%s · %.0f–%.0f ft · driller's depth · KB %s"
-                   % (_ex.header.get("Well Name", ""), _top[0], _top[1],
-                      _ex.header.get("K.B. Elevation", "?")))
+        _frag = _mh.build_html(_ex)          # wrapped: see build_html's note
+        st.components.v1.html(_frag, height=820, scrolling=False)
+        st.caption(
+            "%s · %.0f–%.0f ft · driller's depth · KB %s — scroll the log, "
+            "drag the column dividers, zoom with the slider or Ctrl-scroll. "
+            "Save it above to open full screen."
+            % (_ex.header.get("Well Name", ""), _lo, _hi,
+               _ex.header.get("K.B. Elevation", "?")))
     except Exception as _dexc:
-        st.caption("Mud log plot failed: %s" % _dexc)
+        st.caption("Mud log strip failed: %s" % _dexc)
 
 
 def _unplaced_core_photos(engine, uwi):
