@@ -322,6 +322,43 @@ def _go_to_place(bounds) -> None:
 MAP_SEIS_PREF = "map_seis"
 
 
+def _seis_pref_mtime() -> float:
+    """When the shared choice file last changed. 0.0 if it is not there."""
+    try:
+        return float(_USER_PREFS_PATH.stat().st_mtime)
+    except OSError:
+        return 0.0
+
+
+@st.fragment(run_every=2)
+def _watch_seis_choice():
+    """Rebuild the map when the second screen changes what it should draw.
+
+    THE POLL DOES NOT CONTAIN THE MAP, which is the whole reason this is
+    affordable. I rejected polling when this was built, on the grounds that
+    a fragment re-rendering every two seconds would re-serialise the entire
+    map -- true, and irrelevant, because the fragment only has to watch a
+    TIMESTAMP. Two seconds of os.stat costs nothing; the expensive rebuild
+    happens once, when the file actually changed.
+
+    Without it the map never learned that anything HAD changed. The choice
+    was applied on the map's next render and nothing caused a next render,
+    so pressing Send on the second screen and switching windows showed the
+    previous selection -- and it worked exactly once, on whatever render
+    happened to come next for some other reason.
+
+    NO LOOP IS POSSIBLE. The full render records the mtime it drew; this
+    compares and reruns only on a difference, and the rerun it triggers
+    records the new value. A missing baseline means the map has not drawn
+    yet, so there is nothing to refresh.
+    """
+    _seen = st.session_state.get("_seis_pref_seen")
+    if _seen is None:
+        return
+    if _seis_pref_mtime() != _seen:
+        st.rerun()
+
+
 def _map_seis_choice() -> dict:
     """What the second-screen page asked the map to show.
 
@@ -9655,6 +9692,16 @@ def run(engine=None):
             or _has_drill_selection
         )
         _skip_folium = False
+        # STAMP BEFORE BUILDING, NOT AFTER. The build takes ~25 seconds, so
+        # a Send pressed on the second screen DURING it changes the file
+        # while this render is still assembling the previous choice.
+        # Stamping afterwards recorded the NEW mtime against a map showing
+        # the OLD selection, the watcher then saw nothing to do, and the
+        # follow died silently -- it worked twice and stopped, which is
+        # exactly how it was reported. Stamped here, a mid-render change
+        # leaves the stamp behind the file and the watcher fires once more.
+        # An extra rebuild is the right price; a stuck map is not.
+        st.session_state["_seis_pref_seen"] = _seis_pref_mtime()
 
         if _show_h3_layer:
             # ── H3 hex density mode (Session 3) ─────────────────────────
@@ -10906,6 +10953,8 @@ def run(engine=None):
                 )
         _phase(100)
         _msg.empty()
+        # The stamp is taken at the TOP of the build -- see _skip_folium.
+        _watch_seis_choice()
 
         st.caption(
             "💡 **Map:** Toggle **Show grid** to see/hide the density heatmap. "
