@@ -219,6 +219,92 @@ def row_counts(spec, engine=None):
 # the page
 # --------------------------------------------------------------------------
 
+def _demo_seis():
+    """tools/demo_seismic, or None when it cannot be imported."""
+    try:
+        if _TOOLS not in sys.path:
+            sys.path.insert(0, _TOOLS)
+        if _ROOT not in sys.path:
+            sys.path.insert(0, _ROOT)
+        return __import__("demo_seismic")
+    except Exception:
+        return None
+
+
+def render_seismic_demo_panel(engine=None):
+    """Load ten real 2D lines, or take them back out.
+
+    SCOPED BY FOLDER, NOT BY STAMP. Every seismic row in this database carries
+    row_created_by = 'PROMOTE', shared with everything the file-catalog path has
+    ever written, so deleting by it would take the real Teapot 3D and the NPR-3
+    2D lines too. The demo is separable by where its files came from -- see
+    tools/demo_seismic.py -- and the counts are shown BEFORE the confirm so the
+    claim can be read rather than trusted.
+    """
+    d = _demo_seis()
+    if d is None or engine is None:
+        return
+    try:
+        rows = d.counts(engine)
+        total = sum(rows.values())
+    except Exception as exc:
+        st.caption("Seismic demo unavailable: %s" % exc)
+        return
+
+    with st.container(border=True):
+        st.markdown("**Seismic demo set**")
+        st.caption(
+            "Ten Geoscience Australia 2D lines across eight surveys — real "
+            "coordinates, far from the Wyoming data, so they can never be "
+            "confused with it. Load on camera, reset between takes.")
+        if rows:
+            st.caption(" · ".join("`%s` %d" % (t, n)
+                                  for t, n in sorted(rows.items())))
+            st.caption("**%d row(s)** loaded." % total)
+        else:
+            st.caption("Nothing loaded.")
+
+        c = st.columns([1, 1, 3])
+        if c[0].button("Load seismic", key="seisdemo_load_btn",
+                       disabled=bool(rows)):
+            with st.spinner("Staging and scanning ten SEG-Y files…"):
+                d.make_folder(apply=True)
+                ok, msg = d.load(apply=True)
+            st.session_state["seisdemo_msg"] = msg or (
+                "ok" if ok else "failed")
+            st.rerun()
+
+        # THE ARM IS THE POINT. A destructive action one click away from a
+        # mis-click is how the v3 reset did its damage.
+        if not st.session_state.get("seisdemo_armed"):
+            if c[1].button("Reset seismic", key="seisdemo_reset_btn",
+                           disabled=not rows):
+                st.session_state["seisdemo_armed"] = True
+                st.rerun()
+        else:
+            st.warning(
+                "This will remove **%d row(s)** — exactly the ones listed "
+                "above and nothing else. The Teapot 3D survey, the NPR-3 2D "
+                "lines, the wells and the rest of the file catalog are not "
+                "touched." % total)
+            a = st.columns([1, 1, 3])
+            if a[0].button("Yes, remove them", key="seisdemo_go_btn",
+                           type="primary"):
+                with st.spinner("Removing…"):
+                    out = d.reset(engine, apply=True)
+                st.session_state.pop("seisdemo_armed", None)
+                st.session_state["seisdemo_msg"] = "  ".join(
+                    "%s %s removed" % (k, v) for k, v in out.items())
+                st.rerun()
+            if a[1].button("Cancel", key="seisdemo_no_btn"):
+                st.session_state.pop("seisdemo_armed", None)
+                st.rerun()
+
+        msg = st.session_state.pop("seisdemo_msg", None)
+        if msg:
+            st.code(msg, language="text")
+
+
 def _demo():
     """tools/demo_teapot, or None when it cannot be imported."""
     try:
@@ -329,6 +415,7 @@ def render(engine=None):
         st.error("Loader registry: two loaders claim the same table — "
                  + "; ".join(bad))
 
+    render_seismic_demo_panel(engine)
     render_demo_panel(engine)
 
     for spec in SPECIAL:
