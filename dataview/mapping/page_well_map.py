@@ -5536,6 +5536,156 @@ def _photo_to_b64(file_path: str, _mtime: float = 0.0) -> str:
         return ""
 
 
+def _has_mud_log(engine, uwi):
+    """True when this well has a mud log row. Cheap enough to ask per well."""
+    if engine is None or not uwi:
+        return False
+    try:
+        from sqlalchemy import text as _text
+        with engine.connect() as _c:
+            if not _c.execute(_text(
+                    "SELECT OBJECT_ID('dataview.dv_well_mud_log')")).scalar():
+                return False
+            return bool(_c.execute(_text(
+                "SELECT COUNT(*) FROM dataview.dv_well_mud_log "
+                "WHERE uwi = :u"), {"u": uwi}).scalar())
+    except Exception:
+        return False
+
+
+def _render_mud_log(engine, uwi):
+    """The mud log strip for one well, on DRILLER'S depth.
+
+    SEPARATE FROM THE WIRELINE STRIP, DELIBERATELY. A mud log is on driller's
+    depth with lagged returns; the LAS files for this same well are on
+    logger's depth, and the two disagree by nine feet at the Tensleep A. One
+    button each keeps that honest -- overlaying them would file a sandstone
+    show under the Opeche and look entirely reasonable doing it.
+
+    Only offered where there IS one: 48-X-28 is the single well in this
+    database with a mud log, so every other well shows nothing rather than an
+    empty panel.
+    """
+    if not _has_mud_log(engine, uwi):
+        return
+    st.markdown("#### Mud log")
+    if not st.session_state.get("ml_show"):
+        if st.button("📜 Show mud log", key="ml_show_btn"):
+            st.session_state["ml_show"] = True
+            st.rerun()
+        st.caption("Driller's depth — not the same axis as the wireline logs.")
+        return
+    if st.button("✕ Hide mud log", key="ml_hide_btn"):
+        st.session_state.pop("ml_show", None)
+        st.rerun()
+
+    try:
+        # LOCAL, because this module does not import sys at all -- the other
+        # "sys." matches in this file are SQL (sys.columns). A bare name that
+        # is missing fails only when the line runs, and this line runs only
+        # when someone clicks the button.
+        import importlib
+        import sys as _sys
+        import tempfile
+        _root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        _tools = os.path.join(_root, "tools")
+        if _tools not in _sys.path:
+            _sys.path.insert(0, _tools)
+        _pm = importlib.import_module("plot_mudlog")
+        _mx = importlib.import_module("mudlog_export")
+    except Exception as _impexc:
+        st.caption("Mud log plotter unavailable: %s" % _impexc)
+        return
+
+    _dat = getattr(_pm, "DEFAULT_DAT", "")
+    if not _dat or not os.path.exists(_dat):
+        st.info(
+            "The mud log is catalogued, but its exported data has not been "
+            "written yet. Open the .LOG in the WellSight viewer and use "
+            "File → Export → “Write all data to an ASCII file”, saving to "
+            "%s." % (_dat or "C:\\Bulk\\mudlog_test\\export.dat"))
+        return
+
+    try:
+        _ex = _mx.parse(_dat)
+        _lo, _hi = _ex.depth_range
+    except Exception as _pexc:
+        st.caption("Could not read the mud log export: %s" % _pexc)
+        return
+
+    c1, c2 = st.columns([3, 1])
+    _top = c1.slider("Depth window (ft)", float(_lo), float(_hi),
+                     (float(max(_lo, 5250.0)), float(min(_hi, 5400.0))),
+                     step=10.0, key="ml_window")
+    _scale = c2.slider("in / 100 ft", 3.0, 12.0, 6.0, step=0.5,
+                       key="ml_scale")
+    try:
+        _out = os.path.join(tempfile.gettempdir(),
+                            "mudlog_%s_%d_%d.png"
+                            % (str(uwi)[-6:], int(_top[0]), int(_top[1])))
+        _pm.draw(_ex, _top[0], _top[1], _out, scale=_scale, width=17.0,
+                 dpi=110)
+        st.image(_out, use_container_width=True)
+        st.caption("%s · %.0f–%.0f ft · driller's depth · KB %s"
+                   % (_ex.header.get("Well Name", ""), _top[0], _top[1],
+                      _ex.header.get("K.B. Elevation", "?")))
+    except Exception as _dexc:
+        st.caption("Mud log plot failed: %s" % _dexc)
+
+
+def _unplaced_core_photos(engine, uwi):
+    """Photographs catalogued on disk that no dv_well_core_photo row claims.
+
+    HELD IS NOT LOST, BUT IT MUST NOT BE INVISIBLE EITHER. The core loader
+    places a photograph by matching its EXIF capture date to a core run's cut
+    date, or by reading a depth interval out of the file name. Twenty-four of
+    48-X-28's were shot on 4 June 2004 -- seventeen days after the last core
+    came up -- and carry a sequence number rather than a depth, so neither
+    link fires and the loader holds them with a reason.
+
+    They cannot simply be loaded: dv_well_core_photo requires core_id (an FK
+    to a real run), top_depth and base_depth, all NOT NULL, and none of the
+    three is known for these. Assigning them by running order would assume the
+    photographer worked top down -- likely, unverifiable, and a wrong depth on
+    a core photograph is precisely the confident-wrong value that plots and
+    gets quoted.
+
+    So they are shown, unplaced and labelled as such, where a geologist can
+    look at them and say what they are. That is the fact nobody has, and it is
+    not one this code can derive.
+    """
+    if engine is None or not uwi:
+        return []
+    try:
+        from sqlalchemy import text as _text
+        with engine.connect() as _c:
+            if not _c.execute(_text(
+                    "SELECT OBJECT_ID('file_catalog.GLOBAL_FILE_CATALOG')"
+            )).scalar():
+                return []
+            rows = _c.execute(_text("""
+                SELECT g.FILE_PATH, g.FILE_NAME
+                FROM file_catalog.GLOBAL_FILE_CATALOG g
+                WHERE g.FILE_PATH LIKE '%Core%CD Files%'
+                  AND (g.FILE_NAME LIKE '%.jpg' OR g.FILE_NAME LIKE '%.jpeg')
+                  AND NOT EXISTS (SELECT 1 FROM dataview.dv_well_core_photo p
+                                  WHERE p.file_path = g.FILE_PATH)
+                ORDER BY g.FILE_NAME
+            """)).fetchall()
+        seen, out = set(), []
+        for fp, fn in rows:
+            key = (fn or "").upper()
+            if key in seen:
+                continue
+            seen.add(key)
+            if fp and os.path.exists(fp):
+                out.append((fp, fn))
+        return out
+    except Exception:
+        return []
+
+
 def _render_photo_gallery(engine, uwis):
     """Core photographs at full size, on demand.
 
@@ -5624,6 +5774,32 @@ def _render_photo_gallery(engine, uwis):
         st.caption("No photographs match that combination.")
         return
 
+    # THE BIG ONE IS RENDERED IN THE PAGE, NOT IN A FULLSCREEN OVERLAY.
+    # Streamlit's own fullscreen control opens and closes again on this page:
+    # _watch_seis_choice is an @st.fragment(run_every=2) that keeps the map in
+    # step with the second screen, and a rerun tears the overlay down -- which
+    # is seen as a flicker. Nothing here depends on that overlay surviving, so
+    # the enlarged photograph is simply an image at full container width, and
+    # a rerun redraws it exactly where it was.
+    _big = st.session_state.get("cp_big")
+    if _big and os.path.exists(_big):
+        _brow = sub[sub["file_path"] == _big]
+        _cap = os.path.basename(_big)
+        if not _brow.empty:
+            _b = _brow.iloc[0]
+            _td, _bd = _b.get("top_depth"), _b.get("base_depth")
+            _dep = ("%.0f-%.0f ft" % (_td, _bd)
+                    if _pd.notna(_td) and _pd.notna(_bd) and _bd
+                    else ("%.0f ft" % _td if _pd.notna(_td) else ""))
+            _cap = " · ".join(x for x in (_dep, str(_b.get("photo_type") or ""),
+                                          str(_b.get("lighting") or ""),
+                                          os.path.basename(_big)) if x)
+        st.image(_big, caption=_cap, use_container_width=True)
+        if st.button("✕ Close enlarged photo", key="cp_close_btn"):
+            st.session_state.pop("cp_big", None)
+            st.rerun()
+        st.markdown("---")
+
     missing = 0
     grid = st.columns(3)
     shown = 0
@@ -5648,10 +5824,51 @@ def _render_photo_gallery(engine, uwis):
                 # SAY WHICH FILE. A silently skipped photograph reads as a
                 # core that was never photographed.
                 st.caption("%s: %s" % (r.get("file_name") or fp, _imgexc))
+            # KEY ENDS "_btn" so _is_action_key() excludes it from the persist
+            # sweep -- a button's value cannot be assigned, and the crash for
+            # trying surfaces on a LATER page.
+            if st.button("⤢ Enlarge", key="cp_big_%d_btn" % _i,
+                         use_container_width=True):
+                st.session_state["cp_big"] = fp
+                st.rerun()
         shown += 1
     if missing:
         st.caption("%d photograph(s) registered but not found on disk."
                    % missing)
+
+    # ── the ones no core run claims ───────────────────────────────────────
+    _un = _unplaced_core_photos(engine, uwis[0] if uwis else None)
+    if _un:
+        st.markdown("---")
+        st.markdown("##### Unplaced photographs (%d)" % len(_un))
+        st.caption(
+            "On the CD and catalogued, but not attached to a core run. The "
+            "loader places a photograph by its EXIF capture date matching a "
+            "run's cut date, or by a depth interval in the file name; these "
+            "have neither. Most were shot 4 June 2004, seventeen days after "
+            "the last core came up. They are shown so they can be identified "
+            "— a depth guessed from running order would be a wrong depth, and "
+            "a wrong depth on a core photograph gets quoted.")
+        if not st.session_state.get("cp_unplaced"):
+            if st.button("Show unplaced photographs", key="cp_unplaced_btn"):
+                st.session_state["cp_unplaced"] = True
+                st.rerun()
+        else:
+            if st.button("Hide unplaced photographs",
+                         key="cp_unplaced_hide_btn"):
+                st.session_state.pop("cp_unplaced", None)
+                st.rerun()
+            _ug = st.columns(4)
+            for _j, (_fp, _fn) in enumerate(_un):
+                with _ug[_j % 4]:
+                    try:
+                        st.image(_fp, caption=_fn, use_container_width=True)
+                    except Exception as _uexc:
+                        st.caption("%s: %s" % (_fn, _uexc))
+                    if st.button("⤢ Enlarge", key="cp_un_%d_btn" % _j,
+                                 use_container_width=True):
+                        st.session_state["cp_big"] = _fp
+                        st.rerun()
 
 
 def _photos_html(photos_df) -> str:
@@ -12817,6 +13034,11 @@ def run(engine=None):
             st.markdown(all_html, unsafe_allow_html=True)
             # The ticket's photos are thumbnails and always will be; this is
             # where the full-size ones live. See _render_photo_gallery.
+            try:
+                for _u in _summary_uwis[:1]:
+                    _render_mud_log(engine, _u)
+            except Exception as _mlexc:
+                st.caption("Mud log unavailable: %s" % _mlexc)
             try:
                 _render_photo_gallery(engine, _summary_uwis)
             except Exception as _galexc:
