@@ -7995,6 +7995,20 @@ def run(engine=None):
 
     _uwi_filter_active = (_early_qtype == "uwi" and st.session_state.get("wm_q_uwi_text", "").strip() != "")
 
+    # A has_* QUERY IS AS NARROW AS A UWI LOOKUP AND MUST BE TREATED LIKE ONE.
+    # "Has core data" matches one well in this database. A UWI lookup bypasses
+    # the scope and mode gates below because it is a deliberate, small request;
+    # so is this, and without the same bypass the wells never load. What the
+    # reader then sees is the DENSITY layer, which cannot honour the filter at
+    # all -- v_well_density_r* is pre-aggregated to a count per hexagon, and an
+    # EXISTS against a child table cannot be applied to a number computed
+    # before the question was asked. The hexagons therefore answer a different
+    # question, silently, and the filter looks broken when it is working.
+    _HAS_QUERIES = ("has_docs", "has_tops", "has_prod", "has_dst",
+                    "has_survey", "has_core", "has_core_photos", "has_petro")
+    _data_filter_active = (_early_qtype in _HAS_QUERIES
+                           and bool(_qry_where_attr))
+
     # All-states (continental) scope guard: when an onshore/all schema is
     # active but NO state (or Gulf) is constrained, the individual-well list is
     # meaningless to load (millions of wells) — only H3 density is allowed.
@@ -8034,6 +8048,7 @@ def run(engine=None):
         and not st.session_state.get("wells_suppressed", False)
         and (
             _uwi_filter_active   # explicit UWI lookup — allowed at any scope
+            or _data_filter_active  # has_* is just as narrow: same bypass
             or (
                 # small dataset at broad scope: guard let it through, so plot
                 _broad_scope and not _broad_forced_h3
@@ -8060,6 +8075,25 @@ def run(engine=None):
     # itself is @st.cache_data-decorated, so the "skip reload because
     # already loaded" optimization the flag was supposed to enable is
     # already free at the cache layer.
+
+    if _data_filter_active:
+        # THE COUNT IS THE FEEDBACK. One well out of 1,373 is visually
+        # indistinguishable from a filter that did nothing, so the number is
+        # said out loud whether it is 0, 1 or 900.
+        try:
+            _hit = _qry_wells_scope_count(engine, where_extra=_qry_where)
+        except Exception:
+            _hit = -1
+        _hlbl = _early_qsel or _early_qtype
+        if _hit == 0:
+            st.warning("%s — no wells match." % _hlbl)
+        elif _hit > 0:
+            st.caption("%s — %s well(s) match." % (_hlbl, format(_hit, ",")))
+            if st.session_state.get("h3_layer_on"):
+                st.caption(
+                    "The density hexagons count every well and cannot apply "
+                    "this filter — they are pre-aggregated. Read the well "
+                    "markers, not the shading.")
 
     if _need_wells:
         # Wells mode (or AI filter / dropdown active) — load the full well list.
