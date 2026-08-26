@@ -137,24 +137,52 @@ def add_geography_layer(m, engine, key: str, show: bool = True) -> int:
                  else {"fillOpacity": 0.0})
         return s
 
-    fg = folium.FeatureGroup(name=f"{label} ({len(gj['features']):,})",
-                             show=show)
     tip_fields = ["name"] + extras
     tip_aliases = ["Name"] + [c.replace("_", " ").title() for c in extras]
-    folium.GeoJson(
-        gj,
-        style_function=_style,
-        highlight_function=lambda _f, _c=color: {"weight": 4, "color": _c},
-        tooltip=folium.GeoJsonTooltip(fields=tip_fields, aliases=tip_aliases,
-                                      sticky=True),
-        # A TOOLTIP VANISHES WHEN THE POINTER DOES, which is fine for a name
-        # and useless for a file path you want to read or copy. The popup
-        # holds still. Same fields, one template, so it costs the aliases and
-        # nothing per feature.
-        popup=folium.GeoJsonPopup(fields=tip_fields, aliases=tip_aliases,
-                                  labels=True, max_width=340),
-    ).add_to(fg)
-    fg.add_to(m)
+
+    # ONE GROUP PER SURVEY, FOR SEISMIC ONLY. Leaflet's layer control gives a
+    # checkbox per FeatureGroup, so splitting here is what makes individual
+    # surveys switchable -- and it costs no rerun, because the toggling happens
+    # entirely in the browser. A Streamlit multiselect would rebuild and
+    # re-serialise the whole map to hide one rectangle.
+    #
+    # SEISMIC ONLY, deliberately. dv_seis_set holds a handful of surveys; the
+    # other four keys here are fields, leases, boundaries and pipelines, where
+    # the same split would put hundreds of checkboxes in the control and make
+    # it useless for everything including seismic.
+    if key == "seismic":
+        groups, order = {}, []
+        for _ft in gj["features"]:
+            _nm = str((_ft.get("properties") or {}).get("name") or "(unnamed)")
+            if _nm not in groups:
+                groups[_nm] = []
+                order.append(_nm)
+            groups[_nm].append(_ft)
+        # The label keeps the layer's icon so the survey rows read as one
+        # family in an alphabetical control rather than scattering.
+        _icon = label.split()[0]
+        parts = [("%s %s (%d)" % (_icon, _nm[:44], len(groups[_nm])),
+                  groups[_nm]) for _nm in order]
+    else:
+        parts = [("%s (%s)" % (label, format(len(gj["features"]), ",")),
+                  gj["features"])]
+
+    for _gname, _feats in parts:
+        fg = folium.FeatureGroup(name=_gname, show=show)
+        folium.GeoJson(
+            {"type": "FeatureCollection", "features": _feats},
+            style_function=_style,
+            highlight_function=lambda _f, _c=color: {"weight": 4, "color": _c},
+            tooltip=folium.GeoJsonTooltip(fields=tip_fields,
+                                          aliases=tip_aliases, sticky=True),
+            # A TOOLTIP VANISHES WHEN THE POINTER DOES, which is fine for a
+            # name and useless for a file path you want to read or copy. The
+            # popup holds still. Same fields, one template, so it costs the
+            # aliases and nothing per feature.
+            popup=folium.GeoJsonPopup(fields=tip_fields, aliases=tip_aliases,
+                                      labels=True, max_width=340),
+        ).add_to(fg)
+        fg.add_to(m)
     return len(gj["features"])
 
 

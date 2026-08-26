@@ -4218,6 +4218,19 @@ def _render_seis_pick(lines=None, df3d=None):
             else:
                 st.session_state["_seis_pick"] = dict(_f[_labels.index(_sel) - 1])
 
+    # A DOOR TO THE SECOND SCREEN THAT DOES NOT NEED A PICK FIRST. The link
+    # further down re-navigates the named window to the SELECTED file, which is
+    # the live push -- but it only exists once something is selected, so there
+    # was no way to simply put the seismic page on the other monitor and drive
+    # it from its own chooser. Same window name, so this opens the same window
+    # the pushes land in, not a second one.
+    if str(st.query_params.get("view") or "").lower() != "seis":
+        st.markdown(
+            '<a href="?view=seis" target="dwseis" rel="noopener" '
+            'style="font-size:0.82rem;text-decoration:none">'
+            '&#x2197; seismic page on second screen</a>',
+            unsafe_allow_html=True)
+
     _pick = st.session_state.get("_seis_pick")
     if not _pick:
         return
