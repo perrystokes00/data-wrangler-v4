@@ -4851,6 +4851,10 @@ def _add_seismic_3d(m, df):
 
         folium.Rectangle(
             bounds=[[min_lat, min_lon], [max_lat, max_lon]],
+            # TAGGED FOR THE PICKER. class_name becomes Leaflet className
+            # on the SVG path, which is how dv_seis_picker tells a 3D
+            # survey from a 2D line without guessing at layer names.
+            class_name="dv-seis-3d",
             color="#1d4ed8",
             weight=2,
             fill=True,
@@ -10132,6 +10136,10 @@ def run(engine=None):
                         # layer control entry is duplicated.
                         folium.PolyLine(
                             locations=_sl["pts"], color="#B36A00", weight=14,
+                            # "dv-hit" marks the invisible twin so the
+                            # picker can thicken the VISIBLE line without
+                            # shrinking the click target to match.
+                            class_name="dv-seis-2d dv-hit",
                             opacity=0.01,
                             tooltip=folium.Tooltip(
                                 f"<b>📈 2D line</b><br>{_sl['survey']}<br>"
@@ -10151,6 +10159,7 @@ def run(engine=None):
                         ).add_to(_groups[_sv])
                         folium.PolyLine(
                             locations=_sl["pts"], color="#B36A00", weight=2,
+                            class_name="dv-seis-2d",
                             opacity=0.9,
                             tooltip=folium.Tooltip(
                                 f"<b>📈 2D line</b><br>{_sl['survey']}<br>"
@@ -10730,6 +10739,147 @@ def run(engine=None):
         """)
         click_centre._parent = m
         m.add_child(click_centre)
+
+        # -- Pick tools: 2D line, 3D survey ------------------------------
+        # WHY A TOOL AND NOT JUST A CLICK. Clicking a line already opens
+        # its section -- but only when no draw tool is armed, and an armed
+        # rectangle wins every click and draws a box instead. That is the
+        # design (DV_DRAW_ACTIVE deliberately lets a half-drawn shape
+        # finish), so the answer is not to weaken it but to give picking a
+        # tool of its own that TAKES the mode, sitting beside the draw
+        # tools where a person already looks for a mode.
+        #
+        # ARMING DISARMS THE DRAW TOOL by sending Escape, which is what
+        # Leaflet.Draw itself listens for -- version-agnostic, and it
+        # cancels a part-drawn shape cleanly rather than leaving one
+        # half-built with its handler still live.
+        #
+        # WHILE ARMED, ONLY THAT KIND IS CLICKABLE. Everything else gets
+        # pointer-events:none, so a well marker or a county polygon under
+        # the line cannot take the click -- which is the other half of why
+        # picking a 2 px line was unreliable. The class comes from
+        # class_name on the layers themselves, so nothing here has to
+        # guess at layer names.
+        #
+        # NO PYTHON, NO RERUN. Arming is a CSS class on the container; the
+        # pick itself still travels the existing popup path.
+        pick_tools = MacroElement()
+        pick_tools._name = "dv_seis_picker"
+        pick_tools._template = Template(u"""
+            {% macro html(this, kwargs) %}
+            <style>
+            .dv-pick-2d .leaflet-overlay-pane path:not(.dv-seis-2d),
+            .dv-pick-3d .leaflet-overlay-pane path:not(.dv-seis-3d) {
+                pointer-events: none !important;
+            }
+            .dv-pick-2d .leaflet-marker-pane,
+            .dv-pick-3d .leaflet-marker-pane { pointer-events: none; }
+            .dv-pick-2d .leaflet-overlay-pane path.dv-seis-2d:not(.dv-hit) {
+                stroke-width: 5px !important;
+            }
+            .dv-pick-3d .leaflet-overlay-pane path.dv-seis-3d {
+                stroke-width: 4px !important;
+            }
+            .dv-pick-2d .leaflet-container,
+            .dv-pick-3d .leaflet-container { cursor: pointer !important; }
+            .dv-picker-ctl a { font: 700 11px/26px system-ui, sans-serif;
+                text-align: center; }
+            </style>
+            {% endmacro %}
+            {% macro script(this, kwargs) %}
+            (function() {
+                function findMap() {
+                    var el = document.querySelector(".leaflet-container");
+                    if (!el) { return null; }
+                    for (var k in window) {
+                        try {
+                            var v = window[k];
+                            if (v && v._container === el &&
+                                    typeof v.on === "function") { return v; }
+                        } catch (e) { /* unreadable key */ }
+                    }
+                    return null;
+                }
+                function install() {
+                    if (typeof L === "undefined") {
+                        setTimeout(install, 200); return;
+                    }
+                    var mapInst = findMap();
+                    if (!mapInst) { setTimeout(install, 200); return; }
+                    if (mapInst.__dv_picker_bound) { return; }
+                    mapInst.__dv_picker_bound = true;
+
+                    var mode = null;
+                    var links = {};
+                    var box = mapInst.getContainer();
+
+                    function disarmDraw() {
+                        try {
+                            document.dispatchEvent(new KeyboardEvent(
+                                "keydown", {key: "Escape", keyCode: 27,
+                                            which: 27, bubbles: true}));
+                        } catch (e) { /* older browser */ }
+                        window.DV_DRAW_ACTIVE = false;
+                    }
+                    function paint() {
+                        box.classList.remove("dv-pick-2d", "dv-pick-3d");
+                        if (mode) { box.classList.add("dv-pick-" + mode); }
+                        ["2d", "3d"].forEach(function(k) {
+                            var a = links[k];
+                            if (!a) { return; }
+                            a.style.background =
+                                (mode === k) ? "#f59e0b" : "#fff";
+                            a.style.color =
+                                (mode === k) ? "#fff" : "#0f172a";
+                        });
+                    }
+                    function arm(k) {
+                        mode = (mode === k) ? null : k;
+                        if (mode) { disarmDraw(); }
+                        paint();
+                    }
+
+                    var Ctl = L.Control.extend({
+                        options: { position: "topright" },
+                        onAdd: function() {
+                            var c = L.DomUtil.create(
+                                "div", "leaflet-bar dv-picker-ctl");
+                            [["2d", "2D", "Pick a 2D seismic line: click "
+                                    + "here, then click a line to open its "
+                                    + "section below the map."],
+                             ["3d", "3D", "Pick a 3D survey: click here, "
+                                    + "then click a survey footprint."]
+                            ].forEach(function(spec) {
+                                var a = L.DomUtil.create("a", "", c);
+                                a.href = "#";
+                                a.innerHTML = spec[1];
+                                a.title = spec[2];
+                                links[spec[0]] = a;
+                                L.DomEvent.on(a, "click", function(ev) {
+                                    L.DomEvent.preventDefault(ev);
+                                    arm(spec[0]);
+                                });
+                            });
+                            L.DomEvent.disableClickPropagation(c);
+                            paint();
+                            return c;
+                        }
+                    });
+                    mapInst.addControl(new Ctl());
+
+                    // A PICK ENDS THE MODE. Leaving it armed would keep
+                    // every well marker unclickable after the section
+                    // opened, which reads as a frozen map.
+                    mapInst.on("popupopen", function() {
+                        if (mode) { mode = null; paint(); }
+                    });
+                }
+                install();
+            })();
+            {% endmacro %}
+        """)
+        pick_tools._parent = m
+        m.add_child(pick_tools)
 
 
         # Crosshair cursor over map, pointer over markers
