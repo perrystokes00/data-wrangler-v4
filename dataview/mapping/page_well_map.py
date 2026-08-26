@@ -8004,10 +8004,25 @@ def run(engine=None):
     # EXISTS against a child table cannot be applied to a number computed
     # before the question was asked. The hexagons therefore answer a different
     # question, silently, and the filter looks broken when it is working.
+    #
+    # BOUNDED, BECAUSE A has_* QUERY IS NOT A UWI LOOKUP. A typed UWI list is
+    # small by construction; "Has formation tops" matches 1,079 wells here and
+    # would trigger the 30-second load at continental scope. So the count is
+    # taken FIRST and the bypass only applies when the answer is small enough
+    # to draw. Above that the existing scope rules stand and the caption says
+    # why -- an unbounded bypass would have traded a filter that looked broken
+    # for a map that hangs.
     _HAS_QUERIES = ("has_docs", "has_tops", "has_prod", "has_dst",
                     "has_survey", "has_core", "has_core_photos", "has_petro")
-    _data_filter_active = (_early_qtype in _HAS_QUERIES
-                           and bool(_qry_where_attr))
+    _HAS_PLOT_CAP = 2500
+    _has_hits = None
+    if _early_qtype in _HAS_QUERIES and _qry_where_attr:
+        try:
+            _has_hits = _qry_wells_scope_count(engine, where_extra=_qry_where)
+        except Exception:
+            _has_hits = None
+    _data_filter_active = (_has_hits is not None
+                           and 0 < _has_hits <= _HAS_PLOT_CAP)
 
     # All-states (continental) scope guard: when an onshore/all schema is
     # active but NO state (or Gulf) is constrained, the individual-well list is
@@ -8076,19 +8091,21 @@ def run(engine=None):
     # already loaded" optimization the flag was supposed to enable is
     # already free at the cache layer.
 
-    if _data_filter_active:
+    if _has_hits is not None:
         # THE COUNT IS THE FEEDBACK. One well out of 1,373 is visually
-        # indistinguishable from a filter that did nothing, so the number is
-        # said out loud whether it is 0, 1 or 900.
-        try:
-            _hit = _qry_wells_scope_count(engine, where_extra=_qry_where)
-        except Exception:
-            _hit = -1
+        # indistinguishable from a filter that did nothing -- and if the map
+        # has been panned away from it, from a filter that found nothing. The
+        # number is said out loud whether it is 0, 1 or 1,079.
         _hlbl = _early_qsel or _early_qtype
-        if _hit == 0:
+        if _has_hits == 0:
             st.warning("%s — no wells match." % _hlbl)
-        elif _hit > 0:
-            st.caption("%s — %s well(s) match." % (_hlbl, format(_hit, ",")))
+        else:
+            st.caption(
+                "%s — %s well(s) match.%s"
+                % (_hlbl, format(_has_hits, ","),
+                   "" if _has_hits <= _HAS_PLOT_CAP else
+                   "  Too many to plot individually at this scope — narrow "
+                   "the area or switch to Wells mode."))
             if st.session_state.get("h3_layer_on"):
                 st.caption(
                     "The density hexagons count every well and cannot apply "
