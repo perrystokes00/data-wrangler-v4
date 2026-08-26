@@ -536,6 +536,23 @@ footer,
 # SESSION STATE
 # ═══════════════════════════════════════════════════════════════════════
 
+def _teacup_mod():
+    """tools/demo_teacup, or None. Imported lazily so a missing tool cannot
+    stop the app from starting."""
+    try:
+        # app_v4 imports sys AS _sys, so a bare sys here is unbound -- and the
+        # except below would have swallowed the NameError and reported the
+        # tool missing forever. Import it locally and name it plainly.
+        import os as _o, sys as _s
+        _t = _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), "tools")
+        if _t not in _s.path:
+            _s.path.insert(0, _t)
+        import demo_teacup
+        return demo_teacup
+    except Exception:
+        return None
+
+
 DEFAULTS = dict(
     engine          = None,
     dialect         = None,       # "mssql" | "oracle" | "snowflake"
@@ -1046,23 +1063,6 @@ with st.sidebar:
                             _lines.append("%s: %s" % (_ds, ",  ".join(
                                 f"{k} {v}" for k, v in _d.items()) or "none"))
                     st.success("Teacup reset — " + " | ".join(_lines))
-
-
-def _teacup_mod():
-    """tools/demo_teacup, or None. Imported lazily so a missing tool cannot
-    stop the app from starting."""
-    try:
-        # app_v4 imports sys AS _sys, so a bare sys here is unbound -- and the
-        # except below would have swallowed the NameError and reported the
-        # tool missing forever. Import it locally and name it plainly.
-        import os as _o, sys as _s
-        _t = _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), "tools")
-        if _t not in _s.path:
-            _s.path.insert(0, _t)
-        import demo_teacup
-        return demo_teacup
-    except Exception:
-        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════
