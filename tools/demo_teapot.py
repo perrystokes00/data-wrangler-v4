@@ -32,7 +32,7 @@ carries row_created_by = 'PROMOTE' -- the generic file-catalog stamp shared
 with everything that path has ever written -- so the stamp is useless as a
 scope here. The synthetic 2D set is separable another way: one seis_set_id,
 one folder, seventeen lines this project generated. Reset removes that set,
-its lines, and ITS catalog rows (the 17 under 2d_synthetic, so a re-scan
+its lines, and ITS catalog rows (the 17 under synth_seismic, so a re-scan
 really re-scans instead of reporting everything already done). The real 3D
 survey and the real lineA-E match neither and are never named.
 
@@ -87,11 +87,12 @@ LOADERS = [
 # real sets -- the 3D survey and lineA-E -- share neither, and are never
 # named here.
 SEIS_SET_LIKE = "%SYNTHETIC%"
-SEIS_FOLDER_LIKE = "%2d_synthetic%"
-SEIS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__)))),
-    "training", "Teapot_Field_Model", "seismic", "2d_synthetic")
+# The underscore is a LIKE wildcard; bracket it so the pattern matches
+# the folder rather than anything merely shaped like it.
+SEIS_FOLDER_LIKE = "%synth[_]seismic%"
+# Moved in beside the rest of the synthetic demo data, so all three
+# datasets the demo loads share one root.
+SEIS_DIR = r"C:\Bulk\Synthetic\synthetic_data\synth_seismic"
 
 # What the file subset carries. Kept small deliberately: a demo that waits is
 # a demo that gets edited out.
@@ -144,7 +145,7 @@ def seismic_counts(c):
     except Exception:
         return {}
     return {"dv_seis_set": sets, "dv_seis_line": lines,
-            "GLOBAL_FILE_CATALOG (2d_synthetic)": cat}
+            "GLOBAL_FILE_CATALOG (synth_seismic)": cat}
 
 
 def reset_seismic(engine, apply=False):
@@ -182,10 +183,10 @@ def reset_seismic(engine, apply=False):
             r = c.execute(text(
                 "DELETE FROM file_catalog.GLOBAL_FILE_CATALOG "
                 "WHERE FILE_PATH LIKE :f"), {"f": SEIS_FOLDER_LIKE})
-            done["GLOBAL_FILE_CATALOG (2d_synthetic)"] = (
+            done["GLOBAL_FILE_CATALOG (synth_seismic)"] = (
                 r.rowcount if r.rowcount and r.rowcount > 0 else 0)
         except Exception as exc:
-            done["GLOBAL_FILE_CATALOG (2d_synthetic)"] = "failed: %s" % exc
+            done["GLOBAL_FILE_CATALOG (synth_seismic)"] = "failed: %s" % exc
     return done
 
 

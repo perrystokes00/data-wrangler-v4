@@ -4,7 +4,7 @@ Three datasets, loaded on camera and taken back out between takes:
 
   wells     300 wells + children from synth_data\*.csv   (Bulk Tabular Loader)
   docs      1,055 files from synth_docs\                 (the file pipeline)
-  seismic   17 lines from 2d_synthetic\                  (the file pipeline)
+  seismic   17 lines from synth_seismic\                 (the file pipeline)
 
 EACH IS SCOPED BY WHAT IT IS, NOT BY WHEN IT ARRIVED. row_created_by is
 'PROMOTE' for everything the file-catalog path writes, so a stamp cannot tell
@@ -12,7 +12,7 @@ these rows from any other. What can:
 
   wells     the 300 uwis listed in synth_data\dv_well.csv, read at run time
   docs      the INVENTORY_IDs of files under synth_docs\
-  seismic   the seismic set built from 2d_synthetic\
+  seismic   the seismic set built from synth_seismic\
 
 The wells go through tools/delete_wells.py, which derives the child order from
 sys.foreign_keys rather than a written-down list -- 24 tables reference
@@ -38,10 +38,7 @@ DATA_DIR = os.path.join(SYNTH, "synth_data")
 DOCS_DIR = os.path.join(SYNTH, "synth_docs")
 WELL_CSV = os.path.join(DATA_DIR, "dv_well.csv")
 
-# The synthetic 2D lines sit beside the repo, not inside it.
-SEIS_DIR = os.path.join(
-    os.path.dirname(REPO_ROOT),
-    "training", "Teapot_Field_Model", "seismic", "2d_synthetic")
+SEIS_DIR = os.path.join(SYNTH, "synth_seismic")
 SEIS_SET_LIKE = "%SYNTHETIC%"
 
 DOC_EXTS = ".las,.pdf,.docx"

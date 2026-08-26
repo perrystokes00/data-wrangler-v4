@@ -43,9 +43,9 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-OUT_DIR = os.path.join(
-    r"C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler",
-    "training", "Teapot_Field_Model", "seismic", "2d_synthetic")
+# Beside the rest of the synthetic demo data, which is where the demo
+# loaders read from -- regenerating writes straight back into the set.
+OUT_DIR = r"C:\Bulk\Synthetic\synthetic_data\synth_seismic"
 
 CDP_SPACING_M = 25.0      # trace every 25 m along the line
 SAMPLE_INT_US = 2000      # 2 ms
