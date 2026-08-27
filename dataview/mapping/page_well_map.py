@@ -9358,6 +9358,10 @@ def run(engine=None):
         # depend on Area, and Query options are constrained by Area's
         # "queries" whitelist. active_area was resolved up-front so the
         # downstream columns can use it.
+        # NB: the page-entry block writes wm_area_sel = "🌎 All schemas", so
+        # an index= here would never apply -- a stored value always wins. The
+        # opening VIEW is settled where the camera is chosen instead: with no
+        # layer switched on, that frames the lower 48 whatever the schema is.
         area_sel = st.selectbox(
             "🗂 Schema", _area_labels_display,
             key="wm_area_sel",
@@ -11071,6 +11075,15 @@ def run(engine=None):
                     [lat0 - _zt_half, lon0 - _zt_half],
                     [lat0 + _zt_half, lon0 + _zt_half],
                 ]
+            elif st.session_state.get("map_mode", "none") == "none":
+                # NOTHING IS BEING DRAWN, SO FRAME THE COUNTRY. Both layer
+                # toggles start off, and the branches below would still
+                # centroid-zoom onto whatever wells the schema happens to
+                # hold -- so the map opened tight on Teapot Dome with no
+                # wells on it, which reads as a broken view rather than an
+                # empty one. Zooming to data nobody has asked to see is the
+                # wrong default; the lower 48 says "pick something".
+                lat0, lon0, zoom0 = 39.5, -98.35, 4
             elif not dff.empty:
                 # Wells loaded — center on their centroid
                 lat0  = dff["lat"].mean()
