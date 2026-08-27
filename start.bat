@@ -64,11 +64,29 @@ if not exist "%PY%" set "PY=python"
 set "ACTION=%~1"
 if "%ACTION%"=="" set "ACTION=start"
 
+REM WATCHING SOURCES COSTS SOMETHING, AND ON DEMO DAY IT COSTS TOO MUCH.
+REM With the watcher on, every save to a local module makes Streamlit reload
+REM it -- page_well_map is 711 KB and takes ~1.2 s to import -- and the repo
+REM lives inside OneDrive, which touches mtimes of its own accord. Eighteen
+REM edits in one morning is eighteen reloads the running session absorbed.
+REM
+REM   start.bat start nowatch     no watcher; edits need a restart
+REM   start.bat restart nowatch   same, after stopping
+REM
+REM Which is what .streamlit\config.toml asks for already; this script's
+REM --server.fileWatcherType auto is the override, and this turns it off
+REM again without editing either file.
+set "WATCH=auto"
+if /i "%~2"=="nowatch" set "WATCH=none"
+if /i "%~2"=="no-watch" set "WATCH=none"
+if /i "%ACTION%"=="nowatch" (set "WATCH=none" & set "ACTION=start")
+
 if /i "%ACTION%"=="start"   goto :start
 if /i "%ACTION%"=="stop"    goto :stop
 if /i "%ACTION%"=="restart" goto :restart
 if /i "%ACTION%"=="status"  goto :status
 echo Unknown action "%ACTION%".  Use: start ^| stop ^| restart ^| status
+echo Add "nowatch" to start or restart to run without the file watcher.
 exit /b 2
 
 REM ---------------------------------------------------------------------------
@@ -94,7 +112,7 @@ echo Using %PY%
 REM Start via PowerShell purely to capture the PID. A new console window opens
 REM so Streamlit's own output stays visible - that log is worth having in view.
 for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "(Start-Process -FilePath '%PY%' -ArgumentList @('-m','streamlit','run','%APP%','--server.port','%PORT%','--server.headless','false','--server.fileWatcherType','auto') -WorkingDirectory '%~dp0.' -PassThru).Id"`) do set "DWPID=%%P"
+    "(Start-Process -FilePath '%PY%' -ArgumentList @('-m','streamlit','run','%APP%','--server.port','%PORT%','--server.headless','false','--server.fileWatcherType','%WATCH%') -WorkingDirectory '%~dp0.' -PassThru).Id"`) do set "DWPID=%%P"
 
 if not defined DWPID (
     echo ERROR: could not start %PY%
@@ -146,7 +164,10 @@ REM ---------------------------------------------------------------------------
 call "%~f0" stop
 REM A socket does not free instantly; give it a moment before rebinding.
 timeout /t 2 /nobreak >nul
-call "%~f0" start
+REM FORWARD THE SECOND ARGUMENT. Without it "restart nowatch" stopped the
+REM server and started a WATCHING one, which is the failure that looks like
+REM the switch does not work rather than like a script that dropped it.
+call "%~f0" start %~2
 exit /b 0
 
 REM ---------------------------------------------------------------------------
