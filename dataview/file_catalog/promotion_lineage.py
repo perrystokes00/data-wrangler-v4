@@ -135,6 +135,22 @@ LINEAGE = (
     # LINEAGE, being reported, and answering "Nothing" for 124 real rows
     # because the loader never wrote their INVENTORY_ID. The pair being listed
     # is only half of the test; the rows have to cite the file.
+    # ── ADDED 27 Aug — SEISMIC WAS NEVER HERE ───────────────────────────────
+    # The header comment above has said since day one that "logs and seismic
+    # have no cat_ stage -- cat_ is None for them". Logs are listed. Seismic
+    # never was, so every report built on this tuple has been silently blind
+    # to it: promote lifts dv_seis_line and dv_seis_set on their own dedicated
+    # steps, the rows carry INVENTORY_ID, and the provenance scorecard counted
+    # none of them. A SEG-Y is the largest structured file this system reads;
+    # omitting it understates exactly the half of the split it belongs to.
+    #
+    # dv_seis_set carries the column but not the values -- a set is an
+    # aggregate of files, not one file -- so it reports as unattributed rather
+    # than as either kind. That is the honest answer and it is visible, which
+    # is the whole point of the "No source file" card.
+    (None,                      "dv_seis_line",           "seismic_line"),
+    (None,                      "dv_seis_set",            "seismic_set"),
+
     (None,                      "dv_well_core_photo",     "core_photo"),
     (None,                      "dv_well_mud_log",        "mudlog"),
     (None,                      "dv_well_shows",          "shows"),

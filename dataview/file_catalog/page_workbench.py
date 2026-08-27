@@ -5273,6 +5273,71 @@ def _seismic_coverage(engine):
                 st.error(f"Could not arm re-extract: {str(_e2)[:160]}")
 
 
+_MIX_S = "#2a78d6"      # structured  — validated categorical pair, passes the
+_MIX_U = "#eb6834"      # documents     six colour checks on both surfaces
+
+
+def _mix_bars(tbls, mode):
+    """Per-table bars as HTML, one panel per QUESTION.
+
+    SHARE and SIZE cannot be the same bar. Drawn as share, a 40-row table and
+    a 2,903-row table are identical marks; drawn as size, the tables that
+    exist only because somebody read a PDF shrink to slivers beside one
+    survey table. So `mode` picks which, and the caller shows both.
+
+    Inline styles rather than a <style> block: this renders inside an
+    expander through st.markdown(unsafe_allow_html=True), and a stylesheet
+    there leaks to the rest of the page. Colours are explicit; everything
+    else inherits, so the panel follows the Streamlit theme.
+    """
+    rows = [t for t in tbls if t.get("records")]
+    if not rows:
+        return ""
+    if mode == "share":
+        rows.sort(key=lambda t: (-(100.0 * t.get("Unstructured", 0)
+                                   / t["records"]), -t["records"]))
+    else:
+        rows.sort(key=lambda t: -t["records"])
+    biggest = max(t["records"] for t in rows)
+    out = ['<div style="font-size:0.82rem;line-height:1.5">']
+    for t in rows:
+        n = t["records"]
+        s, u = t.get("Structured", 0), t.get("Unstructured", 0)
+        pct = 100.0 * u / n
+        # share: the pair fills the track. size: the pair is scaled to the
+        # largest table and the track is left empty behind it.
+        grp = 100.0 if mode == "share" else max(0.4, 100.0 * n / biggest)
+        segs = ""
+        if s:
+            segs += ('<div title="%s — structured · %s rows" style="width:%.3f%%;'
+                     'background:%s;border-radius:3px"></div>'
+                     % (t["table"], format(s, ","), 100.0 * s / n, _MIX_S))
+        if u:
+            segs += ('<div title="%s — documents · %s rows" style="width:%.3f%%;'
+                     'background:%s;border-radius:3px"></div>'
+                     % (t["table"], format(u, ","), 100.0 * u / n, _MIX_U))
+        out.append(
+            '<div style="display:flex;align-items:center;gap:10px;margin:3px 0">'
+            '<div style="flex:0 0 190px;font-family:ui-monospace,Consolas,'
+            'monospace;font-size:0.74rem;opacity:.78;overflow-wrap:anywhere">'
+            '%s</div>'
+            '<div style="flex:1 1 auto;display:flex;height:13px;%s'
+            'border-radius:3px">'
+            '<div style="display:flex;gap:2px;width:%.3f%%;min-width:3px">%s</div>'
+            '</div>'
+            '<div style="flex:0 0 118px;text-align:right;font-family:'
+            'ui-monospace,Consolas,monospace;font-size:0.72rem;'
+            'font-variant-numeric:tabular-nums"><b>%s</b>'
+            '<span style="opacity:.6"> rows</span> '
+            '<span style="color:%s">%.0f%%</span></div></div>'
+            % (t["table"],
+               ("background:rgba(128,128,128,.16);" if mode == "share" else ""),
+               grp, segs, format(n, ","),
+               _MIX_U if u else "inherit", pct))
+    out.append("</div>")
+    return "".join(out)
+
+
 def _structure_scorecard(engine):
     """How much of the DATA came from structured files versus documents.
 
@@ -5294,8 +5359,8 @@ def _structure_scorecard(engine):
                      expanded=False):
         st.caption(
             "Counts **records** in the gold tables, credited to the file each "
-            "one came from. Structured: %s — everything else counts as "
-            "unstructured."
+            "one came from — wells, logs and seismic together. Structured: %s "
+            "— everything else counts as unstructured."
             % ", ".join(e.lstrip('.') for e in STRUCTURED_EXTS))
         _sc1, _sc2 = st.columns([3, 1])
         _root = _sc1.text_input(
@@ -5344,6 +5409,31 @@ def _structure_scorecard(engine):
             help="Rows carrying no INVENTORY_ID: generated, hand-seeded, or "
                  "loaded by a path that does not stamp one. They came from "
                  "no file, so they are counted but not classified.")
+
+        # ── the two bar panels ─────────────────────────────────────────
+        # Drawn before the tables because this is the part that is READ. The
+        # dataframes below stay: they sort, they copy, and they carry the
+        # no-file column the bars leave out.
+        _tb = _res.get("by_table") or []
+        _legend = (
+            '<div style="display:flex;gap:18px;flex-wrap:wrap;font-size:0.78rem;'
+            'opacity:.85;margin:2px 0 8px">'
+            '<span><span style="display:inline-block;width:10px;height:10px;'
+            'border-radius:2px;background:%s;margin-right:6px"></span>'
+            'Structured</span>'
+            '<span><span style="display:inline-block;width:10px;height:10px;'
+            'border-radius:2px;background:%s;margin-right:6px"></span>'
+            'Documents</span></div>' % (_MIX_S, _MIX_U))
+        if _tb:
+            st.markdown("**Split by table** — what fraction of each came from "
+                        "documents")
+            st.markdown(_legend + _mix_bars(_tb, "share"),
+                        unsafe_allow_html=True)
+            st.markdown("**How much data is in each** — the same tables by "
+                        "row count")
+            st.caption("Share and size are different questions, so they are "
+                       "not the same bar.")
+            st.markdown(_mix_bars(_tb, "size"), unsafe_allow_html=True)
 
         # ── per mirror table, as bars ──────────────────────────────────
         # THE TOTALS HIDE THE INTERESTING PART. Corpus-wide, one LAS corpus
