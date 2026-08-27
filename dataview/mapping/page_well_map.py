@@ -223,17 +223,35 @@ def _tstate():
 
 
 def _marks_begin(tag=""):
-    """Start a render's timing, keeping the previous render's for display."""
+    """Start a render's timing, keeping the previous render's for display.
+
+    THE HEADER CARRIES THE RENDER COUNT AND THE PREVIOUS RENDER'S TOTAL,
+    because the first log this produced showed no slow step anywhere and was
+    still describing a slow page: fifty renders at ~2.8s each. The count is
+    the number that explains it, so it goes where it cannot be missed.
+
+    A render whose header is followed by NO marks did no work -- it ended in
+    an st.rerun() before reaching the first phase. Those are pure waste and
+    the run of seven in a row is what sent me looking.
+    """
     if not _MAP_TIMERS:
         return
     _s = _tstate()
+    _prev_total = 0.0
     if _s.get("_wm_marks"):
         _s["_wm_marks_prev"] = _s.get("_wm_marks")
         _s["_wm_calls_prev"] = _s.get("_wm_calls") or []
+        _prev_total = max((_m.get("cumulative", 0)
+                           for _m in _s.get("_wm_marks") or []), default=0.0)
+    _n = int(_s.get("_wm_render_n") or 0) + 1
+    _s["_wm_render_n"] = _n
+    _s["_wm_render_total"] = float(_s.get("_wm_render_total") or 0.0) + _prev_total
     _now = time.perf_counter()
     _s["_wm_marks"], _s["_wm_calls"] = [], []
     _s["_wm_mark_t0"] = _s["_wm_render_t0"] = _now
-    print("[map] ===== render start %s =====" % (tag or ""), flush=True)
+    print("[map] ===== render #%d start  (previous %.2fs, %.1fs in %d renders)"
+          "  %s" % (_n, _prev_total, _s["_wm_render_total"], _n - 1, tag or ""),
+          flush=True)
 
 
 def _mark(label):
@@ -8759,7 +8777,14 @@ def run(engine=None):
         # The phases already sit at the render's natural boundaries, so they
         # are also where the clock should be read. One line here beats a mark
         # inserted at every one of them.
-        _mark(text or ("phase %d" % pct))
+        #
+        # LABELLED "-> x", because a mark reports the time BEFORE the thing it
+        # names. The first log read "2.070s  Rendering map in browser", which
+        # anyone would take for st_folium's cost; it was the two seconds of
+        # building spent getting there, and st_folium was the 0.5s on the
+        # NEXT line. A timing log that invites the wrong conclusion is worse
+        # than none.
+        _mark("-> " + (text or ("phase %d" % pct)))
         if pct >= 100:
             _phase_msg.empty()
             _phase_bar.empty()
