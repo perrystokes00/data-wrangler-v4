@@ -292,6 +292,93 @@ def available(con):
     return out
 
 
+# ── structured vs unstructured ─────────────────────────────────────────────
+# NAMED BY EXTENSION, NOT BY FILE_TYPE_GROUP. The catalog already groups files
+# (Well Log, Seismic, TABULAR, Office, PDF, Image...), and mapping those groups
+# onto two buckets would be a THIRD list to keep in step with the two that
+# already exist -- and the failure would be silent: a new group would land in
+# whichever bucket the default chose and the percentages would still look
+# plausible.
+#
+# So the extensions are named, and anything not named is reported as
+# UNCLASSIFIED rather than being folded into either side. A number you can see
+# is missing is worth more than a total that is quietly wrong -- the same
+# reason promote holds a row instead of guessing at it.
+STRUCTURED_EXTS = (
+    ".las", ".dlis", ".lis",            # wireline
+    ".sgy", ".segy",                    # seismic
+    ".csv", ".tsv", ".xls", ".xlsx",    # tabular
+    ".xml",                             # WITSML
+    # MUD.LOG 4.4b binary — ".log" in this corpus, ".dat" in others. Named
+    # here because the UNCLASSIFIED bucket caught it: 16 records from one
+    # file, sitting in neither column until someone looked. That is what the
+    # bucket is for, and it is why nothing gets a default side.
+    ".log", ".dat",
+)
+UNSTRUCTURED_EXTS = (
+    ".pdf",
+    ".doc", ".docx", ".ppt", ".pptx", ".rtf", ".odt",
+    ".txt",
+    ".jpg", ".jpeg", ".tif", ".tiff", ".png", ".bmp",
+)
+
+
+def structure_mix(engine, root=None):
+    """Rows in dv_* attributed to the KIND of file they came from.
+
+    Returns {"rows": [ {kind, ext, files, records} ], "tables": n}.
+
+    COUNTS RECORDS, NOT FILES. "What percentage of the data came from
+    documents" is a question about rows -- one PDF yielding four tops and one
+    LAS yielding nine hundred curve points are not half the corpus each.
+
+    ATTRIBUTED THROUGH INVENTORY_ID INTO dv_*, which is the honest lineage
+    this module exists for. Counting the cat_* mirrors instead would report
+    almost nothing: promote MOVES rows out of them, so a successful load
+    leaves them empty.
+
+    The table list is available(), so this agrees with file_detail and the
+    stage scorecard by construction rather than by a list kept in step.
+    """
+    ext_case = (
+        "CASE WHEN LOWER(g.FILE_EXT) IN (%s) THEN 'Structured' "
+        "     WHEN LOWER(g.FILE_EXT) IN (%s) THEN 'Unstructured' "
+        "     ELSE 'Unclassified' END"
+        % (", ".join("'%s'" % e for e in STRUCTURED_EXTS),
+           ", ".join("'%s'" % e for e in UNSTRUCTURED_EXTS)))
+    where_root = ""
+    params = {}
+    if root:
+        where_root = " AND g.FILE_PATH LIKE :root "
+        params["root"] = root.rstrip("\\") + "\\%"
+
+    with engine.connect() as con:
+        pairs = available(con)
+        if not pairs:
+            return {"rows": [], "tables": 0}
+        # One SELECT per dv_ table, unioned. Each row is credited once, to the
+        # file its INVENTORY_ID names.
+        parts = [
+            "SELECT %s AS kind, LOWER(g.FILE_EXT) AS ext, "
+            "       d.INVENTORY_ID AS inv, COUNT(*) AS n "
+            "  FROM %s.[%s] d "
+            "  JOIN file_catalog.GLOBAL_FILE_CATALOG g "
+            "    ON g.INVENTORY_ID = d.INVENTORY_ID "
+            " WHERE d.INVENTORY_ID IS NOT NULL %s"
+            " GROUP BY %s, LOWER(g.FILE_EXT), d.INVENTORY_ID"
+            % (ext_case, DV_SCHEMA, dv, where_root, ext_case)
+            for _cat, dv, _lbl in pairs
+        ]
+        sql = ("SELECT kind, ext, COUNT(DISTINCT inv) AS files, "
+               "       SUM(n) AS records FROM (%s) q "
+               " GROUP BY kind, ext ORDER BY SUM(n) DESC"
+               % " UNION ALL ".join(parts))
+        rows = [{"kind": r[0], "ext": r[1], "files": int(r[2] or 0),
+                 "records": int(r[3] or 0)}
+                for r in con.execute(_t(sql), params).fetchall()]
+    return {"rows": rows, "tables": len(pairs)}
+
+
 def seismic_ok(con):
     """Seismic is credited by SURVEY NAME, not INVENTORY_ID lineage — a SEG-Y
     line file is done once its survey reached dv_seis_set. Needs both objects."""

@@ -4970,6 +4970,8 @@ def _tab_pipeline(engine, dialect):
 
     _pipeline_report(engine)
 
+    _structure_scorecard(engine)
+
     _seismic_coverage(engine)
 
     st.divider()
@@ -5269,6 +5271,89 @@ def _seismic_coverage(engine):
                            f"Inventory + Capture off and Extract on to re-parse.")
             except Exception as _e2:
                 st.error(f"Could not arm re-extract: {str(_e2)[:160]}")
+
+
+def _structure_scorecard(engine):
+    """How much of the DATA came from structured files versus documents.
+
+    A question about ROWS, not files: one PDF yielding four tops and one LAS
+    yielding nine hundred curve points are not half the corpus each. So this
+    counts records in dv_*, attributed through INVENTORY_ID to the file that
+    produced them -- the same lineage the stage scorecard uses, from the same
+    table list, so the two cannot disagree.
+
+    Behind a button, deliberately: it unions across every lineage table,
+    dv_prod_volume among them, and takes seconds. Nothing on this page should
+    spend that on a render nobody asked for.
+    """
+    import pandas as pd
+    from dataview.file_catalog.promotion_lineage import (
+        structure_mix, STRUCTURED_EXTS, UNSTRUCTURED_EXTS)
+
+    with st.expander("🧮 Structured vs unstructured — where the data came from",
+                     expanded=False):
+        st.caption(
+            "Counts **records** in the gold tables, credited to the file each "
+            "one came from. Structured: %s. Documents: %s."
+            % (", ".join(e.lstrip('.') for e in STRUCTURED_EXTS[:8]),
+               ", ".join(e.lstrip('.') for e in UNSTRUCTURED_EXTS[:6])))
+        _sc1, _sc2 = st.columns([3, 1])
+        _root = _sc1.text_input(
+            "Scan root (blank = whole catalog)", key="structmix_root",
+            placeholder=r"e.g. C:\Bulk\Synthetic\synthetic_data\synth_docs")
+        if not _sc2.button("Run", key="structmix_run",
+                           use_container_width=True):
+            return
+        try:
+            with st.spinner("Attributing records to their source files…"):
+                _res = structure_mix(engine, root=(_root.strip() or None))
+        except Exception as _e:
+            st.error(f"Could not build the scorecard: {str(_e)[:200]}")
+            return
+
+        _rows = _res.get("rows") or []
+        _total = sum(r["records"] for r in _rows)
+        if not _total:
+            st.info("No records in the gold tables carry a file id yet, so "
+                    "there is nothing to attribute. Load something first.")
+            return
+
+        _by = {}
+        for r in _rows:
+            _b = _by.setdefault(r["kind"], {"files": 0, "records": 0})
+            _b["files"] += r["files"]
+            _b["records"] += r["records"]
+
+        _cols = st.columns(3)
+        for _i, _kind in enumerate(("Structured", "Unstructured",
+                                    "Unclassified")):
+            _b = _by.get(_kind, {"files": 0, "records": 0})
+            _pct = 100.0 * _b["records"] / _total
+            # Unclassified is shown even at zero. An extension nobody has
+            # named yet is a fact about the corpus, and a card that only
+            # appears when it is non-zero is one nobody thinks to look for.
+            _cols[_i].metric(
+                _kind, "%.1f%%" % _pct,
+                "%s records · %s file(s)" % (format(_b["records"], ","),
+                                             format(_b["files"], ",")),
+                delta_color="off")
+        if _by.get("Unclassified", {}).get("records"):
+            st.warning(
+                "Some records came from extensions that are in neither list. "
+                "They are counted separately rather than guessed at — add "
+                "them to STRUCTURED_EXTS or UNSTRUCTURED_EXTS in "
+                "promotion_lineage to classify them.")
+
+        st.dataframe(
+            pd.DataFrame([{
+                "Kind": r["kind"], "Ext": r["ext"], "Files": r["files"],
+                "Records": r["records"],
+                "Share": round(100.0 * r["records"] / _total, 2),
+            } for r in _rows]),
+            hide_index=True, use_container_width=True)
+        st.caption("Across %d lineage table(s). A file appears once per "
+                   "extension; a record is credited once, to the file whose "
+                   "id it carries." % _res.get("tables", 0))
 
 
 def _pipeline_report(engine):
