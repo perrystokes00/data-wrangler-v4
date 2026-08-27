@@ -3,8 +3,15 @@ r"""The Teacup demo set: synthetic wells, synthetic documents, synthetic 2D.
 Three datasets, loaded on camera and taken back out between takes:
 
   wells     300 wells + children from synth_data\*.csv   (Bulk Tabular Loader)
-  docs      1,055 files from synth_docs\                 (the file pipeline)
+  docs      1,361 files from synth_docs\                 (the file pipeline)
   seismic   17 lines from synth_seismic\                 (the file pipeline)
+
+The documents under synth_docs\well_reports\ are written by
+tools/gen_teacup_docs.py and belong to named wells in the list above -- the
+printed header IS the row from dv_well.csv, so they load onto the wells this
+demo just created. They live inside synth_docs\ deliberately: everything below
+scopes documents by folder, so counting, loading and purging them needed no
+change here.
 
 EACH IS SCOPED BY WHAT IT IS, NOT BY WHEN IT ARRIVED. row_created_by is
 'PROMOTE' for everything the file-catalog path writes, so a stamp cannot tell
