@@ -4764,6 +4764,23 @@ def _render_seis_pick(lines=None, df3d=None):
             else "**nothing** - cleared" if _mc["mode"] == "none"
             else "%d picked line(s)" % len(_mc["lines"])))
 
+        # ── the tick-a-set-of-lines grid, INLINE ───────────────────────
+        # The filters above narrow to ONE line at a time; picking a SET --
+        # "all twelve dip lines, not the strike lines" -- is a column of
+        # checkboxes, and that grid already existed. It was only ever
+        # rendered on the second screen, so the one control that can choose
+        # a set was on the other monitor.
+        #
+        # It costs nothing to tick: the grid is inside a form, so the boxes
+        # batch into ONE write instead of a rerun per box (scar #5), and
+        # this whole function is a fragment, so even that write does not
+        # touch the map. Send is the single rebuild.
+        #
+        # BEFORE THE EARLY RETURNS BELOW. _render_seis_pick returns as soon
+        # as there is no picked file, and choosing which lines to DRAW has
+        # nothing to do with having opened one.
+        _render_map_drive(lines, df3d)
+
     # A DOOR TO THE SECOND SCREEN THAT DOES NOT NEED A PICK FIRST. The link
     # further down re-navigates the named window to the SELECTED file, which is
     # the live push -- but it only exists once something is selected, so there
@@ -4937,15 +4954,10 @@ def render_seis_view(engine):
                        "connection: `%s`. Pick a line below instead."
                        % _want)
 
+    # _render_seis_pick now renders the map-drive grid itself, so this page
+    # and the map page offer the same control instead of only this one having
+    # it. The note that used to live here is on that call.
     _render_seis_pick(_lines, _df3d)
-    # WHAT THE MAP DRAWS, NOT WHAT THE VIEWER OPENS. _seis_candidates
-    # lists files you can open a section from, so it drops any line with
-    # no SEG-Y behind it -- correct for the chooser above, wrong here.
-    # The generated dip/strike grid is geometry with no file, so 17 of 22
-    # drawable lines were missing from the control that decides what the
-    # map draws. Same shape as every other key-on-the-wrong-thing bug:
-    # the question was right and the list answering it was not.
-    _render_map_drive(_lines, _df3d)
 
 
 def _render_map_drive(lines, df3d):
