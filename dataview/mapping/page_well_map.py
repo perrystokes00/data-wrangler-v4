@@ -12435,7 +12435,19 @@ def run(engine=None):
         # and leaves the camera. That distinction is drawn all through this
         # file; having only one of them on screen is what made the other
         # impossible to find.
-        _rv1, _rvc, _rvf, _rv2 = st.columns([1.1, 1.2, 1.5, 2.3])
+        _rv1, _rvc, _rvf, _rvh, _rv2 = st.columns([1.0, 1.1, 1.3, 1.3, 1.3])
+        # HOLD THE MAP UNTIL THE SELECTIONS ARE MADE. Every option on this
+        # page reruns the script, and the script rebuilds the map -- so
+        # picking an area, then a query, then a layer costs three rebuilds to
+        # see one result. Held, the options still rerun (they are cheap; the
+        # map serialize is what costs) and the map is simply not drawn until
+        # Apply. Off restores the draw-on-every-change behaviour.
+        _rvh.toggle(
+            "⏸ Hold for Apply", key="wm_hold_map", value=True,
+            help="Don't redraw the map on every option change. Pick your "
+                 "area, query and layers, then press Apply to draw once. "
+                 "Map interactions — drawing a box, drilling, picking a "
+                 "line — are never held; only the options above are.")
         # THE ONE CONTROL THAT MAKES CLICKING FREE. See the _ret block above
         # for why a pick and a rebuild are the same signal. Its own column so
         # it reads as a mode, not an action -- it stays on until turned off.
@@ -12498,6 +12510,53 @@ def run(engine=None):
             f"{c[0]:.4f}|{c[1]:.4f}" for c in _sel_for_key
         )))
         _map_widget_key = f"well_map_folium_{_sel_key_hash}"
+
+        # ── hold the map until Apply ────────────────────────────────────
+        # THE SIGNATURE IS DELIBERATELY NARROW, and which way it errs matters.
+        # A determinant left OUT of it simply redraws immediately, which is
+        # today's behaviour -- no worse. A map INTERACTION accidentally put
+        # IN would leave the map refusing to draw after a drill until Apply
+        # was pressed, which on camera reads as broken. So this lists the
+        # option inputs explicitly and nothing that a drill, a pick or a
+        # drawing touches: viewport_uwis, _drawn_bounds, _seis_pick and the
+        # rest are all absent on purpose.
+        # OPTION WIDGETS, NOT VALUES DERIVED FROM THEM. The first cut hashed
+        # active_area["id"], qtype, basemap and active_db -- and two identical
+        # fresh sessions produced different signatures ('all' vs 'none'),
+        # because a cached query resolved differently on the second. A
+        # signature over derived values therefore holds the map for changes
+        # nobody made. A widget value changes when, and only when, someone
+        # changes it, which is the actual question being asked.
+        #
+        # Named explicitly and kept narrow. Deliberately absent: wm_place_*
+        # (Go applies itself), wm_freeze_map and wm_hold_map (meta-controls --
+        # holding the map because you toggled hold is absurd), and everything
+        # a drill, pick or drawing touches.
+        _OPT_KEYS = ("wm_area_sel", "wm_query_sel", "wm_basemap",
+                     "wm_map_db", "wm_geo_pills", "h3_resolution")
+        _opt_sig = repr(sorted(
+            [(k, repr(st.session_state.get(k))) for k in _OPT_KEYS]
+            + [(str(k), repr(v)) for k, v in st.session_state.items()
+               if isinstance(k, str) and k.startswith("wm_q_")]))
+        # FIRST OPEN ALWAYS DRAWS. With no recorded signature there is nothing
+        # to have changed, and a page that opens holding its own map behind an
+        # Apply button is a page that looks broken on arrival.
+        _drawn_sig = st.session_state.get("_map_drawn_sig")
+        _opts_changed = _drawn_sig is not None and _drawn_sig != _opt_sig
+        if st.session_state.get("wm_hold_map", True) and _opts_changed:
+            _skip_folium = True
+            st.warning(
+                "⏸ **Map held** — options changed. Finish selecting, then "
+                "press Apply. (Turn off *Hold for Apply* to draw on every "
+                "change.)")
+            if st.button("▶ Apply — draw the map", key="wm_apply_map_btn",
+                         type="primary", use_container_width=True):
+                st.session_state["_map_drawn_sig"] = _opt_sig
+                st.rerun()
+        else:
+            # Drawing IS applying: record what this render is showing, so the
+            # next option change is measured against what is on screen.
+            st.session_state["_map_drawn_sig"] = _opt_sig
 
         # SAY IT, RIGHT ABOVE THE MAP. A mode that silently swallows clicks is
         # worse than the redraw it replaces -- the click looks broken instead
