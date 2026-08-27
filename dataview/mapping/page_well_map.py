@@ -8287,21 +8287,46 @@ def _render_seed_reference(engine):
         _pick = st.selectbox("County", _labels, index=_idx, key="wm_seed_county")
         _county = _cts[_labels.index(_pick)][0]
 
+        # ── the drawn box narrows it further ───────────────────────────
+        # A county is the unit the master is organised by, but it is not
+        # always the unit you want: Campbell is 60,398 wells. If a box or
+        # circle is on the map, offer it -- the same shape the well drill
+        # already uses, so what gets loaded is what is on screen.
+        _bb = st.session_state.get("_active_drill_bbox")
+        _use_bb = False
+        if _bb:
+            _use_bb = st.checkbox(
+                "Only inside the drawn box  (%.3f–%.3f lat, %.3f–%.3f lon)"
+                % (_bb[0], _bb[1], _bb[2], _bb[3]),
+                key="wm_seed_use_bbox",
+                help="Loads only the reference wells inside the shape you "
+                     "drew, instead of the whole county.")
+        else:
+            st.caption("Draw a box or circle on the map to load a smaller "
+                       "area than a whole county.")
+        # THE ORDER IS (min_lat, max_lat, min_lon, max_lon) at both ends.
+        # _active_drill_bbox stores it that way and scope_where takes it that
+        # way; swapped, it would return nothing rather than raise.
+        _scope = dict(state=_st_code, county=None if _use_bb else _county,
+                      bbox=_bb if _use_bb else None)
+        _sig = repr(_scope)
+
         _c1, _c2 = st.columns([1, 1])
         if _c1.button("🔢 Count", key="wm_seed_count_btn",
                       use_container_width=True):
             try:
                 with _engine_for_seed(engine).connect() as _cx:
-                    _tot, _new = _sfm.scope_count(_cx, state=_st_code,
-                                                  county=_county)
-                st.session_state["_seed_counts"] = (_county, _tot, _new)
+                    _tot, _new = _sfm.scope_count(_cx, **_scope)
+                st.session_state["_seed_counts"] = (_sig, _tot, _new)
             except Exception as _e:
                 st.error("Count failed: %s" % str(_e)[:200])
 
         _counts = st.session_state.get("_seed_counts")
-        if not _counts or _counts[0] != _county:
-            st.caption("Press **Count** to see how many wells this county "
-                       "would add.")
+        # Keyed on the WHOLE scope, so changing the county -- or ticking the
+        # box -- invalidates the count instead of leaving last scope's number
+        # sitting above this scope's Load button.
+        if not _counts or _counts[0] != _sig:
+            st.caption("Press **Count** to see how many wells this would add.")
             return
         _, _tot, _new = _counts
         _m1, _m2 = st.columns(2)
@@ -8309,31 +8334,41 @@ def _render_seed_reference(engine):
         _m2.metric("Not yet in dv_well", format(_new, ","),
                    help="What this would insert. The rest are already here "
                         "and are left untouched.")
+        _what = "the drawn box" if _use_bb else _county
         if not _new:
             st.success("Every located well in %s is already in the database."
-                       % _county)
+                       % _what)
             return
-        if _new > 30000:
+        # ONE LOAD IS CAPPED AT THE DRAW CAP. Loading more than the map can
+        # draw puts rows in the database that the Wells layer then silently
+        # truncates -- data you cannot see and did not ask for. Ordered by
+        # uwi and insert-only, so pressing Load again takes the NEXT block
+        # rather than the same one: the county pages in, visibly, a screenful
+        # at a time.
+        _batch = min(_new, _WELLS_LOAD_CAP)
+        if _new > _WELLS_LOAD_CAP:
             st.warning(
-                "⚠ %s wells is more than the map's 30,000 draw cap "
-                "(`_WELLS_LOAD_CAP`). They will all load, but the Wells layer "
-                "will show a truncated subset until the view is narrowed."
-                % format(_new, ","))
+                "⚠ %s wells is more than the map's %s draw cap, so this loads "
+                "the first **%s** (ordered by UWI). Press Load again for the "
+                "next block, or **draw a box and tick the option above** to "
+                "take a smaller area instead."
+                % (format(_new, ","), format(_WELLS_LOAD_CAP, ","),
+                   format(_batch, ",")))
 
-        if _c2.button("⬇ Load %s wells" % format(_new, ","),
+        if _c2.button("⬇ Load %s wells" % format(_batch, ","),
                       key="wm_seed_apply_btn", type="primary",
                       use_container_width=True):
             try:
                 _eng = _engine_for_seed(engine)
                 with st.spinner("Reading the master…"):
                     with _eng.connect() as _cx:
-                        _rows = _sfm.scope_rows(_cx, state=_st_code,
-                                                county=_county)
+                        _rows = _sfm.scope_rows(_cx, limit=_WELLS_LOAD_CAP,
+                                                **_scope)
                         _rep = _sfm.sanitise_fk(_cx, _rows)
                 with st.spinner("Inserting %s wells…" % format(len(_rows), ",")):
                     _n, _present = _sfm.seed(_eng, _rows)
                 st.success("Inserted **%s** wells from %s. %s were already here."
-                           % (format(_n, ","), _county, format(_present, ",")))
+                           % (format(_n, ","), _what, format(_present, ",")))
                 # SAY WHAT WAS DROPPED. A code the reference table does not
                 # hold is set to NULL rather than failing the row -- silently
                 # blanking a column the operator can see in the source is the

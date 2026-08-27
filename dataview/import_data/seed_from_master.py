@@ -167,8 +167,15 @@ def _select(conn, where, limit=None, params=None):
     import sqlalchemy as sa
     cols = ", ".join("%s AS [%s]" % (expr, name) for expr, name in MASTER_TO_DV)
     top = "TOP (%d) " % int(limit) if limit and int(limit) > 0 else ""
+    # ORDERED WHENEVER IT IS CAPPED. TOP without ORDER BY returns an arbitrary
+    # subset, so a truncated load would take a different 30,000 each time and
+    # re-running could never finish the county. Ordered by uwi and combined
+    # with only_new, repeated loads PAGE THROUGH it: each run takes the next
+    # block of wells the database does not have yet.
+    order = " ORDER BY g.uwi14" if top else ""
     rows = conn.execute(sa.text(
-        f"SELECT {top}{cols} FROM {MASTER} g WHERE {where}"), params or {})
+        f"SELECT {top}{cols} FROM {MASTER} g WHERE {where}{order}"),
+        params or {})
     names = [name for _e, name in MASTER_TO_DV]
     out = []
     for r in rows:
@@ -183,8 +190,14 @@ def _select(conn, where, limit=None, params=None):
 def scope_where(state=None, county=None, bbox=None):
     """(sql, params) for a state / county / bounding-box scope.
 
-    A bbox is (min_lat, min_lon, max_lat, max_lon) -- the shape the map's
-    drawn rectangle already carries.
+    BBOX IS (min_lat, max_lat, min_lon, max_lon) -- lats together, then lons.
+    That is the order _qry_wells_in_bbox takes and the order the map stores in
+    _active_drill_bbox, and this signature agreeing with them is not a detail:
+    the codebase has already paid for a box stored in two different shapes
+    (see _norm_bounds, "four bare numbers are not rejected by folium; they
+    simply put the camera somewhere meaningless"). Latitude and longitude in
+    Wyoming are both plausible-looking negatives and positives in the 40-110
+    range, so the wrong order returns an EMPTY result rather than an error.
     """
     sql, p = ["1=1"], {}
     if state:
@@ -195,7 +208,7 @@ def scope_where(state=None, county=None, bbox=None):
         sql.append("UPPER(LTRIM(RTRIM(g.county))) = :co")
         p["co"] = str(county).upper().replace(" COUNTY", "").strip()
     if bbox:
-        _mnla, _mnlo, _mxla, _mxlo = bbox
+        _mnla, _mxla, _mnlo, _mxlo = bbox
         sql.append("g.surface_latitude BETWEEN :mnla AND :mxla")
         sql.append("g.surface_longitude BETWEEN :mnlo AND :mxlo")
         p.update(mnla=_mnla, mxla=_mxla, mnlo=_mnlo, mxlo=_mxlo)
