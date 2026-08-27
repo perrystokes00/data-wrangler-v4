@@ -419,6 +419,17 @@ def _go_to_place(bounds) -> None:
     # box drawn over a field it has nothing to do with.
     st.session_state["_place_shapes"] = (
         list(bounds.get("shapes") or []) if isinstance(bounds, dict) else [])
+    # The layer state travels as a REQUEST, consumed at the top of the next
+    # render before the widgets it sets are built.
+    #
+    # A BARE AREA LEAVES THE LAYERS ALONE. An empty view is falsy, so the
+    # consumer skips it -- and that is the right reading of this function's
+    # own contract: it moves the CAMERA, not the DATA, the same distinction
+    # as Reset view versus Clear wells. Saving "just this area" should not
+    # become a way to switch someone's layers off. The SHAPES above do clear,
+    # because a leftover annotation draws a selection that is not there.
+    st.session_state["_place_pending"] = (
+        dict(bounds.get("view") or {}) if isinstance(bounds, dict) else {})
     st.session_state["_drawn_bounds"] = _b
     st.session_state["_drawn_bounds_oneshot"] = True
     # FIT THIS EXACTLY. The fit path pads _drawn_bounds by 15% a side so a
@@ -442,6 +453,64 @@ def _go_to_place(bounds) -> None:
     # first cut POPPED it — removing the one thing that makes a camera move
     # stick.
     st.session_state["_reset_saved_view"] = True
+
+
+def _capture_map_view() -> dict:
+    """What is currently ON the map: layers, mode, and the seismic choice.
+
+    Saved with a place so returning to it redraws what was there, not just
+    where it was. An area with nothing on it saves nothing extra -- an empty
+    dict here means the place is stored as a bare extent, exactly as before.
+    """
+    out = {}
+    _pills = st.session_state.get("wm_geo_pills")
+    if _pills:
+        out["pills"] = list(_pills)
+    for _k in ("map_mode", "wells_layer_on", "h3_layer_on", "h3_resolution"):
+        _v = st.session_state.get(_k)
+        if _v not in (None, False, "none"):
+            out[_k] = _v
+    # The seismic choice lives in the prefs FILE, not session_state -- it is
+    # the channel the second screen writes through. Capture the resolved
+    # value so a place remembers which lines were drawn.
+    try:
+        _sc = _map_seis_choice()
+        if _sc.get("mode") != "all" or _sc.get("lines") or _sc.get("surveys"):
+            out["seis"] = _sc
+    except Exception:
+        pass
+    return out
+
+
+def _apply_map_view(view: dict) -> None:
+    """Restore a saved view. MUST RUN BEFORE THE LAYER WIDGETS DRAW.
+
+    Assigning a widget's own key after its widget exists is scar #6 in this
+    codebase: it raises on a LATER run, on whatever page happens to draw
+    next, which is as far from the cause as an error can land. Go therefore
+    stores a REQUEST and asks for a full rerun; this consumes it at the top
+    of the map column, before st.pills and the layer toggles are built.
+    """
+    if not isinstance(view, dict):
+        return
+    if "pills" in view:
+        st.session_state["wm_geo_pills"] = list(view["pills"] or [])
+    for _k in ("map_mode", "wells_layer_on", "h3_layer_on", "h3_resolution"):
+        if _k in view:
+            st.session_state[_k] = view[_k]
+    _seis = view.get("seis")
+    if isinstance(_seis, dict):
+        # Written straight to the prefs file rather than through
+        # _write_map_seis, which ends in st.rerun() -- rerunning from inside
+        # the consumer would drop the rest of this restore on the floor.
+        try:
+            _p = _load_user_prefs()
+            _p[MAP_SEIS_PREF] = {"mode": _seis.get("mode") or "all",
+                                 "surveys": list(_seis.get("surveys") or []),
+                                 "lines": list(_seis.get("lines") or [])}
+            _save_user_prefs(_p)
+        except Exception:
+            pass
 
 
 def _wells_on_map() -> bool:
@@ -7843,9 +7912,18 @@ def _render_saved_places(engine):
         # drawings is byte-identical to what this wrote before and the file
         # does not gain a key it has no use for.
         _shapes = st.session_state.get("_last_drawings") or []
+        _view = _capture_map_view()
+        _rec = {"bounds": _b}
+        if _shapes:
+            _rec["shapes"] = _shapes
+        if _view:
+            _rec["view"] = _view
         _p = _load_user_prefs()
+        # An AREA with nothing on it stays a bare list -- byte-identical to
+        # what this always wrote, and nothing to migrate. A place that had
+        # something on the map keeps it.
         _p.setdefault("places", {})[_newname.strip()] = (
-            {"bounds": _b, "shapes": _shapes} if _shapes else _b)
+            _rec if len(_rec) > 1 else _b)
         _save_user_prefs(_p)
         st.session_state["wm_place_ver"] = _pv + 1   # fresh, empty box
         st.session_state["wm_place_msg"] = _newname.strip()
@@ -10132,6 +10210,14 @@ def run(engine=None):
         # much more work than it needs to be.
         active_db = set()
     with mapcol:
+        # ── restore a saved view, BEFORE the widgets below exist ─────────
+        # Go stores the request and asks for a full rerun; this is the top of
+        # that rerun and the last safe moment to set these keys. See
+        # _apply_map_view for why the timing is the whole point.
+        _pv_req = st.session_state.pop("_place_pending", None)
+        if _pv_req:
+            _apply_map_view(_pv_req)
+
         # ── Spatial geography layer toggles ─────────────────────────────────
         # Chips above the map for the native-geography layers (dv_*.geog).
         # Each selection adds a geo_* flag to active_db, drawn by the render
