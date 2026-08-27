@@ -160,7 +160,14 @@ def add_geography_layer(m, engine, key: str, show: bool = True,
     # other four keys here are fields, leases, boundaries and pipelines, where
     # the same split would put hundreds of checkboxes in the control and make
     # it useless for everything including seismic.
-    if key == "seismic":
+    # ...AND FOR ANY LAYER SMALL ENOUGH TO NAME. The rule above is about
+    # COUNT, not about seismic: a checkbox per feature is exactly what someone
+    # wants for the six pools they drew, and exactly what ruins the control
+    # for four hundred pipelines. So split when the layer is small enough to
+    # read, whatever it is. Hand-drawn boundaries land here; a loaded
+    # shapefile of leases stays one group, as before.
+    _SPLIT_MAX = 12
+    if key == "seismic" or len(gj["features"]) <= _SPLIT_MAX:
         groups, order = {}, []
         for _ft in gj["features"]:
             _nm = str((_ft.get("properties") or {}).get("name") or "(unnamed)")
