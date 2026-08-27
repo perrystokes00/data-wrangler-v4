@@ -420,6 +420,53 @@ def _go_to_place(bounds) -> None:
     st.session_state["_reset_saved_view"] = True
 
 
+def _wells_on_map() -> bool:
+    """Is there anything a Clear would remove?"""
+    return bool(st.session_state.get("viewport_uwis")
+                or st.session_state.get("viewport_gom_wells")
+                or st.session_state.get("processed_drawings")
+                or st.session_state.get("clicked_uwis"))
+
+
+def _clear_wells_state() -> None:
+    """Remove every displayed well: drill, base layer, Results and tray.
+
+    LIFTED OUT OF WELLS MODE. This lived inside the `elif _new_mode ==
+    "wells"` caption branch, so in H3/grid mode -- and behind a collapsed
+    expander -- the only button that clears a selection was not on the page
+    at all. It was already described in this file as "present in the code,
+    invisible in practice", which is exactly how it was reported again.
+
+    A function rather than a second button: the logic is fiddly (four
+    selections, the tray, two suppression flags) and two copies of it would
+    drift the first time one of them gained a key.
+    """
+    st.session_state["viewport_uwis"] = []
+    st.session_state["viewport_gom_wells"] = []
+    st.session_state["processed_drawings"] = set()
+    st.session_state.pop("_drawn_bounds", None)
+    st.session_state.pop("_active_drill_bbox", None)
+    # The camera fits only when its target CHANGES, so the extent just
+    # cleared has to stop counting as fitted -- otherwise the next drill of
+    # the same area would load its wells and not frame them.
+    st.session_state.pop("_last_fit_sig", None)
+    # Pending overflow prompt is stale: the user is explicitly resetting.
+    st.session_state.pop("_pending_drill_wells", None)
+    st.session_state.pop("_pending_drill_label", None)
+    # The tray goes too -- one button that wipes everything.
+    st.session_state["clicked_uwis"] = []
+    st.session_state["scout_uwi"] = None
+    st.session_state["show_summary"] = False
+    st.session_state["_summary_uwis"] = []
+    st.session_state["tray_well_data"] = {}
+    st.session_state.pop("_last_grid_click", None)
+    # Without this the full wells_df still renders as clusters after a clear
+    # -- reported once as "I cleared the viewport but well clusters are
+    # still displayed."
+    st.session_state["wells_suppressed"] = True
+    st.session_state["_wells_already_loaded"] = False
+
+
 MAP_SEIS_PREF = "map_seis"
 
 
@@ -10397,49 +10444,8 @@ def run(engine=None):
                 # drops _drawn_bounds. Does NOT touch the tray (clicked_uwis)
                 # — that's a persistent user selection with its own "🗑 Clear
                 # Tray" button at the bottom of the page.
-                _wells_has_viewport = (
-                    bool(st.session_state.get("viewport_uwis"))
-                    or bool(st.session_state.get("viewport_gom_wells"))
-                    or bool(st.session_state.get("processed_drawings"))
-                )
-                if st.button(
-                    "✗ Clear wells",
-                    key="wells_clear_viewport",
-                    use_container_width=True,
-                    help=(
-                        "Remove ALL displayed wells — the drilled selection "
-                        "(rectangle / circle), the base well layer, AND "
-                        "the Results — leaving just the basemap. Load "
-                        "wells again by re-selecting an area or running a Query."
-                    ),
-                ):
-                    st.session_state["viewport_uwis"] = []
-                    st.session_state["viewport_gom_wells"] = []
-                    st.session_state["processed_drawings"] = set()
-                    st.session_state.pop("_drawn_bounds", None)
-                    st.session_state.pop("_active_drill_bbox", None)
-                    # Clear any pending drill prompt too — the user is
-                    # explicitly resetting; the pending overflow is stale.
-                    st.session_state.pop("_pending_drill_wells", None)
-                    st.session_state.pop("_pending_drill_label", None)
-                    # Clear the Object Tray as well (same keys the bottom-of-
-                    # page "🗑 Clear Tray" button uses). The user asked for one
-                    # button that wipes everything, so tray goes too.
-                    st.session_state.clicked_uwis = []
-                    st.session_state.scout_uwi = None
-                    st.session_state["show_summary"] = False
-                    st.session_state["_summary_uwis"] = []
-                    st.session_state["tray_well_data"] = {}
-                    st.session_state.pop("_last_grid_click", None)
-                    # Suppress the base cluster layer too. Without this,
-                    # the full wells_df still renders as clusters after a
-                    # clear — which is what the user reported as "I cleared
-                    # the viewport but well clusters are still displayed."
-                    # The render checks this flag; it's reset whenever wells
-                    # are deliberately (re)loaded.
-                    st.session_state["wells_suppressed"] = True
-                    st.session_state["_wells_already_loaded"] = False
-                    st.rerun()
+                # THE BUTTON MOVED OUT OF HERE, to sit beside 🎯 Reset view
+                # where it is on screen in every mode. See _clear_wells_state.
 
         # GOM Trajectories toggle — rendered outside the 💾 Overlays
         # expander so it's always visible when GOM is active. The
@@ -12327,7 +12333,25 @@ def run(engine=None):
         # last thing left in the control rail.
         # Saved places, in a fragment: see _render_saved_places.
         _render_saved_places(engine)
-        _rv1, _rv2 = st.columns([1.1, 5])
+        # RESET VIEW AND CLEAR WELLS SIT TOGETHER because they are the pair:
+        # one resets the CAMERA and keeps the data, the other clears the DATA
+        # and leaves the camera. That distinction is drawn all through this
+        # file; having only one of them on screen is what made the other
+        # impossible to find.
+        _rv1, _rvc, _rv2 = st.columns([1.1, 1.2, 3.8])
+        if _rvc.button("✗ Clear wells", key="wells_clear_viewport",
+                       use_container_width=True,
+                       disabled=not _wells_on_map(),
+                       help=("Remove ALL displayed wells — the drilled "
+                             "selection (rectangle / circle), the base well "
+                             "layer, the Results and the tray — leaving just "
+                             "the basemap. Re-select an area or run a Query "
+                             "to load wells again."
+                             if _wells_on_map() else
+                             "Nothing to clear — no wells are selected or "
+                             "displayed.")):
+            _clear_wells_state()
+            st.rerun()
         if _rv1.button("🎯 Reset view", key="wells_reset_view",
                        use_container_width=True,
                        help="Re-frame the map on what is currently selected. "
