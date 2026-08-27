@@ -12520,11 +12520,20 @@ def run(engine=None):
 + "{pointer-events:none !important;}"
 + ".dv-pick-2d .leaflet-marker-pane,"
 + ".dv-pick-3d .leaflet-marker-pane{pointer-events:none;}"
+// WELLS, THE MIRROR OF THE OTHER TWO. 2D and 3D switch the marker pane
+// off so a line under a well marker is reachable; nothing did the
+// reverse, so a well under a seismic line or a lease polygon was the
+// one thing you could not reliably click. Armed, every vector path
+// stops taking clicks and only markers do.
++ ".dv-pick-wells .leaflet-overlay-pane path"
++ "{pointer-events:none !important;}"
++ ".dv-pick-wells .leaflet-marker-pane{pointer-events:auto;}"
 + ".dv-pick-2d .leaflet-overlay-pane path.dv-seis-2d:not(.dv-hit)"
 + "{stroke-width:5px !important;}"
 + ".dv-pick-3d .leaflet-overlay-pane path.dv-seis-3d"
 + "{stroke-width:4px !important;}"
-+ ".dv-pick-2d.leaflet-container,.dv-pick-3d.leaflet-container"
++ ".dv-pick-2d.leaflet-container,.dv-pick-3d.leaflet-container,"
++ ".dv-pick-wells.leaflet-container"
 + "{cursor:pointer !important;}"
 + ".dv-picker-ctl a{font:700 11px/26px system-ui,sans-serif;"
 + "text-align:center;}"
@@ -12597,9 +12606,10 @@ def run(engine=None):
                         if (mode) { setTimeout(disarmDraw, 0); }
                     });
                     function paint() {
-                        box.classList.remove("dv-pick-2d", "dv-pick-3d");
+                        box.classList.remove("dv-pick-2d", "dv-pick-3d",
+                                             "dv-pick-wells");
                         if (mode) { box.classList.add("dv-pick-" + mode); }
-                        ["2d", "3d"].forEach(function(k) {
+                        ["2d", "3d", "wells"].forEach(function(k) {
                             var a = links[k];
                             if (!a) { return; }
                             a.style.background =
@@ -12619,11 +12629,20 @@ def run(engine=None):
                         onAdd: function() {
                             var c = L.DomUtil.create(
                                 "div", "leaflet-bar dv-picker-ctl");
-                            [["2d", "2D", "Pick a 2D seismic line: click "
+                            // ORDER IS 3D, 2D, WELLS -- coarsest to finest,
+                            // and it reads as one family of "what am I
+                            // picking" rather than two seismic buttons with
+                            // something else bolted on.
+                            [["3d", "3D", "Pick a 3D survey: click here, "
+                                    + "then click a survey footprint."],
+                             ["2d", "2D", "Pick a 2D seismic line: click "
                                     + "here, then click a line to open its "
                                     + "section below the map."],
-                             ["3d", "3D", "Pick a 3D survey: click here, "
-                                    + "then click a survey footprint."]
+                             ["wells", "Wells", "Pick wells: click here, "
+                                    + "then click a well. Seismic lines, "
+                                    + "leases and boundaries stop taking "
+                                    + "clicks so the well underneath them "
+                                    + "is reachable."]
                             ].forEach(function(spec) {
                                 var a = L.DomUtil.create("a", "", c);
                                 a.href = "#";
