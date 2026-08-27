@@ -1220,14 +1220,24 @@ if S.app_mode == "splash":
         # _nav_card(c6, "🗺", "Region Builder",
         #      "Define state regions by lassoing counties on a map",
         #      "region_builder")
-        # Row 3
-        c7, c8, c9 = st.columns(3)
-        _nav_card(c7, "⇄", "PPDM Migration",
-                  "Map dataview tables to PPDM 3.9 and promote",
-                  "migrate")
-        # Document Recogniser card retired Aug 2 — the Document Assistant
-        # replaces it (page_docshape remains the vocabulary BENCH; its
-        # "docshape" branch below still works if you want it back).
+        # Row 3 retired Aug 26 — it held one live card and two retired ones,
+        # so a third row of mostly empty space cost more than it carried.
+        #
+        # PPDM Migration IS NOW UNREACHABLE FROM THE UI, and that is worth
+        # knowing rather than discovering: this card was its only entry point
+        # ("migrate" is not in the sidebar NAV). Its dispatch branch below is
+        # untouched and still works, so restoring is uncommenting these four
+        # lines — or adding ("migrate", "⇄", "PPDM Migration") to NAV, which
+        # is the better home for it if it comes back.
+        #
+        # Document Recogniser was already retired Aug 2 — the Document
+        # Assistant replaces it (page_docshape remains the vocabulary BENCH;
+        # its "docshape" branch below still works if you want it back).
+        #
+        # c7, c8, c9 = st.columns(3)
+        # _nav_card(c7, "⇄", "PPDM Migration",
+        #           "Map dataview tables to PPDM 3.9 and promote",
+        #           "migrate")
         # _nav_card(c8, "🔍", "Document Recogniser",
         #           "Read a document, review what each table matched, correct the vocabulary",
         #           "docshape")
