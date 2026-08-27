@@ -283,6 +283,75 @@ def _timed(name, fn):
     return _w
 
 
+# -----------------------------------------------------------------------------
+# WHAT "AN OPTION CHANGED" MEANS, for Hold for Map
+# -----------------------------------------------------------------------------
+# DERIVED BY PREFIX, NOT WRITTEN DOWN. This was a six-name tuple --
+# wm_area_sel, wm_query_sel, wm_basemap, wm_map_db, wm_geo_pills,
+# h3_resolution -- and every control added to the page since was missing from
+# it. wells_layer_on and h3_layer_on among them, which is to say the two
+# switches that decide what the map draws at all. Hold was on, the operator
+# changed a setting, and the map redrew anyway: the toggle appeared to do
+# nothing, which is worse than not having it.
+#
+# Same shape as the four-lists-that-must-agree in CLAUDE.md, and the fix is
+# the same one: stop maintaining the list. What matters is WHICH WAY IT FAILS.
+# Listed, a forgotten setting means Hold silently does nothing. Derived, a
+# forgotten setting means a hold you did not want -- visible, and one click of
+# Apply to clear. Fail toward the visible one.
+#
+# The deny-list is the controls that must NOT hold: the hold/freeze toggles
+# themselves, and the tools that carry their own Run or Send button, where the
+# map should redraw when the action fires rather than while a box is being
+# filled in.
+_OPT_PREFIXES = ("wm_", "h3_", "wells_", "seis_")
+_OPT_DENY = frozenset({
+    "wm_hold_map", "wm_freeze_map", "wm_reset_page",
+    "wm_ai_question", "wm_ai_scope", "wm_ai_run", "wm_ai_clear",
+    "wm_near_dist", "wm_near_feat", "wm_near_run", "wm_near_open",
+    "wm_compute_paths",
+    "seis_basket_sel", "seis_basket_all", "seis_basket_clear",
+    "seis_open_sel", "seis_pick_clear", "seis_il_no", "seis_xl_no",
+    "wells_clear_viewport", "wells_reset_view",
+})
+# Saved places live in their own @st.fragment and "Go" does its own app-scoped
+# rerun, so none of that block is a map option.
+_OPT_DENY_PREFIX = ("wm_place_",)
+# _ver is the widget-key version counter from Streamlit scar #1 -- internal
+# bookkeeping, not a setting. _page is navigation. The message and error slots
+# are output, and including output in a signature of the INPUTS is how a
+# signature comes to differ from itself.
+_OPT_DENY_SUFFIX = ("_btn", "_button", "_msg", "_msgs", "_err", "_ver",
+                    "_page", "_editor", ":sel")
+_OPT_SCALARS = (str, int, float, bool, type(None))
+
+
+def _map_option_sig():
+    """Signature of every setting whose change should hold the map.
+
+    SCALARS ONLY, and that is not tidiness. A key holding a DataFrame or a
+    result set can differ between two renders that changed nothing, and a
+    signature that never matches means the map is held forever -- which
+    fails in the same invisible direction as the bug this replaces.
+    """
+    _out = []
+    for _k, _v in list(st.session_state.items()):
+        if not isinstance(_k, str) or _k.startswith(("_", "FormSubmitter:")):
+            continue
+        if (_k in _OPT_DENY or _k.endswith(_OPT_DENY_SUFFIX)
+                or _k.startswith(_OPT_DENY_PREFIX)):
+            continue
+        if not _k.startswith(_OPT_PREFIXES):
+            continue
+        if isinstance(_v, _OPT_SCALARS):
+            _out.append((_k, repr(_v)))
+        elif isinstance(_v, (list, tuple, set, frozenset)) and all(
+                isinstance(_x, _OPT_SCALARS) for _x in _v):
+            _out.append((_k, repr(sorted(map(repr, _v)))))
+        # anything else -- frames, engines, blobs -- is deliberately skipped
+    return repr(sorted(_out))
+
+
 def _install_timers():
     """Wrap every _qry_/_add_ in this module. Called at the bottom of the file.
 
@@ -13226,12 +13295,9 @@ def run(engine=None):
         # (Go applies itself), wm_freeze_map and wm_hold_map (meta-controls --
         # holding the map because you toggled hold is absurd), and everything
         # a drill, pick or drawing touches.
-        _OPT_KEYS = ("wm_area_sel", "wm_query_sel", "wm_basemap",
-                     "wm_map_db", "wm_geo_pills", "h3_resolution")
-        _opt_sig = repr(sorted(
-            [(k, repr(st.session_state.get(k))) for k in _OPT_KEYS]
-            + [(str(k), repr(v)) for k, v in st.session_state.items()
-               if isinstance(k, str) and k.startswith("wm_q_")]))
+        # See _map_option_sig: derived by prefix, because the six-name tuple
+        # this replaces did not include the wells or H3 layer toggles.
+        _opt_sig = _map_option_sig()
         # FIRST OPEN ALWAYS DRAWS. With no recorded signature there is nothing
         # to have changed, and a page that opens holding its own map behind an
         # Apply button is a page that looks broken on arrival.
