@@ -11410,6 +11410,11 @@ def run(engine=None):
                      "geo_boundaries": "boundaries", "geo_pipelines": "pipelines",
                      "geo_seismic": "seismic"}
         _geo_on = [k for k in _geo_keys if k in active_db]
+        # Defined HERE, not inside the try below: it is read ~1,200 lines
+        # further down, and with no geography chip on, that block never runs.
+        # A name that exists only on some paths is a NameError waiting for
+        # the one render nobody tested.
+        _geo_empty = []
         # Every geography-layer chip must appear in this guard. A layer
         # whose only trigger is missing here renders ONLY when some other
         # layer happens to be on — which looks exactly like a broken layer.
@@ -11419,11 +11424,19 @@ def run(engine=None):
                 or "geo_wellsym" in active_db:
             try:
                 from dataview.mapping.geography_layers import add_geography_layer, add_well_points
+                # AN EMPTY LAYER LOOKS EXACTLY LIKE A BROKEN ONE. Both adders
+                # return a feature count and both were being discarded, so a
+                # chip for a table with no rows switched on, drew nothing, and
+                # said nothing -- reported as "my leases are not displaying"
+                # when dv_land_tract simply has none. On this database five of
+                # the ten chips are in that state.
+                _flag_to_label = {f: l for f, l in _geo_defs}
                 for _ak in _geo_on:
+                    _drew = 0
                     if _ak == "geo_leases":
                         from dataview.mapping.geography_layers import (
                             add_lease_layer)
-                        add_lease_layer(m, engine, show=True)
+                        _drew = add_lease_layer(m, engine, show=True) or 0
                     elif _geo_keys[_ak] == "seismic":
                         # None, not an empty set, when nothing was chosen:
                         # empty means "the page asked for none" and would
@@ -11432,12 +11445,17 @@ def run(engine=None):
                         _msc = _map_seis_choice()
                         if _msc["mode"] != "none":
                             _wanted = _msc["surveys"]
-                            add_geography_layer(
+                            _drew = add_geography_layer(
                                 m, engine, "seismic", show=True,
-                                show_names=(set(_wanted) if _wanted else None))
+                                show_names=(set(_wanted) if _wanted else None)) or 0
+                        else:
+                            # Cleared on purpose, not empty for want of data.
+                            _drew = 1
                     else:
-                        add_geography_layer(m, engine, _geo_keys[_ak],
-                                            show=True)
+                        _drew = add_geography_layer(m, engine, _geo_keys[_ak],
+                                                    show=True) or 0
+                    if not _drew:
+                        _geo_empty.append(_flag_to_label.get(_ak, _ak))
                 # Real 2D line paths ride along with the Seismic pill. The
                 # geog layer above holds SURVEY footprints; these are the
                 # individual LINES inside them, which is the thing you
@@ -12706,6 +12724,15 @@ def run(engine=None):
             # Drawing IS applying: record what this render is showing, so the
             # next option change is measured against what is on screen.
             st.session_state["_map_drawn_sig"] = _opt_sig
+
+        # NAME THE LAYERS THAT HAD NOTHING TO DRAW. Switching a chip on and
+        # seeing no change is indistinguishable from a broken layer, and the
+        # honest answer -- that table is empty on this database -- is one the
+        # reader can act on: load it, or stop clicking it.
+        if _geo_empty:
+            st.caption("· ".join([
+                "ℹ️ Nothing to draw for: **%s**" % "**, **".join(_geo_empty),
+                "those tables have no rows with geometry in this database."]))
 
         # SAY IT, RIGHT ABOVE THE MAP. A mode that silently swallows clicks is
         # worse than the redraw it replaces -- the click looks broken instead
