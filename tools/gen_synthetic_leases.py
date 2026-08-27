@@ -178,13 +178,19 @@ def write(engine, recs, apply=False):
                     (land_tract_id, tract_name, lease_number, operator_name,
                      province_state, country, area_km2, geog, active_ind,
                      source, row_created_by, row_created_date)
+                -- REORIENT FIRST, THEN MEASURE. Measuring the raw ring while
+                -- storing the reoriented one records the size of the
+                -- COMPLEMENT -- half a billion km2 for a tract a few km
+                -- across. Latent here because none of these rings came out
+                -- clockwise; found when the same pattern, copied into the
+                -- map's draw-a-boundary writer, met one that did.
                 SELECT :id, :nm, :ln, :own, 'Wyoming', 'USA',
-                       g.STArea()/1000000.0,
-                       CASE WHEN g.STArea()/1000000.0 > 100000
-                            THEN g.ReorientObject() ELSE g END,
+                       g2.STArea()/1000000.0, g2,
                        'Y', :src, :src, GETUTCDATE()
-                  FROM (SELECT geography::STGeomFromText(:wkt, 4326)
-                               .MakeValid() AS g) q
+                  FROM (SELECT CASE WHEN g.STArea()/1000000.0 > 100000
+                                    THEN g.ReorientObject() ELSE g END AS g2
+                          FROM (SELECT geography::STGeomFromText(:wkt, 4326)
+                                       .MakeValid() AS g) q1) q
             """), {"id": uuid.uuid4().hex[:40].upper(), "nm": r["name"],
                    "ln": r["lease_no"], "own": r["owner"],
                    "wkt": r["wkt"], "src": SOURCE_STAMP})

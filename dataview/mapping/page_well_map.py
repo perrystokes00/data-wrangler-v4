@@ -455,6 +455,99 @@ def _go_to_place(bounds) -> None:
     st.session_state["_reset_saved_view"] = True
 
 
+BOUNDARY_SOURCE = "MAP_DRAWN"
+BOUNDARY_TYPES = ["Pool", "Fault block", "Unit", "AOI", "Prospect", "Other"]
+
+
+def _save_drawn_boundary(engine, name: str, btype: str, feature: dict) -> str:
+    """Store one drawn shape in dv_boundary. "" on success, else why not.
+
+    dv_boundary IS THE RIGHT HOME and no new table is needed: it is
+    boundary_name + boundary_type + geog, the 🟪 Boundaries chip already
+    draws it, and a pool outline is exactly a named boundary of a type.
+
+    ORIENTATION, as everywhere geography is written here. A clockwise ring is
+    the planet minus the polygon -- STArea comes back in the hundreds of
+    millions of km2 and it "contains" every well there is. Reoriented on the
+    way in, the same guard gen_synthetic_leases and _load_seis apply.
+
+    Stamped source='MAP_DRAWN' so what a person drew stays separable from
+    anything a loader wrote.
+    """
+    # LOCAL, because uuid is not bound at module level in this file -- the
+    # only `import uuid` here is inside another function, so a bare uuid.uuid4
+    # raises NameError the moment this runs. Exactly the shape that made every
+    # enrichment write in extract_core fail while the stage reported success.
+    import uuid as _uuid
+    name = (name or "").strip()
+    if not name:
+        return "Give it a name."
+    try:
+        geom = (feature or {}).get("geometry") or {}
+        if str(geom.get("type")) not in ("Polygon", "MultiPolygon"):
+            return "That shape is not an area — draw a polygon or a rectangle."
+        rings = geom.get("coordinates") or []
+        if not rings or not rings[0] or len(rings[0]) < 4:
+            return "That polygon has too few points to close."
+    except Exception:
+        return "Could not read the drawn shape."
+
+    from sqlalchemy import text as _t
+    try:
+        with engine.begin() as con:
+            dup = con.execute(_t(
+                "SELECT COUNT(*) FROM dataview.dv_boundary "
+                "WHERE boundary_name = :n"), {"n": name}).scalar()
+            if dup:
+                # Refuse rather than overwrite: two outlines under one name
+                # cannot both be found, and replacing the other destroys
+                # something someone drew.
+                return "There is already a boundary called %s." % name
+            con.execute(_t("""
+                INSERT INTO dataview.dv_boundary
+                    (boundary_id, boundary_name, boundary_type, country,
+                     area_km2, geog, active_ind, source,
+                     row_created_by, row_created_date)
+                -- REORIENT FIRST, THEN MEASURE. Computing area from the raw
+                -- ring while storing the reoriented one stored the shape
+                -- correctly and the SIZE of its complement: a clockwise
+                -- pentagon came out at 510,065,547 km2 with the right wells
+                -- inside it. Both columns now read the same geography.
+                SELECT :id, :n, :ty, 'USA', g2.STArea()/1000000.0, g2,
+                       'Y', :src, :src, GETUTCDATE()
+                  FROM (SELECT CASE WHEN g.STArea()/1000000.0 > 100000
+                                    THEN g.ReorientObject() ELSE g END AS g2
+                          FROM (SELECT geography::STGeomFromText(
+                                   geometry::STGeomFromText(:wkt, 4326)
+                                       .MakeValid().STAsText(), 4326) AS g
+                               ) q1) q
+            """), {"id": _uuid.uuid4().hex[:40].upper(), "n": name,
+                   "ty": btype or "Other",
+                   "wkt": _geojson_to_wkt(geom), "src": BOUNDARY_SOURCE})
+        return ""
+    except Exception as exc:
+        return "Could not save: %s" % str(exc)[:160]
+
+
+def _geojson_to_wkt(geom: dict) -> str:
+    """GeoJSON Polygon -> WKT. Rings only; holes are kept.
+
+    Leaflet gives [lon, lat] and WKT wants the same order, so no swap -- the
+    swap is what a reader expects to find here and its absence is deliberate.
+    """
+    def ring(rs):
+        pts = ["%.8f %.8f" % (float(p[0]), float(p[1])) for p in rs]
+        if pts and pts[0] != pts[-1]:
+            pts.append(pts[0])
+        return "(" + ", ".join(pts) + ")"
+    coords = geom.get("coordinates") or []
+    if str(geom.get("type")) == "MultiPolygon":
+        return "MULTIPOLYGON(" + ", ".join(
+            "(" + ", ".join(ring(r) for r in poly) + ")"
+            for poly in coords) + ")"
+    return "POLYGON(" + ", ".join(ring(r) for r in coords) + ")"
+
+
 def _capture_map_view() -> dict:
     """What is currently ON the map: layers, mode, and the seismic choice.
 
@@ -8039,6 +8132,52 @@ def _render_saved_places(engine):
         st.error("Could not read an extent to save for that name. "
                  "Draw the box again and re-save.")
 
+    # ── name the shape you drew ────────────────────────────────────
+    # A DRAWN SHAPE ALREADY MEANS SOMETHING; this lets it be KEPT. The box
+    # and circle drill wells and are then thrown away, so an outline traced
+    # round a pool had nowhere to go. Saved here it becomes an ordinary named
+    # boundary the 🟪 Boundaries chip draws like any other, rather than a
+    # second kind of shape with machinery of its own.
+    #
+    # Offered for any drawn AREA, not only for the polygon tool: someone who
+    # squares a pool off with the rectangle meant that too, and telling the
+    # two apart from GeoJSON is guesswork -- a rectangle IS a Polygon once it
+    # has been drawn.
+    _bshapes = [f for f in (st.session_state.get("_last_drawings") or [])
+                if str(((f or {}).get("geometry") or {}).get("type"))
+                in ("Polygon", "MultiPolygon")]
+    if _bshapes:
+        with st.container(border=True):
+            st.caption("✏️ **Keep the shape you drew** — name it and it joins "
+                       "the Boundaries layer.")
+            _bv = st.session_state.get("wm_bnd_ver", 0)
+            _bc = st.columns([2.2, 1.4, 1])
+            _bname = _bc[0].text_input(
+                "Name", key="wm_bnd_name_%d" % _bv,
+                placeholder="e.g. Pool A", label_visibility="collapsed")
+            _btype = _bc[1].selectbox(
+                "Type", BOUNDARY_TYPES, key="wm_bnd_type",
+                label_visibility="collapsed")
+            if _bc[2].button("Save", key="wm_bnd_save_btn",
+                             use_container_width=True,
+                             disabled=not _bname.strip(),
+                             help="Store the LAST shape you drew as a named "
+                                  "boundary."):
+                _berr = _save_drawn_boundary(
+                    engine, _bname, _btype, _bshapes[-1])
+                st.session_state["wm_bnd_msg"] = (
+                    _berr or "Saved “%s” — switch on 🟪 Boundaries "
+                    "to see it." % _bname.strip())
+                if not _berr:
+                    # Versioned key, never assigned: clearing a text box by
+                    # writing its own key is scar #6.
+                    st.session_state["wm_bnd_ver"] = _bv + 1
+                # scope="app": a new boundary changes what the MAP draws.
+                st.rerun(scope="app")
+    _bmsg = st.session_state.pop("wm_bnd_msg", None)
+    if _bmsg:
+        (st.success if _bmsg.startswith("Saved") else st.warning)(_bmsg)
+
     # ── edit the selected place ────────────────────────────────────
     # NOT AN EXPANDER: this block already sits inside one, and expanders
     # cannot nest (scar #4). It is shown only while a place is being
@@ -11864,7 +12003,23 @@ def run(engine=None):
                     "showArea":     True,
                     "metric":       False,
                 },
-                "polygon":      False,
+                # ON, so an outline can follow a pool or a fault block
+                # instead of being squared off to a rectangle. Same
+                # shapeOptions as the others so a drawn shape reads the same
+                # whichever tool made it, and repeatMode False for the same
+                # reason the circle has it -- see that comment.
+                "polygon":      {
+                    "shapeOptions": {"color": "#1d4ed8", "weight": 2},
+                    "repeatMode":   False,
+                    "showArea":     True,
+                    "metric":       False,
+                    # allowIntersection False rejects a bow-tie while it is
+                    # being drawn. A self-intersecting ring is invalid
+                    # geography, and catching it at the mouse is far kinder
+                    # than a MakeValid that silently changes the shape.
+                    "allowIntersection": False,
+                    "drawError": {"color": "#b91c1c", "timeout": 1200},
+                },
                 "marker":       False,
                 "circlemarker": False,
                 "polyline":     False,
