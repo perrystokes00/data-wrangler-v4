@@ -7360,6 +7360,27 @@ def _well_lease_map(_engine, _v: int = 1) -> dict:
     return out
 
 
+# ── layer-toggle defaults, in ONE place ────────────────────────────────────
+# These are read twice: to seed map_mode when the page is first entered, and
+# as the `value=` for the toggles themselves. Written out twice they disagreed
+# -- map_mode was seeded "none" while the toggles derived "h3" -- and the
+# derivation below reacts to a mismatch by calling st.rerun(). So every single
+# entry to the map page paid a WHOLE EXTRA RENDER, before anything was on
+# screen, to correct a disagreement between two constants.
+_H3_DEFAULT_ON = True
+_WELLS_DEFAULT_ON = False
+
+
+def _default_map_mode() -> str:
+    """The mode the layer toggles will derive on a fresh session.
+
+    Wells wins when both are on -- the same rule the derivation uses, and the
+    reason this is a function rather than a third literal.
+    """
+    return ("wells" if _WELLS_DEFAULT_ON
+            else ("h3" if _H3_DEFAULT_ON else "none"))
+
+
 _AI_SQL_OPS = {"eq": "=", "ne": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
 
 
@@ -8460,7 +8481,12 @@ def run(engine=None):
     # same render cycle if a Query type that needs wells gets selected.
     if "_wm_page_entered" not in st.session_state:
         st.session_state["_wells_already_loaded"] = False
-        st.session_state["map_mode"] = "none"
+        # SEEDED TO WHAT THE TOGGLES WILL DERIVE, not to "none". Seeding
+        # "none" guaranteed a mismatch further down, and that derivation
+        # answers a mismatch with st.rerun() -- so entering the map always
+        # cost one whole extra render to reconcile two constants that simply
+        # disagreed. Both now come from _default_map_mode.
+        st.session_state["map_mode"] = _default_map_mode()
         st.session_state.pop("wm_adv_td_op", None)
         st.session_state.pop("wm_adv_spud_op", None)
         st.session_state.pop("wm_adv_comp_op", None)
@@ -10828,8 +10854,12 @@ def run(engine=None):
             # Both render blocks are independent `if`s, so turning both on
             # shows both layers at once. Pass `value=` only when the key is
             # absent (Streamlit forbids default + session value together).
-            _h3_kw = {} if "h3_layer_on" in st.session_state else {"value": True}
-            _w_kw = {} if "wells_layer_on" in st.session_state else {"value": False}
+            # Defaults from the same constants that seed map_mode above, so
+            # the two cannot drift back apart into a forced rerun.
+            _h3_kw = ({} if "h3_layer_on" in st.session_state
+                      else {"value": _H3_DEFAULT_ON})
+            _w_kw = ({} if "wells_layer_on" in st.session_state
+                     else {"value": _WELLS_DEFAULT_ON})
             # NB: _mode_col is already a nested column (inside `mapcol`), so we
             # can't sub-divide it again — Streamlit allows only one level of
             # column nesting. Stack the two toggles vertically here instead.
