@@ -76,10 +76,15 @@ REM
 REM Which is what .streamlit\config.toml asks for already; this script's
 REM --server.fileWatcherType auto is the override, and this turns it off
 REM again without editing either file.
+REM SPELLED SEVERAL WAYS ON PURPOSE. A switch that silently falls through to
+REM the DEFAULT when it is typed the other way is worse than one that errors:
+REM the server starts, watching, and looks like the flag did nothing. -NoWatch
+REM is the first thing a PowerShell hand types, so it is accepted here too.
 set "WATCH=auto"
-if /i "%~2"=="nowatch" set "WATCH=none"
-if /i "%~2"=="no-watch" set "WATCH=none"
-if /i "%ACTION%"=="nowatch" (set "WATCH=none" & set "ACTION=start")
+for %%W in ("nowatch" "no-watch" "-nowatch" "-no-watch" "/nowatch") do (
+    if /i "%~2"==%%W set "WATCH=none"
+    if /i "%ACTION%"==%%W (set "WATCH=none" & set "ACTION=start")
+)
 
 if /i "%ACTION%"=="start"   goto :start
 if /i "%ACTION%"=="stop"    goto :stop
