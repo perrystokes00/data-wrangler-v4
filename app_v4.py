@@ -1209,12 +1209,12 @@ if S.app_mode == "splash":
         _nav_card(c4, "🗂️", "File Catalog",
                   "Scan · enrich · browse · view · extract · load",
                   "workbench")
-        _nav_card(c5, "📋", "Reference Tables",
-                  "Seed dv_r_well_status · dv_r_well_type · lookups",
-                  "ref_tables")
-        _nav_card(c6, "📄", "Document Assistant",
+        _nav_card(c5, "📄", "Document Assistant",
                   "Read documents · see what was extracted · teach the vocabulary",
                   "docassist")
+        _nav_card(c6, "📋", "Reference Tables",
+                  "Seed dv_r_well_status · dv_r_well_type · lookups",
+                  "ref_tables")
         # Region Builder card retired Aug 2 — uncomment to restore (its
         # dispatch branch below is untouched).
         # _nav_card(c6, "🗺", "Region Builder",
