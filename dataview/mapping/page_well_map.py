@@ -4382,6 +4382,43 @@ SEIS_GALLERY_MAX = 6
 SEIS_GALLERY_TRACES = 240
 
 
+def _seis_basket_add(paths, lines, df3d=None):
+    """Put SEG-Y paths into the picks basket. Returns how many were new.
+
+    ONE WRITER FOR THE BASKET. Two doors fill it now -- "the lines inside the
+    shape I drew" and "the lines I ticked in the grid" -- and the area-add
+    already had the right instinct in its own comment: go through
+    _seis_candidates so the basket holds the same shape of dict however a
+    line got into it, because two producers of one structure is how the two
+    halves drift. That argument only gets stronger with a second producer, so
+    the body moved here rather than being copied.
+
+    Silently skips a path with no candidate behind it: the basket feeds a
+    renderer that reads traces from a file, so an entry with no file is an
+    entry that draws an error instead of a section.
+    """
+    _have = {str(x.get("path")) for x in
+             (st.session_state.get("_seis_multi") or [])}
+    _new = [str(p) for p in (paths or []) if p and str(p) not in _have]
+    if not _new:
+        return 0
+    _by_path = {str(c.get("path")): c for c in _seis_candidates(lines, df3d)}
+    _multi = list(st.session_state.get("_seis_multi") or [])
+    _added = 0
+    for _p in _new:
+        _c = _by_path.get(_p)
+        if _c:
+            _multi.append(dict(_c))
+            _added += 1
+    if _added:
+        st.session_state["_seis_multi"] = _multi
+        # The last one added becomes the open section, so the panel shows
+        # something rather than going quiet after a successful add.
+        st.session_state["_seis_pick"] = dict(_multi[-1])
+        st.session_state["_seis_basket_last"] = _seis_label(_multi[-1])
+    return _added
+
+
 def _render_seis_area_add(lines, df3d=None):
     """Add every 2D line inside the last drawn shape to the picks.
 
@@ -4438,19 +4475,7 @@ def _render_seis_area_add(lines, df3d=None):
         # THROUGH _seis_candidates, so the basket holds the same shape of
         # dict however a line got into it. Two producers of one structure
         # is how the two halves drift.
-        _by_path = {str(c.get("path")): c
-                    for c in _seis_candidates(lines, df3d)}
-        _multi = list(st.session_state.get("_seis_multi") or [])
-        _added = 0
-        for _p in _new:
-            _c = _by_path.get(_p)
-            if _c:
-                _multi.append(dict(_c))
-                _added += 1
-        if _added:
-            st.session_state["_seis_multi"] = _multi
-            st.session_state["_seis_pick"] = dict(_multi[-1])
-            st.session_state["_seis_basket_last"] = _seis_label(_multi[-1])
+        _seis_basket_add(_new, lines, df3d)
         st.rerun()
 
 
@@ -4991,8 +5016,12 @@ def _render_map_drive(lines, df3d):
         _ln = str(_sl.get("line") or "")
         if not _ln:
             continue
+        # The SEG-Y behind it, carried so the ticks can also go to Results.
+        # A line with no file still belongs in the grid -- it is drawable, and
+        # this control decides what is DRAWN -- it just cannot be opened.
         rows.append({"key": "%s|%s" % (_sv, _ln), "survey": _sv,
-                     "line": _ln, "kind": "2D"})
+                     "line": _ln, "kind": "2D",
+                     "path": str(_sl.get("file") or "")})
     try:
         _iter = df3d.iterrows() if df3d is not None else []
     except AttributeError:
@@ -5004,7 +5033,8 @@ def _render_map_drive(lines, df3d):
             continue
         _seen3d.add(_sv)
         rows.append({"key": _sv, "survey": _sv,
-                     "line": "(whole volume)", "kind": "3D"})
+                     "line": "(whole volume)", "kind": "3D",
+                     "path": str(_r.get("file_path") or "")})
     if not rows:
         return
     rows.sort(key=lambda r: (r["survey"], r["line"]))
@@ -5055,9 +5085,16 @@ def _render_map_drive(lines, df3d):
                                                     width="small"),
                 "key": None,
             })
-        _c1, _c2, _c3 = st.columns([1.3, 1, 1])
+        _c1, _c4, _c2, _c3 = st.columns([1.2, 1.4, 1, 1])
         _send = _c1.form_submit_button("Send to map", type="primary",
                                        use_container_width=True)
+        # THE OTHER THING A TICKED SET IS FOR. Choosing twelve dip lines to
+        # DRAW and choosing twelve to LOOK AT are the same act of picking,
+        # and until now only the first had a button -- the sections could be
+        # collected only by clicking the map one line at a time, which is the
+        # rebuild-per-click this whole afternoon was about.
+        _tores = _c4.form_submit_button("Send to Results",
+                                        use_container_width=True)
         _none = _c2.form_submit_button("Clear all",
                                        use_container_width=True)
         _all = _c3.form_submit_button("Show everything",
@@ -5065,6 +5102,30 @@ def _render_map_drive(lines, df3d):
 
     def _write(mode, surveys, lines, msg):
         _write_map_seis(mode, surveys, lines, msg)
+
+    if _tores:
+        # Ticked -> the picks basket, which stacks each one's section down
+        # the page. A fragment-scoped rerun is enough and is the point: this
+        # changes what is OPEN, not what the map draws, so the map is left
+        # exactly as it is.
+        _bypath = {str(r["key"]): r.get("path") for r in rows}
+        _want = [_bypath.get(str(r["key"]))
+                 for _i, r in _grid.iterrows() if r["Show"]]
+        _added = _seis_basket_add([p for p in _want if p], lines, df3d)
+        _asked = len([p for p in _want])
+        if _added:
+            st.session_state["mapdrive_msg"] = (
+                "Added %d line(s) to Results." % _added)
+        elif _asked:
+            # SAY WHICH NOTHING HAPPENED. "Already there" and "none of them
+            # has a file to open" are different facts with different fixes,
+            # and a silent no-op reads as a broken button either way.
+            st.session_state["mapdrive_msg"] = (
+                "Nothing added — those line(s) are already in Results, or "
+                "have no SEG-Y behind them to open.")
+        else:
+            st.session_state["mapdrive_msg"] = "Nothing ticked."
+        st.rerun()
 
     if _send:
         _keys = {str(r["key"]) for _i, r in _grid.iterrows() if r["Show"]}
