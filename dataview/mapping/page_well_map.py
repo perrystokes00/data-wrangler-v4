@@ -499,7 +499,13 @@ def _write_map_seis(mode, surveys, lines, msg, msg_key="mapdrive_msg"):
     _p[MAP_SEIS_PREF] = {"mode": mode, "surveys": surveys, "lines": lines}
     _save_user_prefs(_p)
     st.session_state[msg_key] = msg
-    st.rerun()
+    # scope="app" BECAUSE THE CALLER IS A FRAGMENT. _render_seis_pick reruns
+    # in isolation so its filters cost nothing, and a fragment-scoped rerun
+    # would redraw the chooser while leaving the map showing the OLD
+    # selection -- the button would look like it had done nothing. This is
+    # the one control in that fragment that has to rebuild the map.
+    # Harmless from the second screen's grid, which has no map to rebuild.
+    st.rerun(scope="app")
 
 
 def _seis_map_keys(cands):
@@ -4560,6 +4566,7 @@ def _render_seis_basket():
         st.success(_bm)
 
 
+@st.fragment
 def _render_seis_pick(lines=None, df3d=None):
     """Filter down to one seismic line or volume, then look at it.
 
