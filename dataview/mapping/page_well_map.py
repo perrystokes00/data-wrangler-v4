@@ -7193,6 +7193,77 @@ def _ai_db_columns(_engine, _v: int = 1) -> dict:
     out["operator_name"] = ("COALESCE(w.operator_name, ba.ba_name, 'Unknown')", "text")
     out["field_name"] = ("COALESCE(w.field_name, f.field_name, 'Unknown')", "text")
     out["basin_name"] = ("ISNULL(f.basin_name, 'Unknown')", "text")
+
+    # ── lease, resolved WHERE THE WELL IS ────────────────────────────────
+    # dv_well has no lease column and never will: a well is not stamped with
+    # a tract, it simply falls inside one. So these are correlated spatial
+    # lookups, which makes lease an ordinary FILTERABLE FIELD -- "in lease 5"
+    # composes with depth and spud date through the same machinery as every
+    # other column, instead of needing an operator of its own.
+    #
+    # TOP 1 is honest here rather than lossy: the tracts tile without gaps or
+    # overlaps (gen_synthetic_leases verifies both), so a located well is in
+    # exactly one. If that ever stops being true this returns one of them
+    # rather than multiplying the row, which is the safer failure.
+    #
+    # Only offered when there ARE tracts. A field the model is told about but
+    # that can never match is worse than an absent one: it produces a filter
+    # that silently returns nothing and looks like a data problem.
+    try:
+        with _engine.connect() as con:
+            _has_tracts = con.execute(text(
+                "SELECT COUNT(*) FROM dataview.dv_land_tract "
+                "WHERE geog IS NOT NULL")).scalar()
+    except Exception:
+        _has_tracts = 0
+    if _has_tracts:
+        _pt = ("geography::Point(w.surface_latitude, w.surface_longitude, "
+               "4326)")
+        for _fld, _col in (("lease_name", "tract_name"),
+                           ("lease_number", "lease_number"),
+                           ("lease_operator", "operator_name")):
+            out[_fld] = (
+                "(SELECT TOP 1 lt.[%s] FROM dataview.dv_land_tract lt "
+                " WHERE w.surface_latitude IS NOT NULL "
+                "   AND lt.geog.STIntersects(%s) = 1)" % (_col, _pt),
+                "text")
+    return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _well_lease_map(_engine, _v: int = 1) -> dict:
+    """{uwi: (tract_name, lease_number, lease_operator)} for located wells.
+
+    ONE QUERY, NOT ONE PER WELL. The spatial join runs once for the whole
+    database and is cached; the alternative -- resolving each well's tract as
+    the map draws -- is the shape that put 157 round trips in a single render.
+
+    Exists because the AI filter has TWO modes and they read leases
+    differently. In database mode the correlated subquery in _ai_db_columns
+    answers a lease clause. In loaded mode the filter is pandas over well
+    DICTS and reads w.get(field), so without these keys every lease clause is
+    unevaluable -- and _apply_ai_filter counts unevaluable as NOT matching.
+    The filter would return nothing and read as a data problem rather than a
+    missing column.
+    """
+    out = {}
+    try:
+        with _engine.connect() as con:
+            for r in con.execute(text("""
+                SELECT RTRIM(w.uwi), lt.tract_name, lt.lease_number,
+                       lt.operator_name
+                  FROM dataview.dv_well w
+                  JOIN dataview.dv_land_tract lt
+                    ON lt.geog.STIntersects(
+                         geography::Point(w.surface_latitude,
+                                          w.surface_longitude, 4326)) = 1
+                 WHERE w.surface_latitude IS NOT NULL
+                   AND lt.geog IS NOT NULL""")).fetchall():
+                # First tract wins if the tiling ever overlaps -- the same
+                # choice the TOP 1 subquery makes, so both modes agree.
+                out.setdefault(str(r[0]), (r[1], r[2], r[3]))
+    except Exception as exc:
+        print(f"[well_lease_map] {exc}")
     return out
 
 
@@ -7413,6 +7484,21 @@ def _ai_filter_wells(question: str, sample_wells: list[dict],
         # happens to return — so two thirds of the well header was invisible to
         # it and "wells with core data" had no vocabulary at all.
         _db_cols = _ai_db_columns(_engine) if _engine is not None else {}
+        # What lease numbers actually EXIST, so the model asks for one that
+        # does. Empty when no tracts are loaded, which drops the whole lease
+        # paragraph from the prompt rather than advertising a dead field.
+        _lease_hint = ""
+        if "lease_number" in _db_cols and _engine is not None:
+            try:
+                with _engine.connect() as _lc:
+                    _lns = [str(r[0]) for r in _lc.execute(text(
+                        "SELECT lease_number FROM dataview.dv_land_tract "
+                        "WHERE lease_number IS NOT NULL "
+                        "ORDER BY TRY_CAST(lease_number AS int)")).fetchall()]
+                if _lns:
+                    _lease_hint = "in use: " + ", ".join(_lns[:40])
+            except Exception:
+                _lease_hint = ""
         _col_list = ", ".join(sorted(_db_cols)) if _db_cols else col_summary
         _has_list = "\n".join(
             f"  {k} — true if the well has {lbl}"
@@ -7438,7 +7524,18 @@ def _ai_filter_wells(question: str, sample_wells: list[dict],
             f"  well_status: {statuses}\n"
             f"  well_type: {wtypes}\n"
             f"  operator_name (sample): {operators}\n"
-            f"  county (sample): {counties}\n\n"
+            f"  county (sample): {counties}\n"
+            # NAME THE VALUES, or "lease 5" gets guessed at. lease_number is
+            # a plain number held as TEXT, so the model must be told to send
+            # "5" and not 5 -- _ai_literal type-checks against the column and
+            # would otherwise drop the clause and report it as unusable.
+            + (f"  lease_number: text, a plain number like \"5\" — "
+               f"{_lease_hint}\n"
+               "  lease_name: the tract name, e.g. \"Sundance Tract\"\n"
+               "  lease_operator: who holds the lease, which is NOT\n"
+               "    necessarily the well's operator_name\n"
+               if _lease_hint else "")
+            + "\n"
             'Return this exact JSON structure:\n'
             '{\n'
             '  "filters": [\n'
@@ -8852,6 +8949,22 @@ def run(engine=None):
     shp_layers = _load_shp_layers(engine)
     _status.empty()
     # counts_df loaded lazily below — only when a "Has X" filter is active
+
+    # LEASE ONTO THE LOADED WELLS, before any filter reads them. See
+    # _well_lease_map for why the loaded mode needs the keys present and the
+    # database mode does not. Cheap and cached; skipped entirely when no
+    # tracts are loaded, which is the state this database was in until today.
+    if _wells_raw:
+        try:
+            _lz = _well_lease_map(engine)
+            if _lz:
+                for _w in _wells_raw:
+                    _lt = _lz.get(str(_w.get("uwi") or "").strip())
+                    if _lt:
+                        (_w["lease_name"], _w["lease_number"],
+                         _w["lease_operator"]) = _lt
+        except Exception as _lze:
+            print(f"[lease_enrich] {_lze}")
 
     # Apply AI filter if active (only meaningful when we have wells)
     _ai_spec = st.session_state.get("ai_filter_spec")
