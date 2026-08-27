@@ -278,6 +278,57 @@ def _saved_places(_engine=None) -> dict:
     return out
 
 
+def _rename_place(old: str, new: str) -> str:
+    """Rename a SAVED place. Returns "" on success, else why not.
+
+    REFUSES A COLLISION rather than overwriting. Two places with one name
+    cannot both be reached, and silently replacing the other one destroys an
+    extent the user drew -- the same reasoning as promote holding a row
+    instead of guessing. Shadowing a BUILT-IN is allowed, because that is
+    already the documented rule: a user entry wins a name clash.
+    """
+    new = (new or "").strip()
+    if not new:
+        return "Give it a name."
+    if new == old:
+        return ""
+    try:
+        _p = _load_user_prefs()
+        _pl = _p.get("places") or {}
+        if old not in _pl:
+            return "That place is built in and cannot be renamed."
+        if new in _pl:
+            return "You already have a place called %s." % new
+        _pl[new] = _pl.pop(old)
+        _p["places"] = _pl
+        _save_user_prefs(_p)
+        return ""
+    except Exception as exc:
+        return "Could not rename: %s" % exc
+
+
+def _repoint_place(name: str, bounds) -> str:
+    """Point an existing SAVED place at a new extent. "" on success.
+
+    Normalised through _norm_bounds like every other write, so a re-point
+    cannot reintroduce the flat shape the save fallback used to store.
+    """
+    _b = _norm_bounds(bounds)
+    if _b is None:
+        return "No extent to use. Draw a box first."
+    try:
+        _p = _load_user_prefs()
+        _pl = _p.get("places") or {}
+        if name not in _pl:
+            return "That place is built in and cannot be changed."
+        _pl[name] = _b
+        _p["places"] = _pl
+        _save_user_prefs(_p)
+        return ""
+    except Exception as exc:
+        return "Could not update: %s" % exc
+
+
 def _delete_place(name: str) -> bool:
     """Remove a SAVED place. Built-ins and regions cannot be deleted — they
     are code and data respectively, so a delete would appear to work and the
@@ -7514,6 +7565,197 @@ def _render_results_documents(engine, uwis):
         st.rerun()
 
 
+@st.fragment
+def _render_saved_places(engine):
+    """Go to / save / rename / re-point / delete a saved place.
+
+    A FRAGMENT BECAUSE NONE OF THIS DRAWS THE MAP. Streamlit reruns the whole
+    script on any widget change, and this page costs ~13 s to build, so
+    picking a name in the Go-to box used to pay a full map rebuild for a
+    control that does not move the camera. A fragment reruns in isolation,
+    and the map is drawn above this, so it is left untouched.
+
+    Only "Go" moves the camera, and only it calls st.rerun(scope="app").
+    Every other action here -- save, rename, re-point, delete, cancel --
+    changes this block and nothing else, so a fragment-scoped rerun is both
+    correct and free.
+    """
+    # SAVED PLACES sit beside Reset view because they are the same kind of
+    # control: both move the CAMERA and neither touches the wells. One
+    # click to a known field beats hunting for a county on a world map,
+    # which is how every demo currently opens.
+    _pl1, _pl2, _pl5, _pl3, _pl4 = st.columns(
+        [2.2, 0.7, 0.7, 0.7, 1.1])
+    _places = _saved_places(engine)
+    _pick = _pl1.selectbox(
+        "Go to", ["— pick a place —"] + sorted(_places),
+        key="wm_place_pick", label_visibility="collapsed")
+    if _pl2.button("📍 Go", key="wm_place_go", use_container_width=True,
+                   disabled=_pick.startswith("—")):
+        _go_to_place(_places[_pick])
+        # THE ONE ACTION HERE THAT MOVES THE CAMERA. _go_to_place sets
+        # _drawn_bounds and _reset_saved_view, and nothing consumes either
+        # until the map renders -- so this is the only control in the
+        # fragment that has to cost a full rebuild.
+        st.rerun(scope="app")
+    # Editing and deleting are offered only for entries that CAN be
+    # changed. A built-in or a region would come straight back on the next
+    # run, and a control that appears to work and does not is worse than
+    # one that is absent.
+    _own = _pick in ((_load_user_prefs().get("places") or {}))
+    if _pl5.button("\u270e", key="wm_place_edit_btn", use_container_width=True,
+                   disabled=not _own,
+                   help=("Rename this place, or point it at the box you "
+                         "have drawn" if _own else
+                         "Built-in places and petroleum regions cannot be "
+                         "edited \u2014 they come from code and from your "
+                         "data")):
+        # A REQUEST FLAG CONSUMED BEFORE THE WIDGETS DRAW. The rename box
+        # is pre-filled with the current name, so it has to exist only
+        # once a place is chosen -- setting its value after it exists is
+        # scar #6 and raises on a later run, on whatever page draws next.
+        st.session_state["_place_edit"] = _pick
+        st.session_state["wm_place_ren_ver"] = (
+            st.session_state.get("wm_place_ren_ver", 0) + 1)
+        st.rerun()
+    if _pl3.button("🗑", key="wm_place_del", use_container_width=True,
+                   disabled=not _own,
+                   help=("Remove this saved place" if _own else
+                         "Built-in places and petroleum regions cannot be "
+                         "removed — they come from code and from your data")):
+        if _delete_place(_pick):
+            st.rerun()
+    # NOT "the current view" -- Python is never told where you panned or
+    # zoomed to, and three designs that tried to follow the viewport all
+    # failed. What gets saved is the extent the app ITSELF set: the box
+    # you drew, or the bbox a drill produced. The old comment here claimed
+    # otherwise and the code never matched it.
+    #
+    # AND IT IS A TEXT BOX AMONG BUTTONS. With its label collapsed to line
+    # up with Go and the bin, a grey placeholder in a bordered box reads as
+    # a DISABLED BUTTON -- which is exactly how it was reported. Worse, the
+    # "draw a box first" hint only appeared AFTER you typed a name, so the
+    # thing that looked dead stayed dead until you argued with it. Now the
+    # state is honest before you touch it: genuinely disabled when there is
+    # nothing to save, and the placeholder says which.
+    _can_save = bool(st.session_state.get("_drawn_bounds")
+                     or st.session_state.get("_active_drill_bbox"))
+    _pv = st.session_state.get("wm_place_ver", 0)
+    # KEY IS VERSIONED, NOT REASSIGNED. Clearing the box after a save by
+    # writing st.session_state["wm_place_new"] = "" is illegal -- Streamlit
+    # refuses to let a widget own key be set once the widget exists, and it
+    # raises on the NEXT run, on whatever page happens to draw first. That
+    # is scar #6 in this codebase. Bumping a counter gives a fresh widget,
+    # which starts empty by itself.
+    _newname = _pl4.text_input(
+        "Save current view as",
+        key="wm_place_new_%d" % _pv,
+        placeholder=("name this area…" if _can_save
+                     else "draw a box to save"),
+        disabled=not _can_save,
+        help=("Names the extent you drew or drilled and adds it to Go to."
+              if _can_save else
+              "Nothing to save yet. The map cannot tell Python where you "
+              "panned or zoomed to — draw a box with the rectangle tool, "
+              "or run a search, and THAT extent is what a name saves."),
+        label_visibility="collapsed")
+    if _newname.strip() and _can_save:
+        # NORMALISE BEFORE STORING. The fallback is a different shape
+        # from the first choice -- see _norm_bounds -- and storing it raw
+        # is what put four bare numbers in the file.
+        _b = _norm_bounds(st.session_state.get("_drawn_bounds")
+                          or st.session_state.get("_active_drill_bbox"))
+        if _b is None:
+            st.session_state["wm_place_err"] = _newname.strip()
+            st.rerun()
+        _p = _load_user_prefs()
+        _p.setdefault("places", {})[_newname.strip()] = _b
+        _save_user_prefs(_p)
+        st.session_state["wm_place_ver"] = _pv + 1   # fresh, empty box
+        st.session_state["wm_place_msg"] = _newname.strip()
+        st.rerun()
+    # AFTER the rerun, not before it. st.rerun() RAISES, so an st.success
+    # written above is destroyed before it reaches the screen -- the same
+    # scar that hid the colour-grid errors for a whole session.
+    _pmsg = st.session_state.pop("wm_place_msg", None)
+    if _pmsg:
+        st.success("Saved “%s” — it is in the Go to list now." % _pmsg)
+    # SAY SO RATHER THAN STORING SOMETHING UNUSABLE. A place that
+    # cannot be read back is worse than one never saved: it sits in the
+    # Go to list looking fine until it moves the camera nowhere.
+    _perr = st.session_state.pop("wm_place_err", None)
+    if _perr:
+        st.error("Could not read an extent to save for that name. "
+                 "Draw the box again and re-save.")
+
+    # ── edit the selected place ────────────────────────────────────
+    # NOT AN EXPANDER: this block already sits inside one, and expanders
+    # cannot nest (scar #4). It is shown only while a place is being
+    # edited, so it costs nothing when it is not.
+    _ed = st.session_state.get("_place_edit")
+    if _ed and _ed not in (_load_user_prefs().get("places") or {}):
+        # Deleted or renamed underneath us -- drop the request rather than
+        # drawing a panel for something that is gone.
+        st.session_state.pop("_place_edit", None)
+        _ed = None
+    if _ed:
+        with st.container(border=True):
+            _cur = _norm_bounds((_load_user_prefs().get("places")
+                                 or {}).get(_ed))
+            st.caption("Editing **%s**%s" % (_ed, (
+                " \u2014 currently %.3f\u00b0 lat \u00d7 %.3f\u00b0 lon"
+                % (_cur[1][0] - _cur[0][0], _cur[1][1] - _cur[0][1]))
+                if _cur else ""))
+            _rv = st.session_state.get("wm_place_ren_ver", 0)
+            _newnm = st.text_input(
+                "Rename to", value=_ed,
+                key="wm_place_ren_%d" % _rv)
+            _e1, _e2, _e3 = st.columns([1, 1.4, 1])
+            if _e1.button("Rename", key="wm_place_ren_go",
+                          use_container_width=True):
+                _err = _rename_place(_ed, _newnm)
+                st.session_state["wm_place_edit_msg"] = (
+                    _err or "Renamed to \u201c%s\u201d."
+                    % (_newnm or "").strip())
+                if not _err:
+                    # POINT THE PICKER AT THE NEW NAME, or the selectbox
+                    # holds a value that no longer exists and the release
+                    # in the next run silently drops the selection.
+                    st.session_state["wm_place_pick"] = (
+                        _newnm or "").strip()
+                    st.session_state.pop("_place_edit", None)
+                st.rerun()
+            # RE-POINT USES THE SAME EXTENT THE SAVE BOX WOULD, so what
+            # this writes is exactly what saving a new place would write.
+            _rb = (st.session_state.get("_drawn_bounds")
+                   or st.session_state.get("_active_drill_bbox"))
+            if _e2.button("Use the box I drew", key="wm_place_repoint_btn",
+                          use_container_width=True,
+                          disabled=not _rb,
+                          help=("Point %s at the extent currently drawn"
+                                % _ed) if _rb else
+                          "Draw a box first, then this will point the "
+                          "place at it"):
+                _err = _repoint_place(_ed, _rb)
+                st.session_state["wm_place_edit_msg"] = (
+                    _err or "\u201c%s\u201d now points at the box you "
+                    "drew." % _ed)
+                if not _err:
+                    st.session_state.pop("_place_edit", None)
+                st.rerun()
+            if _e3.button("Cancel", key="wm_place_ren_cancel",
+                          use_container_width=True):
+                st.session_state.pop("_place_edit", None)
+                st.rerun()
+    # AFTER the rerun, for the same reason as every other message here.
+    _emsg = st.session_state.pop("wm_place_edit_msg", None)
+    if _emsg:
+        if _emsg.startswith(("Renamed", "\u201c")):
+            st.success(_emsg)
+        else:
+            st.warning(_emsg)
+
+
 def run(engine=None):
     if not HAS_FOLIUM:
         st.error("pip install folium streamlit-folium")
@@ -12019,93 +12261,8 @@ def run(engine=None):
         # Reset on the left, Map display filling the space beside it — that
         # row was a button and a wide gap, and the display toggles were the
         # last thing left in the control rail.
-        # SAVED PLACES sit beside Reset view because they are the same kind of
-        # control: both move the CAMERA and neither touches the wells. One
-        # click to a known field beats hunting for a county on a world map,
-        # which is how every demo currently opens.
-        _pl1, _pl2, _pl3, _pl4 = st.columns([2.4, 0.8, 0.8, 1.2])
-        _places = _saved_places(engine)
-        _pick = _pl1.selectbox(
-            "Go to", ["— pick a place —"] + sorted(_places),
-            key="wm_place_pick", label_visibility="collapsed")
-        if _pl2.button("📍 Go", key="wm_place_go", use_container_width=True,
-                       disabled=_pick.startswith("—")):
-            _go_to_place(_places[_pick])
-            st.rerun()
-        # Deleting is offered only for entries that CAN be deleted. A built-in
-        # or a region would come straight back on the next run, and a control
-        # that appears to work and does not is worse than one that is absent.
-        _own = _pick in ((_load_user_prefs().get("places") or {}))
-        if _pl3.button("🗑", key="wm_place_del", use_container_width=True,
-                       disabled=not _own,
-                       help=("Remove this saved place" if _own else
-                             "Built-in places and petroleum regions cannot be "
-                             "removed — they come from code and from your data")):
-            if _delete_place(_pick):
-                st.rerun()
-        # NOT "the current view" -- Python is never told where you panned or
-        # zoomed to, and three designs that tried to follow the viewport all
-        # failed. What gets saved is the extent the app ITSELF set: the box
-        # you drew, or the bbox a drill produced. The old comment here claimed
-        # otherwise and the code never matched it.
-        #
-        # AND IT IS A TEXT BOX AMONG BUTTONS. With its label collapsed to line
-        # up with Go and the bin, a grey placeholder in a bordered box reads as
-        # a DISABLED BUTTON -- which is exactly how it was reported. Worse, the
-        # "draw a box first" hint only appeared AFTER you typed a name, so the
-        # thing that looked dead stayed dead until you argued with it. Now the
-        # state is honest before you touch it: genuinely disabled when there is
-        # nothing to save, and the placeholder says which.
-        _can_save = bool(st.session_state.get("_drawn_bounds")
-                         or st.session_state.get("_active_drill_bbox"))
-        _pv = st.session_state.get("wm_place_ver", 0)
-        # KEY IS VERSIONED, NOT REASSIGNED. Clearing the box after a save by
-        # writing st.session_state["wm_place_new"] = "" is illegal -- Streamlit
-        # refuses to let a widget own key be set once the widget exists, and it
-        # raises on the NEXT run, on whatever page happens to draw first. That
-        # is scar #6 in this codebase. Bumping a counter gives a fresh widget,
-        # which starts empty by itself.
-        _newname = _pl4.text_input(
-            "Save current view as",
-            key="wm_place_new_%d" % _pv,
-            placeholder=("name this area…" if _can_save
-                         else "draw a box to save"),
-            disabled=not _can_save,
-            help=("Names the extent you drew or drilled and adds it to Go to."
-                  if _can_save else
-                  "Nothing to save yet. The map cannot tell Python where you "
-                  "panned or zoomed to — draw a box with the rectangle tool, "
-                  "or run a search, and THAT extent is what a name saves."),
-            label_visibility="collapsed")
-        if _newname.strip() and _can_save:
-            # NORMALISE BEFORE STORING. The fallback is a different shape
-            # from the first choice -- see _norm_bounds -- and storing it raw
-            # is what put four bare numbers in the file.
-            _b = _norm_bounds(st.session_state.get("_drawn_bounds")
-                              or st.session_state.get("_active_drill_bbox"))
-            if _b is None:
-                st.session_state["wm_place_err"] = _newname.strip()
-                st.rerun()
-            _p = _load_user_prefs()
-            _p.setdefault("places", {})[_newname.strip()] = _b
-            _save_user_prefs(_p)
-            st.session_state["wm_place_ver"] = _pv + 1   # fresh, empty box
-            st.session_state["wm_place_msg"] = _newname.strip()
-            st.rerun()
-        # AFTER the rerun, not before it. st.rerun() RAISES, so an st.success
-        # written above is destroyed before it reaches the screen -- the same
-        # scar that hid the colour-grid errors for a whole session.
-        _pmsg = st.session_state.pop("wm_place_msg", None)
-        if _pmsg:
-            st.success("Saved “%s” — it is in the Go to list now." % _pmsg)
-        # SAY SO RATHER THAN STORING SOMETHING UNUSABLE. A place that
-        # cannot be read back is worse than one never saved: it sits in the
-        # Go to list looking fine until it moves the camera nowhere.
-        _perr = st.session_state.pop("wm_place_err", None)
-        if _perr:
-            st.error("Could not read an extent to save for that name. "
-                     "Draw the box again and re-save.")
-
+        # Saved places, in a fragment: see _render_saved_places.
+        _render_saved_places(engine)
         _rv1, _rv2 = st.columns([1.1, 5])
         if _rv1.button("🎯 Reset view", key="wells_reset_view",
                        use_container_width=True,
