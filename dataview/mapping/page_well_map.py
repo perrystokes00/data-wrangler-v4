@@ -7367,7 +7367,11 @@ def _well_lease_map(_engine, _v: int = 1) -> dict:
 # derivation below reacts to a mismatch by calling st.rerun(). So every single
 # entry to the map page paid a WHOLE EXTRA RENDER, before anything was on
 # screen, to correct a disagreement between two constants.
-_H3_DEFAULT_ON = True
+# BOTH OFF ON ARRIVAL. H3 defaulting on meant opening the map immediately
+# queried and drew a continental density layer -- the "Rendering map…" wait
+# before the operator had asked for anything. An empty basemap opens fast and
+# says plainly that the next move is theirs; either layer is one click away.
+_H3_DEFAULT_ON = False
 _WELLS_DEFAULT_ON = False
 
 
