@@ -1,10 +1,19 @@
-r"""Synthetic well documents for the TEACUP demo wells.
+r"""Synthetic well documents for the TEAPOT DOME wells.
 
-The Teacup document corpus is 1,055 files that belong to no well in
-particular, so loading it fills the catalog and almost nothing else. These
-documents belong to specific wells: the header of every page is the row from
-synth_data\dv_well.csv, so a document loads onto a well the demo just created
-and the detail tables it carries hang off that well's uwi.
+Teapot has 1,373 wells and no paperwork of its own. The document corpora it
+can reach -- synth_docs\, Teapot_Field_Model\wells\ -- belong to no Teapot
+well in particular, so loading them fills the catalog and almost nothing else.
+These documents belong to specific wells: the header of every page is that
+well's row from dv_well, so an extracted document AGREES with the well already
+in the database rather than contradicting it, and the detail it carries hangs
+off that well's uwi.
+
+WHICH WELLS. `uwi LIKE '49025%'` -- Natrona County, Wyoming, which is all
+1,373 of them (1,344 carry the name + location + TD a document needs). Read
+from dv_well rather than from a workbook because the loaded rows ARE the
+Teapot set here: the 120-well Teapot_Field_Model\tabular\DV_WELL.xlsx is a
+different, unloaded population (uwi 4902590xxxxx), and documents written
+against it would name wells that do not exist.
 
 WRITTEN AGAINST THE EXTRACTOR, NOT AGAINST TASTE. pdf_document_loader finds a
 section two ways and BOTH have to be satisfied:
@@ -27,42 +36,49 @@ ignores a detail table), and pressure points need their own title. The type
 detector is also ORDERED -- "survey report" is tested before "rft", so the
 pressure document must not call itself a survey.
 
-WHAT IS REAL AND WHAT IS NOT. Header values are copied verbatim from
-dv_well.csv -- uwi, name, operator, field, county and state FIPS, spud,
-completion, TD, KB, latitude, longitude -- so an extracted document AGREES with
-the well beside it rather than contradicting it. Placeholder values are
-dropped, not printed: the synthetic generator fills unknown columns with
-`<column_name>-<random>`, and a report reading "Lease: lease_name-723" is
-visibly fake. Everything measured -- tops, casing, stations, zones, stages,
-tests -- is generated, deterministically from the uwi, because those tables are
-where documents are the ONLY source and so are where the provenance scorecard
-has something to show.
+WHAT IS REAL AND WHAT IS NOT. Header values are the well's own dv_well row --
+uwi, name, operator, field, county, state, spud, completion, TD, KB, latitude,
+longitude -- printed only where the column is populated, never invented. A
+blank label is honest; a filled-in wrong one plots and gets quoted. Everything
+measured -- tops, casing, stations, zones, stages, tests -- is generated,
+deterministically from the uwi, because those are the tables a document is the
+ONLY source for and so are what the provenance scorecard has to show.
 
-TIED TO TEACUP BY LIVING INSIDE IT. Output goes under synth_docs\, so
-demo_teacup.py already counts these files, already scans them with --load, and
-already purges them with --reset. Nothing there needed changing.
+THE SECTION IS REAL TEAPOT DOME, AT REAL DEPTHS. Shannon at ~400 ft through
+Tensleep at ~5,400 to Madison at ~6,300, clipped at the well's own TD -- and
+Teapot TDs run 180 to 6,864 ft with a MEDIAN of 1,080, because the shallow
+Shannon producers outnumber the deep Tensleep wells. Placing tops as a
+fraction of TD would put Madison at 171 ft in a 180-ft hole; absolute depths
+with a TD cut give a shallow well its two formations and a deep one all
+sixteen. The casing plan is cut the same way.
 
-    python tools/gen_teacup_docs.py                    # what it would write
-    python tools/gen_teacup_docs.py --apply
-    python tools/gen_teacup_docs.py --wells 100 --apply
-    python tools/gen_teacup_docs.py --remove --apply
+    python tools/gen_teapot_docs.py                    # what it would write
+    python tools/gen_teapot_docs.py --apply
+    python tools/gen_teapot_docs.py --wells 100 --apply
+    python tools/gen_teapot_docs.py --remove --apply
 
-Load the Teacup wells FIRST. Promote holds a child row whose parent well is
-missing, so documents scanned before their wells exist stay in the mirror.
+Then scan the output folder from the File Catalog, or:
+
+    python -m dataview.import_data.pipeline_run --root <out> --exts .pdf \
+        --server localhost\SQLEXPRESS --database DataView_Demo \
+        --promote --promote-apply
 """
 import argparse
-import csv
 import os
 import random
-import re
 import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-SYNTH = r"C:\Bulk\Synthetic\synthetic_data"
-WELL_CSV = os.path.join(SYNTH, "synth_data", "dv_well.csv")
-OUT_DIR = os.path.join(SYNTH, "synth_docs", "well_reports")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# ...\data_wrangler\data_wrangler_v4\tools -> ...\data_wrangler\training
+TRAINING = os.path.join(os.path.dirname(REPO_ROOT), "training")
+OUT_DIR = os.path.join(TRAINING, "Teapot_Dome", "well_reports")
+
+# Natrona County, Wyoming -- every Teapot well carries it, and nothing else in
+# the database does. NOT C:\Bulk: that is staging workspace, never input.
+UWI_LIKE = "49025%"
 
 # type -> (title, what the loader takes from it). The title is not decoration:
 # _detect_type() reads it, and four of these sections exist only because of it.
@@ -87,60 +103,69 @@ DOC_TYPES = {
 TYPES = tuple(DOC_TYPES)
 
 # A dry hole was still drilled, logged, surveyed and tested -- a DST is how it
-# was found to be dry -- but it was never completed and never flow tested. 80
-# of the 300 Teacup wells are DRY, so issuing every well the same eight
-# documents would put a frac job and a producing flow test on a quarter of the
-# corpus. Wrong is worse than missing.
+# was found to be dry -- but it was never completed and never flow tested, so
+# it gets six documents rather than eight. Wrong is worse than missing.
+#
+# WOGCC codes, not words: dv_well.well_type is 'O'/'I'/'S'/'W'/'DH' here and
+# well_status is 'PR'/'PA'/'SI'/'DR'/'TA'. A test written against the word
+# 'DRY' -- which is what the Teacup CSV says -- matches nothing in this data
+# and would silently give every dry hole a frac job.
 _COMPLETED_ONLY = ("completion", "welltest")
+_DRY_TYPE = {"DH", "D", "DRY", "DRY HOLE"}
+_DRY_STATUS = {"DR", "DRY", "D&A"}
+
+
+def is_dry(w):
+    return ((w.get("well_type") or "").strip().upper() in _DRY_TYPE
+            or (w.get("status") or "").strip().upper() in _DRY_STATUS)
 
 
 def types_for(w, wanted):
-    if (w.get("well_type") or "").upper() == "DRY":
+    if is_dry(w):
         return [t for t in wanted if t not in _COMPLETED_ONLY]
     return list(wanted)
 
-# A mid-continent / Permian column, placed as a FRACTION of the well's own TD
-# rather than at fixed depths -- the Teacup wells run 1,800 to 12,000 ft and a
-# fixed depth list would put half the section below TD.
-#                name,          top fraction, thickness fraction, pay?
+
+# Teapot Dome (NPR-3), Natrona County WY -- the real section, at real depths,
+# shallowest first. Each entry is a depth RANGE the top is drawn from, so
+# neighbouring wells disagree by a plausible amount instead of every well in
+# the field reporting Shannon at exactly the same foot.
+#              name,             top lo,  top hi, thickness, pay?
 COLUMN = [
-    ("Ogallala",        0.03, 0.04, False), ("Yates",        0.14, 0.03, False),
-    ("Seven Rivers",    0.20, 0.04, False), ("Queen",        0.27, 0.03, True),
-    ("Grayburg",        0.33, 0.04, True),  ("San Andres",   0.40, 0.06, True),
-    ("Glorieta",        0.49, 0.04, False), ("Clear Fork",   0.55, 0.05, True),
-    ("Wichita",         0.62, 0.03, False), ("Wolfcamp",     0.67, 0.06, True),
-    ("Cisco",           0.75, 0.03, False), ("Canyon",       0.79, 0.03, True),
-    ("Strawn",          0.84, 0.03, True),  ("Atoka",        0.88, 0.02, False),
-    ("Morrow",          0.91, 0.03, True),  ("Mississippian", 0.95, 0.03, True),
+    ("Shannon",          300,   620,  110, True),
+    ("Sussex",           780,  1150,   90, True),
+    ("Steele",          1200,  1500,  180, False),
+    ("Niobrara",        1450,  1850,  260, False),
+    ("Carlile",         1900,  2250,  140, False),
+    ("Frontier",        2350,  2800,  210, True),
+    ("Mowry",           2950,  3150,  120, False),
+    ("Muddy",           3150,  3480,   70, True),
+    ("Thermopolis",     3400,  3600,   90, False),
+    ("Dakota",          3600,  3950,  120, True),
+    ("Lakota",          4050,  4380,  110, True),
+    ("Morrison",        4400,  4720,  150, False),
+    ("Sundance",        4800,  5120,  180, True),
+    ("Crow Mountain",   5200,  5420,  110, False),
+    ("Alcova",          5420,  5560,   60, False),
+    ("Tensleep",        5400,  5900,  240, True),
+    ("Amsden",          5950,  6220,  180, False),
+    ("Madison",         6250,  6600,  300, True),
 ]
-# name, OD in decimal inches (a fraction like 13-3/8 survives _num as "13-38"),
-# weight lb/ft, grade, shoe as a fraction of TD
+# name, OD in decimal inches (a printed fraction like 13-3/8 survives the
+# loader's _num() as "13-38"), weight lb/ft, grade, shoe as a fraction of TD.
+# Cut to what the hole is deep enough for: a 300-ft Shannon well was drilled
+# with surface pipe and a production string, not four strings.
 CASING_PLAN = [
-    ("Conductor",    "20.000",  "94",   "K-55", 0.04),
-    ("Surface",      "13.375",  "54.5", "K-55", 0.18),
-    ("Intermediate", "9.625",   "40",   "J-55", 0.62),
-    ("Production",   "5.500",   "17",   "N-80", 0.97),
+    ("Conductor",    "20.000",  "94",   "K-55", 0.05, 1500),
+    ("Surface",      "13.375",  "54.5", "K-55", 0.20,  350),
+    ("Intermediate", "9.625",   "40",   "J-55", 0.62, 3000),
+    ("Production",   "5.500",   "17",   "N-80", 0.97,    0),
 ]
-
-# The synthetic generator's tell: a value that starts with the name of its own
-# column. Nothing real does. See find_placeholders.sql -- same rule, one place
-# it is applied on the way OUT so a fake value never reaches a printed page.
-_PLACEHOLDER = re.compile(r"^[a-z_]+-\d+$")
-
-
-def _clean(col, val):
-    """Return val, or '' if it is the generator's <column>-<n> placeholder."""
-    v = (val or "").strip()
-    if not v:
-        return ""
-    if v.lower().startswith(col.lower() + "-") and _PLACEHOLDER.match(v.lower()):
-        return ""
-    return v
 
 
 def _rng(uwi):
     """Deterministic per well: the same uwi always yields the same document."""
-    return random.Random("teacup-doc-" + str(uwi))
+    return random.Random("teapot-doc-" + str(uwi))
 
 
 def _f(v, nd=0):
@@ -150,46 +175,83 @@ def _f(v, nd=0):
         return ""
 
 
+def _depth(v):
+    """A depth from dv_well, printed WITHOUT losing it.
+
+    _f() rounds to whole feet, which turned a TD of 1032.5 into "1,032" -- a
+    document that contradicts the row it was written from, by half a foot, in
+    the one field the loader reads back into dv_well. Print what is there and
+    drop only the zeros SQL Server's decimal(n,4) pads on: 1032.5000 ->
+    "1,032.5", 5038.3200 -> "5,038.32", 460.0000 -> "460".
+    """
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return ""
+    s = format(f, ",.4f")
+    return s.rstrip("0").rstrip(".")
+
+
+def _coord(v):
+    """A latitude or longitude, without decimal(n,10)'s padding zeros.
+
+    "43.2841107000" is not wrong -- _num() reads it correctly -- but nothing
+    printed by a person looks like that, and a document that reads as machine
+    output invites the reader to distrust the rest of the page.
+    """
+    s = str(v or "").strip()
+    return s.rstrip("0").rstrip(".") if "." in s else s
+
+
 # ── the wells ──────────────────────────────────────────────────────────────
 
-def teacup_wells(limit):
-    """Wells from the Teacup CSV -- the same source demo_teacup.py scopes by.
+_FIELDS = ("uwi", "well_name", "operator", "field", "county", "state",
+           "status", "well_type", "spud", "comp", "td", "kb", "lat", "lon")
 
-    Read from the CSV, not from dv_well, so this runs whether or not the demo
-    is currently loaded; that is also what makes the printed header agree with
-    the row the Bulk Tabular Loader will insert.
+_WELL_SQL = """
+    SELECT RTRIM(w.uwi), w.well_name, w.operator_name, w.field_name,
+           w.county, w.province_state, w.well_status, w.well_type,
+           CONVERT(varchar(10), w.spud_date, 120),
+           CONVERT(varchar(10), w.completion_date, 120),
+           w.final_td, w.kb_elevation,
+           w.surface_latitude, w.surface_longitude
+      FROM dataview.dv_well w
+     WHERE w.uwi LIKE :like
+       AND w.well_name       IS NOT NULL
+       AND w.surface_latitude IS NOT NULL
+       AND w.final_td        IS NOT NULL
+     ORDER BY w.uwi"""
 
-    Sampled with a stride rather than TOP n so the documents span several
-    operators and fields instead of whichever block sorts first.
+
+def teapot_wells(engine, limit, like=UWI_LIKE):
+    """The Teapot wells a document can actually be written for.
+
+    Name, location and TD are the minimum: a document with no TD has no
+    section to report and a document with no location cannot be checked
+    against the map. 1,344 of the 1,373 qualify.
+
+    Sampled with a stride over the uwi order rather than TOP n, so the sample
+    spans the field's whole depth range -- the shallow Shannon wells and the
+    deep Tensleep wells sort into different blocks, and TOP n would document
+    one kind of well and call it Teapot.
     """
-    if not os.path.exists(WELL_CSV):
-        raise SystemExit("no %s -- the Teacup well list is the input" % WELL_CSV)
-    with open(WELL_CSV, encoding="utf-8-sig") as fh:
-        rows = [r for r in csv.DictReader(fh)
-                if (r.get("uwi") or "").strip()
-                and (r.get("surface_latitude") or "").strip()
-                and (r.get("final_td") or "").strip()]
+    from sqlalchemy import text
+    with engine.connect() as c:
+        rows = [tuple(r) for r in c.execute(text(_WELL_SQL), {"like": like})]
+    if not rows:
+        raise SystemExit(
+            "no wells match uwi LIKE '%s' with a name, a location and a TD.\n"
+            "Is the Teapot set loaded?" % like)
     if limit and limit < len(rows):
         step = len(rows) / float(limit)
         rows = [rows[int(i * step)] for i in range(limit)]
     out = []
     for r in rows:
-        out.append({
-            "uwi": r["uwi"].strip(),
-            "well_name": _clean("well_name", r.get("well_name")),
-            "operator": _clean("operator_name", r.get("operator_name")),
-            "field": _clean("field_name", r.get("field_name")),
-            "county": _clean("county", r.get("county")),
-            "state": _clean("province_state", r.get("province_state")),
-            "status": _clean("well_status", r.get("well_status")),
-            "well_type": _clean("well_type", r.get("well_type")),
-            "spud": (r.get("spud_date") or "")[:10],
-            "comp": (r.get("completion_date") or "")[:10],
-            "td": r.get("final_td") or "",
-            "kb": r.get("kb_elevation") or "",
-            "lat": r.get("surface_latitude") or "",
-            "lon": r.get("surface_longitude") or "",
-        })
+        # Values travel as SQL Server hands them back; _depth() does the
+        # printing. A "%g" here would silently round anything past six
+        # significant digits, which is the same class of bug as _f().
+        out.append(dict(zip(_FIELDS,
+                            ["" if v is None else str(v).strip() for v in r])))
     return out
 
 
@@ -197,29 +259,62 @@ def teacup_wells(limit):
 
 def _td(w):
     try:
-        return max(800.0, float(w["td"]))
+        return max(120.0, float(w["td"]))
     except (TypeError, ValueError):
-        return 6000.0
+        return 5000.0
+
+
+def _section(w):
+    """The formations this well actually penetrated, top-down.
+
+    One place decides it, because tops, zones and pressure points must agree:
+    a core report naming a zone the well report says was never reached is the
+    kind of quiet contradiction that survives every check and gets noticed on
+    camera.
+    """
+    r, td = _rng(w["uwi"]), _td(w)
+    out = []
+    for name, lo, hi, thick, pay in COLUMN:
+        if lo > td - 20:                    # the hole never reached this unit
+            continue
+        # Clamp the draw to what the hole actually reached. Drawing from the
+        # full range and then discarding anything below TD is what left a
+        # 460 ft Shannon producer reporting NO formations at all -- the well
+        # plainly penetrated Shannon; it is where its TD is.
+        top = r.uniform(lo, max(lo, min(hi, td - 20)))
+        out.append((name, top, min(td, top + thick), pay))
+    return out
 
 
 def tops_for(w):
-    r, td = _rng(w["uwi"]), _td(w)
+    """Formation tops. A DRY HOLE REPORTS NO PAY.
+
+    The section is the same either way -- a dry hole penetrated the same rock
+    as its neighbour -- but a well the database calls dry cannot also report
+    net oil pay in eight formations. That contradiction is on the page, in
+    front of the audience, and it is the reader who notices it.
+    """
+    r, dry = _rng(w["uwi"]), is_dry(w)
     out = []
-    for name, ft, th, pay in COLUMN:
-        top = td * (ft + r.uniform(-0.012, 0.012))
-        if top < 60 or top > td - 40:
-            continue
-        base = min(td, top + td * th)
+    for name, top, base, pay in _section(w):
+        show = pay and not dry
         out.append([name, _f(top), _f(base),
-                    ("%.1f" % r.uniform(4, td * th * 0.5)) if pay else "\u2014",
-                    ("OIL" if pay else "\u2014")])
+                    ("%.1f" % r.uniform(4, max(6, (base - top) * 0.5)))
+                    if show else "\u2014",
+                    ("OIL" if show else "\u2014")])
     return out
 
 
 def casing_for(w):
+    """Only the strings a hole this deep would carry.
+
+    Teapot TDs run from 180 ft; a shallow Shannon well got surface pipe and a
+    production string, and printing a conductor plus an intermediate on it
+    would be four confident wrong rows in dv_well_casing.
+    """
     td = _td(w)
     return [[nm, od, wt, gr, _f(td * frac)]
-            for nm, od, wt, gr, frac in CASING_PLAN]
+            for nm, od, wt, gr, frac, min_td in CASING_PLAN if td >= min_td]
 
 
 def survey_for(w, n=16):
@@ -229,7 +324,7 @@ def survey_for(w, n=16):
     step, rows = td / n, []
     for _ in range(n):
         md += step
-        # Teacup wells are vertical to near-vertical; drift a degree, not a
+        # Teapot wells are vertical to near-vertical; drift a degree, not a
         # landing. The loader drops a station with incl > 120 or azi > 360.
         inc = max(0.0, min(6.0, inc + r.uniform(-0.6, 0.9)))
         tvd += step * (1 - (inc / 180.0))
@@ -240,18 +335,21 @@ def survey_for(w, n=16):
 
 
 def zones_for(w):
-    """Petrophysical zones. Signature: "zone" + "top"; needs dt == petro."""
-    r, td = _rng(w["uwi"]), _td(w)
+    """Petrophysical zones. Signature: "zone" + "top"; needs dt == petro.
+
+    The pay members of the same section the well report prints, so the two
+    documents agree.
+    """
+    r, dry = _rng(w["uwi"]), is_dry(w)
     out = []
-    for name, ft, th, pay in COLUMN:
+    for name, top, base, pay in _section(w):
         if not pay:
             continue
-        top = td * ft
-        if top > td - 40:
-            continue
-        gross = td * th
-        ng = r.uniform(0.25, 0.85)
-        out.append([name, _f(top), _f(top + gross), "%.1f" % gross,
+        gross = base - top
+        # A dry hole was logged and analysed like any other; what it lacks is
+        # net. Keep the porosity and Sw, take the net-to-gross away.
+        ng = r.uniform(0.0, 0.10) if dry else r.uniform(0.25, 0.85)
+        out.append([name, _f(top), _f(base), "%.1f" % gross,
                     "%.1f" % (gross * ng), "%.2f" % ng,
                     "%.3f" % r.uniform(0.06, 0.22),
                     "%.3f" % r.uniform(0.18, 0.62)])
@@ -259,11 +357,17 @@ def zones_for(w):
 
 
 def stages_for(w):
-    """Frac stages. Signature: "stage" + "top"."""
+    """Frac stages, across the deepest pay the well reached.
+
+    Signature: "stage" + "top".
+    """
     r, td = _rng(w["uwi"]), _td(w)
-    top = td * 0.72
-    span = (td * 0.96 - top)
-    n = r.randint(3, 8)
+    pays = [z for z in _section(w) if z[3]]
+    if not pays:
+        return []
+    top, base = pays[-1][1], min(td, pays[-1][2])
+    n = r.randint(2, 6)
+    span = max(30.0, base - top)
     return [[str(i + 1), _f(top + span * i / n), _f(top + span * (i + 1) / n),
              "SLICKWATER", _f(r.randint(1200, 9000)),
              _f(r.randint(40000, 190000)), _f(r.randint(3800, 7600)),
@@ -271,36 +375,55 @@ def stages_for(w):
 
 
 def pressures_for(w):
-    """RFT/MDT points. Signature: "depth" + "pressure"; needs dt == pressure."""
-    r, td = _rng(w["uwi"]), _td(w)
-    pays = [c for c in COLUMN if c[3] and td * c[1] < td - 40]
+    """RFT/MDT points, one per pay member of the section this well reached.
+
+    Signature: "depth" + "pressure"; needs dt == pressure.
+    """
+    r = _rng(w["uwi"])
     grad = r.uniform(0.38, 0.46)
-    out = []
-    for name, ft, th, _p in pays:
-        d = td * (ft + th * 0.4)
-        out.append([_f(d), name, "%.1f" % (d * grad),
-                    r.choice(["OIL", "OIL", "WATER", "GAS"]),
-                    "%.1f" % r.uniform(0.4, 240.0)])
-    return out
+    return [[_f(top + (base - top) * 0.4), name,
+             "%.1f" % ((top + (base - top) * 0.4) * grad),
+             r.choice(["OIL", "OIL", "WATER", "GAS"]),
+             "%.1f" % r.uniform(0.4, 240.0)]
+            for name, top, base, pay in _section(w) if pay]
 
 
 def dst_for(w):
-    """DST records. Signature: "test date" + "result"."""
+    """DST records, one per pay member the well reached.
+
+    Signature: "test date" + "result". Two constraints, both because a DST is
+    a fact and not a decoration:
+
+    * A DST tests a FORMATION, so the intervals come from the same _section()
+      the well report prints. Depths drawn as a fraction of TD instead put a
+      test at 130 ft in a 180-ft cellar hole that never reached the Shannon.
+    * A well with neither a completion nor a spud date gets no DST table --
+      17 of the 1,344 -- rather than a test dated from thin air. The loader
+      only accepts a row matching \\d{4}-\\d\\d-\\d\\d, so an invented date is
+      not a blank that reads as missing; it is a row in dv_well_dst.
+    """
     from datetime import datetime, timedelta
-    r, td = _rng(w["uwi"]), _td(w)
-    base = w["comp"] or w["spud"] or "1998-06-01"
+    r = _rng(w["uwi"])
+    base = w["comp"] or w["spud"]
+    pays = [z for z in _section(w) if z[3]]
+    if not base or not pays:
+        return []
     try:
-        d0 = datetime.strptime(base, "%Y-%m-%d")
+        d0 = datetime.strptime(base[:10], "%Y-%m-%d")
     except (ValueError, TypeError):
-        d0 = datetime(1998, 6, 1)
+        return []
+    # A dry hole's tests are how it was found to be dry.
+    results = (["WATER", "TIGHT", "SHOWS", "NO RECOVERY"] if is_dry(w)
+               else ["OIL", "OIL AND GAS", "GAS", "WATER", "TIGHT"])
     out = []
-    for i in range(r.randint(1, 3)):
+    for name, top, bot, _p in pays[-3:]:
         d = (d0 - timedelta(days=r.randint(3, 90))).strftime("%Y-%m-%d")
-        t = td * r.uniform(0.62, 0.94)
-        out.append([d, "DST", _f(t), _f(t + r.randint(20, 90)),
-                    r.choice(["OIL", "OIL AND GAS", "GAS", "WATER", "TIGHT"]),
-                    _f(r.randint(0, 900)), _f(r.randint(0, 2600)),
-                    "%.1f" % r.uniform(28, 42)])
+        res = r.choice(results)
+        wet = res in ("WATER", "TIGHT", "SHOWS", "NO RECOVERY")
+        out.append([d, "DST", _f(top), _f(bot), res,
+                    _f(0 if wet else r.randint(20, 900)),
+                    _f(0 if wet else r.randint(0, 2600)),
+                    "—" if wet else "%.1f" % r.uniform(28, 42)])
     return out
 
 
@@ -393,13 +516,14 @@ def _header_block(w):
     label with endswith against _HDR. Blank values are still printed as blank
     cells so the grid stays rectangular; _header ignores an empty value.
     """
+    ft = lambda v: (_depth(v) + " ft") if str(v or "").strip() else ""
     rows = [["API:", w["uwi"], "Well Name:", w["well_name"]],
             ["Operator:", w["operator"], "Field:", w["field"]],
             ["County:", w["county"], "State:", w["state"]],
             ["Spud Date:", w["spud"], "Completion Date:", w["comp"]],
-            ["Total Depth MD:", _f(w["td"]) + " ft",
-             "KB Elevation:", _f(w["kb"]) + " ft"],
-            ["Surface Latitude:", w["lat"], "Surface Longitude:", w["lon"]],
+            ["Total Depth MD:", ft(w["td"]), "KB Elevation:", ft(w["kb"])],
+            ["Surface Latitude:", _coord(w["lat"]),
+             "Surface Longitude:", _coord(w["lon"])],
             ["Status:", w["status"], "Well Type:", w["well_type"]]]
     return _grid(rows, header=False)
 
@@ -488,8 +612,9 @@ def build_doc(path, w, dtype):
 
     story.append(Spacer(1, 12))
     story.append(Paragraph(
-        "Synthetic document generated for the Teacup demo set. Header values "
-        "are the well's own record; measured detail is generated.", S["sub"]))
+        "Synthetic document generated for the Teapot Dome demo. Header values "
+        "are the well's own dv_well record; measured detail is generated.",
+        S["sub"]))
     doc.build(story)
 
 
@@ -502,8 +627,12 @@ def _safe(s):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--wells", type=int, default=40,
-                    help="how many Teacup wells to document (default 40 of 300)")
+                    help="how many Teapot wells to document "
+                         "(default 40 of the 1,344 documentable)")
+    ap.add_argument("--uwi-like", default=UWI_LIKE,
+                    help="which wells are Teapot (default %s)" % UWI_LIKE)
     ap.add_argument("--types", default=",".join(TYPES),
                     help="comma list: " + ",".join(TYPES))
     ap.add_argument("--out", default=OUT_DIR)
@@ -520,7 +649,8 @@ def main():
             shutil.rmtree(a.out)
         print("%s %d file(s) in %s" %
               ("removed" if a.apply else "would remove", n, a.out))
-        print("Catalog rows for them go with `demo_teacup.py --reset --only docs`.")
+        print("Deleting the FILES does not remove their catalog or dv_ rows --\n"
+              "those key on INVENTORY_ID; see tools/reconcile_orphans.py.")
         return 0
 
     types = [t.strip() for t in a.types.split(",") if t.strip()]
@@ -529,11 +659,12 @@ def main():
         print("unknown type(s): %s\nknown: %s" % (", ".join(bad), ", ".join(TYPES)))
         return 2
 
-    ws = teacup_wells(a.wells)
+    from dataview.core.dw_utils import make_engine
+    ws = teapot_wells(make_engine(a.database), a.wells, a.uwi_like)
     plan = [(w, types_for(w, types)) for w in ws]
     n_files = sum(len(t) for _w, t in plan)
-    n_dry = sum(1 for w, _t in plan if (w["well_type"] or "").upper() == "DRY")
-    print("\n%d Teacup well(s) -> %d file(s)   (%d dry hole(s) get no %s)"
+    n_dry = sum(1 for w, _t in plan if is_dry(w))
+    print("\n%d Teapot well(s) -> %d file(s)   (%d dry hole(s) get no %s)"
           % (len(ws), n_files, n_dry, "/".join(_COMPLETED_ONLY)))
     print("   -> %s\n" % a.out)
     for t in types:
@@ -557,8 +688,10 @@ def main():
                 print("   FAILED %s: %s" % (fn, str(exc)[:140]))
     print("\nwrote %d file(s)%s to %s"
           % (made, (", %d FAILED" % failed) if failed else "", a.out))
-    print("Load them with the rest of the documents:")
-    print("   python tools/demo_teacup.py --load --only docs --apply")
+    print("Scan that folder from the File Catalog, or:")
+    print("   python -m dataview.import_data.pipeline_run --root \"%s\" \\\n"
+          "       --exts .pdf --server localhost\\SQLEXPRESS "
+          "--database %s --promote --promote-apply" % (a.out, a.database))
     return 0
 
 
