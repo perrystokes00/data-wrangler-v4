@@ -12285,6 +12285,30 @@ def run(engine=None):
             "last_object_clicked_popup",
             "all_drawings",
         ]
+        # ── Freeze: stop clicks costing a rebuild ────────────────────────
+        # A CLICK AND A REDRAW ARE THE SAME SIGNAL. Both a well marker and a
+        # 2D line report through last_object_clicked_popup -- the well handler
+        # reads the UWI out of the popup text and _seis_pick_from_popup reads
+        # the line out of it the same way -- so every pick round-trips to
+        # Python and re-serialises the whole map. Pick, popup, 13-second
+        # redraw; pick again, redraw again.
+        #
+        # Frozen, we simply do not subscribe to the click. Leaflet still
+        # opens the popup and still shows the tooltip, both purely in the
+        # browser, so hovering identifies a well (name, operator, status) or
+        # a line (survey, line) at no cost at all. Nothing reaches Python, so
+        # nothing rebuilds.
+        #
+        # all_drawings STAYS SUBSCRIBED, deliberately. Freezing would be a
+        # trap if it also disabled selecting: the box and circle tools still
+        # drill, and they were always the way to pick MANY wells in one
+        # rebuild rather than one rebuild per well.
+        #
+        # Read before the widget draws, which is safe: Streamlit puts a
+        # widget's new value into session_state before the script runs, so
+        # this sees the CURRENT state of the toggle, not the previous one.
+        if st.session_state.get("wm_freeze_map", False):
+            _ret = ["all_drawings"]
         # The st_folium call below is the actual long pole — it serializes
         # the whole map to HTML/JS and the browser parses + renders it.
         # That's the part the user actually waits for (10-30 sec depending
@@ -12338,7 +12362,16 @@ def run(engine=None):
         # and leaves the camera. That distinction is drawn all through this
         # file; having only one of them on screen is what made the other
         # impossible to find.
-        _rv1, _rvc, _rv2 = st.columns([1.1, 1.2, 3.8])
+        _rv1, _rvc, _rvf, _rv2 = st.columns([1.1, 1.2, 1.5, 2.3])
+        # THE ONE CONTROL THAT MAKES CLICKING FREE. See the _ret block above
+        # for why a pick and a rebuild are the same signal. Its own column so
+        # it reads as a mode, not an action -- it stays on until turned off.
+        _frozen = _rvf.toggle(
+            "🔒 Freeze map", key="wm_freeze_map",
+            help="Stop clicks rebuilding the map. Hover still identifies "
+                 "every well and line, and the box / circle tools still "
+                 "select — so you can explore freely and pick in one go. "
+                 "Turn off to click a single well or line open again.")
         if _rvc.button("✗ Clear wells", key="wells_clear_viewport",
                        use_container_width=True,
                        disabled=not _wells_on_map(),
@@ -12392,6 +12425,16 @@ def run(engine=None):
             f"{c[0]:.4f}|{c[1]:.4f}" for c in _sel_for_key
         )))
         _map_widget_key = f"well_map_folium_{_sel_key_hash}"
+
+        # SAY IT, RIGHT ABOVE THE MAP. A mode that silently swallows clicks is
+        # worse than the redraw it replaces -- the click looks broken instead
+        # of cheap. This sits immediately above the map so it is read before
+        # the first click, not after it.
+        if st.session_state.get("wm_freeze_map", False):
+            st.info("🔒 **Map frozen** — clicks won't open wells or lines, and "
+                    "won't rebuild the map. **Hover** to identify anything; "
+                    "the **box** and **circle** tools still select. "
+                    "Turn off *Freeze map* to click one open.")
 
         if _skip_folium:
             map_data = None
