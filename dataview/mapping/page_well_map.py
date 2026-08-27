@@ -402,6 +402,12 @@ def _go_to_place(bounds) -> None:
     # drew and named, that padding is what drops the recalled view a zoom
     # level below the one it was saved at. The box IS the request.
     st.session_state["_drawn_bounds_exact"] = True
+    # AND ALWAYS FIT, even to the extent we last fitted. The fit site skips a
+    # target it has already applied, so going to the same place twice -- pan
+    # away, press Go again, the ordinary way to use this control -- would
+    # otherwise fit nothing and let the view-persist JS put the map back where
+    # the user had wandered to. An explicit Go must always move the camera.
+    st.session_state.pop("_last_fit_sig", None)
     # 🔑 TELL THE VIEW-PERSIST JS TO DROP ITS SAVED VIEW FIRST.
     # That script restores the previous pan/zoom on every rerun — which is what
     # makes drawing usable, and also what silently undoes a camera move. Set
@@ -10487,6 +10493,9 @@ def run(engine=None):
         #   3. Explicit zoom target from dropdown.
         #   4. Default: centroid of full filtered dataset.
         _viewport_bounds = None
+        # Did THIS render actually move the camera? Set at the fit site below
+        # and read by the view-persist JS. See the guard there.
+        _did_fit = False
 
         # Path 1: _drawn_bounds — authoritative for circle/cell drills.
         # The handlers that set it already padded if appropriate.
@@ -10661,8 +10670,34 @@ def run(engine=None):
 
         # If we have a viewport, fit the map exactly to its bounds (overrides
         # the initial location/zoom_start with proper bbox-based zoom).
+        # FIT WHEN THE TARGET CHANGES, NOT ON EVERY RENDER.
+        #
+        # Both paths that set _viewport_bounds keep doing so on every rerun: a
+        # rectangle drill sets _drawn_bounds WITHOUT the one-shot flag ("so
+        # they persist"), and Path 2 recomputes from viewport_uwis every time.
+        # Since _has_active_fit turned any non-None _viewport_bounds into
+        # SKIP_FLAG, the view-persist JS was told to stand down on every
+        # render -- so touching ANY widget re-fit the camera to the drill and
+        # discarded the zoom the user had done since. Reported as "zoomed into
+        # wells, clicked the seismic pill, and it zoomed out".
+        #
+        # Path 1's own comment already had the principle: "Without this pop,
+        # every subsequent rerun (cell clicks, layer toggles, etc.) would
+        # re-fit the view, destroying any manual zoom the user did." Its pop
+        # only applies to one-shot bounds, so persistent drills never got it.
+        #
+        # Guarding HERE rather than in each path is deliberate: there are four
+        # ways to set _viewport_bounds and they would drift, which is the
+        # lists-that-must-agree failure this codebase keeps paying for. One
+        # site decides, and _did_fit becomes the honest answer to the only
+        # question the JS is asking -- did Python move the camera this render?
         if _viewport_bounds is not None:
-            m.fit_bounds(_viewport_bounds)
+            _fit_sig = repr([[round(float(v), 6) for v in _p]
+                             for _p in _viewport_bounds])
+            if st.session_state.get("_last_fit_sig") != _fit_sig:
+                st.session_state["_last_fit_sig"] = _fit_sig
+                m.fit_bounds(_viewport_bounds)
+                _did_fit = True
 
         # Consume one-shot _drawn_bounds. The area-change auto-zoom sets
         # _drawn_bounds_oneshot=True so the bounds fit the map ONCE on
@@ -11637,11 +11672,14 @@ def run(engine=None):
         # session) AND the one-shot bounds we just consumed for this
         # render. Without the OR, area changes would lose their fit to
         # the JS's stale saved view from the previous area.
-        _has_active_fit = (
-            bool(st.session_state.get("_drawn_bounds"))
-            or _is_oneshot_fit_this_render
-            or (_viewport_bounds is not None)
-        )
+        # NOW IT IS THE LITERAL ANSWER. This used to OR together three proxies
+        # for "Python is probably fitting" -- bounds in session, a consumed
+        # one-shot, a non-None _viewport_bounds -- and every one of them stayed
+        # true across reruns that fitted nothing, which is what pinned the
+        # camera. The fit site above sets _did_fit only when it really called
+        # fit_bounds, so the JS now stands down exactly when it should and
+        # restores the user's view every other time.
+        _has_active_fit = _did_fit
         _reset_saved_view = bool(st.session_state.pop("_reset_saved_view", False))
         view_persist = MacroElement()
         view_persist._name = "dv_view_persist"
@@ -12304,6 +12342,11 @@ def run(engine=None):
             st.session_state.pop("_drawn_bounds", None)
             st.session_state.pop("_active_drill_bbox", None)
             st.session_state.pop("_zoom_target_label", None)
+            # AND THE LAST-FITTED EXTENT. The fit site now skips a target it
+            # has already fitted, so without this the button would clear
+            # everything else and still not re-frame on a live selection --
+            # exactly what it promises to do.
+            st.session_state.pop("_last_fit_sig", None)
             st.session_state["_wm_prev_area_id"] = "none"
             st.rerun()
 
