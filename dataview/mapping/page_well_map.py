@@ -8279,6 +8279,20 @@ def run(engine=None):
         st.info("Connect to the DataView database first.")
         return
 
+    # ── reclaim Streamlit's top padding ─────────────────────────────────
+    # MEASURED, NOT GUESSED: stMainBlockContainer carries 96px of padding
+    # before a single element renders, so the map began at 128px. Add a
+    # laptop's browser chrome and a 500px map and the bottom of it falls off
+    # the screen -- "there is something hiding up there", and it is nothing,
+    # 96 pixels of it.
+    #
+    # Scoped to the main block, so the sidebar and the header keep their own
+    # spacing. 1.5rem still separates the first element from the toolbar.
+    st.markdown(
+        "<style>[data-testid='stMainBlockContainer']"
+        "{padding-top:1.5rem !important;}</style>",
+        unsafe_allow_html=True)
+
     # ── Active database resolution ─────────────────────────────────────
     # The map reads from ONE database, used by both the SQLAlchemy engine
     # AND the bcp.exe well fetch. Default to the database the app connected
@@ -11081,9 +11095,16 @@ def run(engine=None):
                 # centroid-zoom onto whatever wells the schema happens to
                 # hold -- so the map opened tight on Teapot Dome with no
                 # wells on it, which reads as a broken view rather than an
-                # empty one. Zooming to data nobody has asked to see is the
-                # wrong default; the lower 48 says "pick something".
+                # empty one.
+                #
+                # BOUNDS, NOT A ZOOM NUMBER. zoom_start=4 at the CONUS
+                # centroid frames "North America" on a wide window and
+                # something else again on a narrow one -- a fixed zoom means
+                # a different extent on every screen. Fitting the lower-48
+                # box makes the framing the same everywhere, which is what
+                # "the lower 48" actually asks for.
                 lat0, lon0, zoom0 = 39.5, -98.35, 4
+                _viewport_bounds = [[24.5, -125.0], [49.4, -66.9]]
             elif not dff.empty:
                 # Wells loaded — center on their centroid
                 lat0  = dff["lat"].mean()
