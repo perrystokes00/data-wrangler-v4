@@ -26,6 +26,7 @@ import math
 import os
 import re
 import subprocess
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -179,6 +180,131 @@ _GULF_STATE = "Gulf of Mexico"
 # and browser sessions. session_state alone resets when the browser closes.
 # -----------------------------------------------------------------------------
 _USER_PREFS_PATH = Path(__file__).parent / "user_prefs.json"
+
+
+# -----------------------------------------------------------------------------
+# EXECUTION TIMING
+# -----------------------------------------------------------------------------
+# "The map is slow" is not a diagnosis. This records where a render's time
+# actually goes.
+#
+# EACH MARK PRINTS AS IT HAPPENS, not as a summary at the end. st.rerun()
+# RAISES, so a render that reruns never reaches a tail report -- and the slow
+# renders are exactly the ones that rerun. A discarded diagnostic has cost this
+# project whole evenings; `except: return [], 0` is in CLAUDE.md for a reason.
+#
+# The _qry_/_add_ functions are instrumented by WRAPPING THEM AT IMPORT (see
+# _install_timers at the bottom of this file) rather than by editing ~60 call
+# sites in a 14,000-line CRLF file: the edit that instruments everything must
+# not be the edit that breaks something. _render_* is deliberately NOT wrapped
+# -- two of those are @st.fragment, and wrapping one changes the identity
+# Streamlit keys it by, which is its own bug.
+#
+# Off with DW_MAP_TIMERS=0. The floor keeps the log readable; nothing under it
+# is printed, though it is still counted in the totals.
+_MAP_TIMERS = os.environ.get("DW_MAP_TIMERS", "1").strip().lower() not in (
+    "0", "false", "no", "off")
+try:
+    _MAP_TIMER_FLOOR = float(os.environ.get("DW_MAP_TIMER_FLOOR", "0.05"))
+except ValueError:
+    _MAP_TIMER_FLOOR = 0.05
+
+
+def _tstate():
+    """session_state, or a throwaway dict when there is no script context.
+
+    Timing must never be the thing that raises. A wrapped _qry_ can be called
+    from a worker thread or at import, where touching session_state throws.
+    """
+    try:
+        return st.session_state
+    except Exception:
+        return {}
+
+
+def _marks_begin(tag=""):
+    """Start a render's timing, keeping the previous render's for display."""
+    if not _MAP_TIMERS:
+        return
+    _s = _tstate()
+    if _s.get("_wm_marks"):
+        _s["_wm_marks_prev"] = _s.get("_wm_marks")
+        _s["_wm_calls_prev"] = _s.get("_wm_calls") or []
+    _now = time.perf_counter()
+    _s["_wm_marks"], _s["_wm_calls"] = [], []
+    _s["_wm_mark_t0"] = _s["_wm_render_t0"] = _now
+    print("[map] ===== render start %s =====" % (tag or ""), flush=True)
+
+
+def _mark(label):
+    """Time since the previous mark. Cheap enough to leave switched on."""
+    if not _MAP_TIMERS:
+        return
+    _s = _tstate()
+    _now = time.perf_counter()
+    _t0 = _s.get("_wm_mark_t0")
+    if _t0 is None:
+        _s["_wm_mark_t0"] = _s["_wm_render_t0"] = _now
+        return
+    _dt = _now - _t0
+    _s["_wm_mark_t0"] = _now
+    _cum = _now - _s.get("_wm_render_t0", _now)
+    _s.setdefault("_wm_marks", []).append(
+        {"step": str(label)[:70], "seconds": round(_dt, 3),
+         "cumulative": round(_cum, 3)})
+    if _dt >= _MAP_TIMER_FLOOR:
+        print("[map] %8.3fs  %-44s (cum %6.2fs)"
+              % (_dt, str(label)[:44], _cum), flush=True)
+
+
+def _timed(name, fn):
+    """Wrap fn so every call is timed, logged and totalled."""
+    import functools
+
+    @functools.wraps(fn)
+    def _w(*a, **k):
+        if not _MAP_TIMERS:
+            return fn(*a, **k)
+        _t0 = time.perf_counter()
+        try:
+            return fn(*a, **k)
+        finally:
+            # FINALLY, so a call that RAISES is still timed. st.rerun() raises
+            # by design and several of these run either side of one; a timer
+            # that only records success would hide the expensive failures.
+            _dt = time.perf_counter() - _t0
+            if _dt >= _MAP_TIMER_FLOOR:
+                try:
+                    _tstate().setdefault("_wm_calls", []).append(
+                        {"call": name, "seconds": round(_dt, 3)})
+                except Exception:
+                    pass
+                print("[map] %8.3fs  %s()" % (_dt, name), flush=True)
+    return _w
+
+
+def _install_timers():
+    """Wrap every _qry_/_add_ in this module. Called at the bottom of the file.
+
+    Idempotent: Streamlit re-imports a page module on some reloads, and
+    double-wrapping would double-count and double-log.
+    """
+    if not _MAP_TIMERS:
+        return
+    import types
+    _g = globals()
+    _n_wrapped = 0
+    for _name, _fn in list(_g.items()):
+        if (isinstance(_fn, types.FunctionType)
+                and _name.startswith(("_qry_", "_add_"))
+                and not getattr(_fn, "_dw_timed", False)):
+            _wrapped = _timed(_name, _fn)
+            _wrapped._dw_timed = True
+            _g[_name] = _wrapped
+            _n_wrapped += 1
+    if _n_wrapped:
+        print("[map] timing enabled on %d function(s); DW_MAP_TIMERS=0 to "
+              "switch off" % _n_wrapped, flush=True)
 
 
 # ── SAVED PLACES ───────────────────────────────────────────────────────────
@@ -8279,6 +8405,12 @@ def run(engine=None):
         st.info("Connect to the DataView database first.")
         return
 
+    # Clock starts here, after the two guards that return without drawing.
+    _marks_begin("mode=%s wells=%s h3=%s" % (
+        st.session_state.get("map_mode"),
+        st.session_state.get("wells_layer_on"),
+        st.session_state.get("h3_layer_on")))
+
     # ── reclaim Streamlit's top padding ─────────────────────────────────
     # MEASURED, NOT GUESSED: stMainBlockContainer carries 96px of padding
     # before a single element renders, so the map began at 128px. Add a
@@ -8531,6 +8663,10 @@ def run(engine=None):
             pct: 0–100 progress percent. pct >= 100 clears the indicator.
             text: status message to display alongside the bar.
         """
+        # The phases already sit at the render's natural boundaries, so they
+        # are also where the clock should be read. One line here beats a mark
+        # inserted at every one of them.
+        _mark(text or ("phase %d" % pct))
         if pct >= 100:
             _phase_msg.empty()
             _phase_bar.empty()
@@ -8547,6 +8683,42 @@ def run(engine=None):
     # cold-start reset block above will then re-initialize defaults
     # (area selector back to placeholder, etc.) on the new run.
     with st.expander("⚙ Page controls", expanded=False):
+        # ── where the LAST render's time went ──────────────────────────
+        # The PREVIOUS render, not this one: this expander draws near the
+        # top of the script, so the current render has barely started and
+        # its own numbers do not exist yet. Showing them would report a
+        # near-zero total for a render that took twenty seconds.
+        if _MAP_TIMERS and _tstate().get("_wm_marks_prev"):
+            _prev = _tstate().get("_wm_marks_prev") or []
+            _pcalls = _tstate().get("_wm_calls_prev") or []
+            _tot = max((m.get("cumulative", 0) for m in _prev), default=0)
+            st.caption("⏱ Previous render: **%.2fs**. Same numbers print to "
+                       "the terminal as they happen — a render that ends in "
+                       "st.rerun() never reaches this box."
+                       % _tot)
+            _tc1, _tc2 = st.columns(2)
+            _tc1.dataframe(
+                pd.DataFrame(sorted(_prev, key=lambda m: -m["seconds"])[:12]),
+                hide_index=True, use_container_width=True,
+                column_config={"seconds": st.column_config.NumberColumn(
+                    "sec", format="%.2f")})
+            if _pcalls:
+                _agg = {}
+                for _c in _pcalls:
+                    _a = _agg.setdefault(_c["call"], {"call": _c["call"],
+                                                      "calls": 0, "seconds": 0.0})
+                    _a["calls"] += 1
+                    _a["seconds"] += _c["seconds"]
+                _tc2.dataframe(
+                    pd.DataFrame(sorted(_agg.values(),
+                                        key=lambda a: -a["seconds"])[:12]),
+                    hide_index=True, use_container_width=True,
+                    column_config={"seconds": st.column_config.NumberColumn(
+                        "sec", format="%.2f")})
+            else:
+                _tc2.caption("No single query or layer crossed %.2fs."
+                             % _MAP_TIMER_FLOOR)
+
         _rc1, _rc2 = st.columns([1, 4])
         with _rc1:
             if st.button("🔄 Reset page",
@@ -14213,6 +14385,6 @@ def run(engine=None):
             st.markdown("---")
 
 
-
-
-
+# Wrap the query and layer functions. MUST BE LAST: it walks globals(),
+# so every _qry_/_add_ has to be defined before it runs.
+_install_timers()
