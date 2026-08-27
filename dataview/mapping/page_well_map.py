@@ -293,6 +293,40 @@ def _delete_place(name: str) -> bool:
     return False
 
 
+def _norm_bounds(v):
+    """[[min_lat, min_lon], [max_lat, max_lon]], from either shape, or None.
+
+    TWO SHAPES REACHED THE SAME STORE. The rectangle handler sets
+    _drawn_bounds as nested pairs and _active_drill_bbox as a flat
+    (min_lat, max_lat, min_lon, max_lon), and "save this place" took
+    whichever survived -- so the file holds both, and fit_bounds understands
+    only one. Four bare numbers are not rejected by folium; they simply put
+    the camera somewhere meaningless, which reads as "save does not keep my
+    zoom".
+
+    Normalising on the way IN and on the way OUT means the places already
+    written in the flat shape start working without being re-saved. The flat
+    reading is lat, lat, lon, lon because that is the order the one producer
+    writes; the min/max sort makes a corner-swapped rectangle harmless too.
+    """
+    try:
+        if v is None:
+            return None
+        if (len(v) == 2 and all(hasattr(p, "__len__") and len(p) == 2
+                                for p in v)):
+            (a_lat, a_lon), (b_lat, b_lon) = v
+        elif len(v) == 4 and not any(hasattr(p, "__len__") for p in v):
+            a_lat, b_lat, a_lon, b_lon = v
+        else:
+            return None
+        a_lat, b_lat = float(a_lat), float(b_lat)
+        a_lon, b_lon = float(a_lon), float(b_lon)
+    except (TypeError, ValueError):
+        return None
+    return [[min(a_lat, b_lat), min(a_lon, b_lon)],
+            [max(a_lat, b_lat), max(a_lon, b_lon)]]
+
+
 def _go_to_place(bounds) -> None:
     """Fit the map to [[min_lat, min_lon], [max_lat, max_lon]].
 
@@ -305,7 +339,12 @@ def _go_to_place(bounds) -> None:
     the DATA — the same distinction as 🎯 Reset view versus ✗ Clear wells.
     """
     import streamlit as st
-    st.session_state["_drawn_bounds"] = bounds
+    # NORMALISE ON THE WAY OUT TOO, so a place saved in the flat shape before
+    # this fix still moves the camera instead of losing it.
+    _b = _norm_bounds(bounds)
+    if _b is None:
+        return
+    st.session_state["_drawn_bounds"] = _b
     st.session_state["_drawn_bounds_oneshot"] = True
     # 🔑 TELL THE VIEW-PERSIST JS TO DROP ITS SAVED VIEW FIRST.
     # That script restores the previous pan/zoom on every rerun — which is what
@@ -12039,8 +12078,14 @@ def run(engine=None):
                   "or run a search, and THAT extent is what a name saves."),
             label_visibility="collapsed")
         if _newname.strip() and _can_save:
-            _b = (st.session_state.get("_drawn_bounds")
-                  or st.session_state.get("_active_drill_bbox"))
+            # NORMALISE BEFORE STORING. The fallback is a different shape
+            # from the first choice -- see _norm_bounds -- and storing it raw
+            # is what put four bare numbers in the file.
+            _b = _norm_bounds(st.session_state.get("_drawn_bounds")
+                              or st.session_state.get("_active_drill_bbox"))
+            if _b is None:
+                st.session_state["wm_place_err"] = _newname.strip()
+                st.rerun()
             _p = _load_user_prefs()
             _p.setdefault("places", {})[_newname.strip()] = _b
             _save_user_prefs(_p)
@@ -12053,6 +12098,13 @@ def run(engine=None):
         _pmsg = st.session_state.pop("wm_place_msg", None)
         if _pmsg:
             st.success("Saved “%s” — it is in the Go to list now." % _pmsg)
+        # SAY SO RATHER THAN STORING SOMETHING UNUSABLE. A place that
+        # cannot be read back is worse than one never saved: it sits in the
+        # Go to list looking fine until it moves the camera nowhere.
+        _perr = st.session_state.pop("wm_place_err", None)
+        if _perr:
+            st.error("Could not read an extent to save for that name. "
+                     "Draw the box again and re-save.")
 
         _rv1, _rv2 = st.columns([1.1, 5])
         if _rv1.button("🎯 Reset view", key="wells_reset_view",
