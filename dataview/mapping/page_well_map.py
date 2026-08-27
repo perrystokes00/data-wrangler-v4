@@ -9208,6 +9208,35 @@ def run(engine=None):
     # Selecting any state OR Gulf of Mexico lifts the guard. An explicit UWI
     # lookup is exempt. If Wells is selected at broad scope, we bounce it to H3
     # (set map_mode and the radio key, before the radio renders) and flag it.
+    # ── map_mode derived HERE, before anything reads it ────────────────
+    # This used to be derived ~2,000 lines further down, and the derivation
+    # answered a mismatch with st.rerun(). So flipping a layer toggle cost
+    # TWO renders: one that got as far as the derivation and threw itself
+    # away, and one that did the work. The timing log shows the pair --
+    #   render start  mode=h3     wells=True  h3=True    (no marks)
+    #   render start  mode=wells  wells=True  h3=False   6.186s
+    # -- at ~2.8s a render, on every toggle.
+    #
+    # The toggles are authoritative and they are already current: Streamlit
+    # applies widget state before the script runs, so wells_layer_on holds
+    # the NEW value on the very render the click triggers. map_mode is the
+    # only thing that lagged, and _need_wells below reads it.
+    #
+    # WHY THIS ONLY MATTERS FOR TOGGLING OFF: _need_wells asks for
+    # `map_mode == "wells" OR wells_layer_on`, so switching Wells ON was
+    # already satisfied by the toggle alone. Switching it OFF left a stale
+    # map_mode == "wells" holding the OR true, wells loaded anyway, and the
+    # rerun was what corrected it. Deriving first fixes the direction that
+    # was actually broken.
+    #
+    # The late derivation stays: a drill handoff or a broad-scope bounce can
+    # still change the toggles mid-render, and a rerun is legitimate then.
+    _wl_now = st.session_state.get("wells_layer_on")
+    _hl_now = st.session_state.get("h3_layer_on")
+    if _wl_now is not None or _hl_now is not None:
+        st.session_state["map_mode"] = (
+            "wells" if _wl_now else ("h3" if _hl_now else "none"))
+
     _sc_st_now = st.session_state.get("wm_sc_state")
     _sc_pa_now = _sc_pa   # normalized: a real protraction code, else None
     _broad_scope = (
@@ -11795,13 +11824,39 @@ def run(engine=None):
                             if _hbb:
                                 _mnla, _mnlo, _mxla, _mxlo = _hbb
                                 def _h3_center(_c):
+                                    """Centre of one cell, or None.
+
+                                    THE CELL ID IS COERCED AND THE FAILURE IS
+                                    CONTAINED. h3 parses an id with
+                                    int(cell, 16), so a null, a NaN or an
+                                    integer column all raise the same
+                                    "int() can't convert non-string with
+                                    explicit base" -- and raising HERE killed
+                                    the entire density layer for one bad row,
+                                    reported as "H3 render skipped". Every
+                                    other h3 call on this page already does
+                                    str(); this one did not.
+                                    """
+                                    _s = str(_c or "").strip()
+                                    if not _s or _s.lower() == "nan":
+                                        return None
                                     try:
-                                        return h3.cell_to_latlng(_c)   # h3 v4
+                                        return h3.cell_to_latlng(_s)   # h3 v4
                                     except AttributeError:
-                                        return h3.h3_to_geo(_c)        # h3 v3
+                                        try:
+                                            return h3.h3_to_geo(_s)    # h3 v3
+                                        except Exception:
+                                            return None
+                                    except Exception:
+                                        return None
                                 _ctr = _h3_df["h3"].map(_h3_center)
-                                _cla = _ctr.map(lambda p: p[0])
-                                _clo = _ctr.map(lambda p: p[1])
+                                # NaN for a cell that could not be located: it
+                                # then fails every bbox comparison and drops
+                                # out, which is the honest answer -- a cell we
+                                # cannot place cannot be shown to be inside.
+                                _nan = float("nan")
+                                _cla = _ctr.map(lambda p: p[0] if p else _nan)
+                                _clo = _ctr.map(lambda p: p[1] if p else _nan)
                                 _h3_df = _h3_df[
                                     (_cla >= _mnla) & (_cla <= _mxla)
                                     & (_clo >= _mnlo) & (_clo <= _mxlo)
@@ -11837,7 +11892,16 @@ def run(engine=None):
                         )
                 except Exception as _e:
                     _phase(100)
-                    st.warning(f"H3 render skipped: {_e}")
+                    # THE TRACEBACK GOES TO THE LOG. "H3 render skipped:
+                    # int() can't convert non-string with explicit base" named
+                    # the symptom and nothing else -- there are three h3 calls
+                    # in this block and the message did not say which. A
+                    # discarded diagnostic is the failure mode CLAUDE.md opens
+                    # with; the toast stays short, the log gets the stack.
+                    import traceback as _tb
+                    print("[map] H3 render skipped: %s\n%s"
+                          % (_e, _tb.format_exc()), flush=True)
+                    st.warning(f"H3 render skipped: {_e}  (traceback in the log)")
                     # If H3 fails, drop the layer (safe — no heavy load); the
                     # user can re-enable it or turn on Wells for the full list.
                     #
