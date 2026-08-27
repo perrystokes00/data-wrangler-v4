@@ -391,6 +391,39 @@ def _map_seis_choice() -> dict:
     return {"mode": _mode, "surveys": _s, "lines": _l}
 
 
+def _write_map_seis(mode, surveys, lines, msg, msg_key="mapdrive_msg"):
+    """Tell the map which seismic to draw. THE ONLY WRITER OF MAP_SEIS_PREF.
+
+    Two doors write this now -- the second screen's grid and the inline
+    filters -- and the map reads {mode, surveys, lines} with an exactness
+    that would not survive two hand-written copies of the shape.
+
+    Raises, because st.rerun() raises: nothing after a call runs.
+    """
+    _p = _load_user_prefs()
+    _p[MAP_SEIS_PREF] = {"mode": mode, "surveys": surveys, "lines": lines}
+    _save_user_prefs(_p)
+    st.session_state[msg_key] = msg
+    st.rerun()
+
+
+def _seis_map_keys(cands):
+    """The (surveys, lines) the map filter wants, from chooser candidates.
+
+    Keyed exactly as the map draw loop and the second screen's grid key
+    them: a 2D line is "survey|line", a 3D volume is its survey name alone.
+    The "(unnamed survey)" fallback has to match the draw loop's, or a line
+    with no survey name is pushed under a key nothing will match.
+    """
+    keys = []
+    for c in (cands or []):
+        sv = str(c.get("survey") or "(unnamed survey)")
+        keys.append(sv if c.get("dim") == "3D"
+                    else "%s|%s" % (sv, c.get("line") or ""))
+    return (sorted({k.split("|")[0] for k in keys}),
+            sorted(k for k in keys if "|" in k))
+
+
 def _load_user_prefs() -> dict:
     """Return the user prefs dict, or {} if the file doesn't exist / is bad."""
     try:
@@ -4531,6 +4564,51 @@ def _render_seis_pick(lines=None, df3d=None):
             else:
                 st.session_state["_seis_pick"] = dict(_f[_labels.index(_sel) - 1])
 
+        # ── send the filters to the map ────────────────────────────────
+        # THE FILTERS ABOVE ONLY NARROWED THE OPEN CHOOSER. Everything up
+        # to here decides which file you can open; the map draws from the
+        # prefs file instead, so changing Processing inline moved nothing
+        # on the map and read as a control that did not work.
+        #
+        # NOT AUTOMATIC ON EVERY FILTER CHANGE, deliberately: applying it
+        # re-renders the map, the expensive object on this page, so
+        # touching a dropdown would cost a full rebuild. Choosing when to
+        # spend that is the operator's call, which is what a button is.
+        _pm = st.session_state.pop("seis_push_msg", None)
+        if _pm:
+            st.success(_pm)
+        _pc = st.columns([1, 1, 3])
+        if _pc[0].button("Show on map", key="seis_push_map_btn",
+                         disabled=not _f,
+                         help="Draw exactly the %d match(es) above, and "
+                              "nothing else." % len(_f)):
+            # EVERYTHING SELECTED IS "all", NOT A PICK OF EVERYTHING. A
+            # pick listing every line looks identical today but freezes
+            # the map against whatever is catalogued next.
+            if len(_f) >= len(cands):
+                _write_map_seis("all", [], [], "Map showing every survey.",
+                                msg_key="seis_push_msg")
+            else:
+                _ps, _pl = _seis_map_keys(_f)
+                _write_map_seis(
+                    "pick", _ps, _pl,
+                    "Map set to %d line(s) from %d survey(s)."
+                    % (len(_pl), len(_ps)), msg_key="seis_push_msg")
+        if _pc[1].button("Show all", key="seis_push_all_btn",
+                         help="Undo any pick and draw every survey -- the "
+                              "way back from a selection made here or on "
+                              "the second screen."):
+            _write_map_seis("all", [], [], "Map showing every survey.",
+                            msg_key="seis_push_msg")
+        # SAY WHAT THE MAP IS DOING NOW, which is not what the filters show
+        # the moment either changes -- the same distinction the second
+        # screen's grid draws, for the same reason.
+        _mc = _map_seis_choice()
+        st.caption("Map is drawing %s." % (
+            "every survey" if _mc["mode"] == "all"
+            else "**nothing** - cleared" if _mc["mode"] == "none"
+            else "%d picked line(s)" % len(_mc["lines"])))
+
     # A DOOR TO THE SECOND SCREEN THAT DOES NOT NEED A PICK FIRST. The link
     # further down re-navigates the named window to the SELECTED file, which is
     # the live push -- but it only exists once something is selected, so there
@@ -4819,12 +4897,7 @@ def _render_map_drive(lines, df3d):
                                       use_container_width=True)
 
     def _write(mode, surveys, lines, msg):
-        _p = _load_user_prefs()
-        _p[MAP_SEIS_PREF] = {"mode": mode, "surveys": surveys,
-                             "lines": lines}
-        _save_user_prefs(_p)
-        st.session_state["mapdrive_msg"] = msg
-        st.rerun()
+        _write_map_seis(mode, surveys, lines, msg)
 
     if _send:
         _keys = {str(r["key"]) for _i, r in _grid.iterrows() if r["Show"]}
