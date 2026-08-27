@@ -8474,6 +8474,30 @@ def run(engine=None):
         st.info("Connect to the DataView database first.")
         return
 
+    # ── widget defaults, SEEDED HERE rather than passed to the widget ──
+    # "The widget with key X was created with a default value but also had
+    # its value set via the Session State API."
+    #
+    # Both halves are ours. The sub-page persist loops self-assign every
+    # settable key (st.session_state[k] = st.session_state[k]) so a control
+    # survives a trip to Documents or Export -- Streamlit drops widget state
+    # for anything a run does not render, and without that loop the map came
+    # back with its filters reset. The self-assignment tags the key as
+    # user-set; the widget then ALSO passes value=/index=, and Streamlit says
+    # so, on every render, for the rest of the session.
+    #
+    # setdefault before instantiation is the supported way to say "this is
+    # the default" once. It is not scar #6 -- that is assigning a widget's key
+    # AFTER it has been drawn, which still must not happen.
+    #
+    # seis_basket_sel is deliberately NOT here. Its index= is recomputed each
+    # render to follow the current pick, so it is not a static default at all;
+    # seeding it would freeze the seismic basket on whatever was showing first.
+    for _wk, _wv in (("wm_near_dist", 500), ("wm_show_legend", True),
+                     ("wm_ppdm_symbols", False), ("wm_shp_fill", True),
+                     ("wm_basemap", _BASEMAPS_SHOWN[0])):
+        st.session_state.setdefault(_wk, _wv)
+
     # Clock starts here, after the two guards that return without drawing.
     _marks_begin("mode=%s wells=%s h3=%s" % (
         st.session_state.get("map_mode"),
@@ -9606,7 +9630,7 @@ def run(engine=None):
     top5 = _row_a[2]   # 📊 Database
     with top1:
         basemap = st.selectbox("🖼 Background", _BASEMAPS_SHOWN,
-                               index=0, key="wm_basemap")
+                               key="wm_basemap")
     with top2:
         # Area selector — partitions which region's well data renders on
         # the map. Moved BEFORE Zoom to / Query because Zoom-To options
@@ -10139,7 +10163,7 @@ def run(engine=None):
                 _nm = _nf2.selectbox("Name", _names, key=f"wm_near_name_{_feat}")
                 _dist = _nf3.number_input(
                     "Within (m)", min_value=10, max_value=int(_NEAR_MAX_M),
-                    value=500, step=100, key="wm_near_dist",
+                    step=100, key="wm_near_dist",
                     help="Straight-line distance on the ellipsoid. "
                          "STDistance on a geography column returns METRES "
                          "whatever CRS the source data arrived in.")
@@ -10633,7 +10657,7 @@ def run(engine=None):
         _new_cat = _r3.text_input("Category", key="wm_shp_cat",
                                   placeholder="FIELD")
         _new_col = _r4.color_picker("Colour", "#4CAF50", key="wm_shp_col")
-        _new_fill = _r5.checkbox("Filled", value=True, key="wm_shp_fill")
+        _new_fill = _r5.checkbox("Filled", key="wm_shp_fill")
         if st.button("➕ Register layer", key="wm_shp_add",
                      disabled=not (_new_path and _new_name)):
             _ok, _msg = _register_spatial_layer(
@@ -13257,10 +13281,10 @@ def run(engine=None):
 
         with _rv2.expander("🏷 Map display", expanded=False):
             _show_legend = st.checkbox(
-                "🏷 Status legend", key="wm_show_legend", value=True,
+                "🏷 Status legend", key="wm_show_legend",
                 help="Show a colour/symbol key for well status on the map")
             _ppdm_symbols = st.checkbox(
-                "🛢 PPDM well symbols", key="wm_ppdm_symbols", value=False,
+                "🛢 PPDM well symbols", key="wm_ppdm_symbols",
                 help="Draw wells as standard PPDM/API symbols (shape = status) "
                      "instead of plain coloured dots")
             # Click-to-centre is NOT here. It is a button ON the map -- see
