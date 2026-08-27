@@ -373,6 +373,14 @@ def _norm_bounds(v):
     try:
         if v is None:
             return None
+        # A place may now be {"bounds": [...], "shapes": [...]} -- the extent
+        # plus the shapes that were drawn when it was saved. Older places are
+        # a bare list and stay that way, so nothing has to be migrated and a
+        # place saved before this still opens.
+        if isinstance(v, dict):
+            v = v.get("bounds")
+            if v is None:
+                return None
         if (len(v) == 2 and all(hasattr(p, "__len__") and len(p) == 2
                                 for p in v)):
             (a_lat, a_lon), (b_lat, b_lon) = v
@@ -405,6 +413,12 @@ def _go_to_place(bounds) -> None:
     _b = _norm_bounds(bounds)
     if _b is None:
         return
+    # Shapes saved with the place, redrawn as an outline when we get there.
+    # Set unconditionally -- including to [] -- so going to a place WITHOUT
+    # shapes clears the previous place's, rather than leaving someone else's
+    # box drawn over a field it has nothing to do with.
+    st.session_state["_place_shapes"] = (
+        list(bounds.get("shapes") or []) if isinstance(bounds, dict) else [])
     st.session_state["_drawn_bounds"] = _b
     st.session_state["_drawn_bounds_oneshot"] = True
     # FIT THIS EXACTLY. The fit path pads _drawn_bounds by 15% a side so a
@@ -454,6 +468,11 @@ def _clear_wells_state() -> None:
     st.session_state["viewport_uwis"] = []
     st.session_state["viewport_gom_wells"] = []
     st.session_state["processed_drawings"] = set()
+    # The saved-place outline and the retained geometry go too: "clear the
+    # wells" plainly includes the box that selected them, and leaving the
+    # outline behind would draw a selection that no longer exists.
+    st.session_state.pop("_place_shapes", None)
+    st.session_state.pop("_last_drawings", None)
     st.session_state.pop("_drawn_bounds", None)
     st.session_state.pop("_active_drill_bbox", None)
     # The camera fits only when its target CHANGES, so the extent just
@@ -7816,8 +7835,17 @@ def _render_saved_places(engine):
         if _b is None:
             st.session_state["wm_place_err"] = _newname.strip()
             st.rerun()
+        # SAVE THE SHAPES WITH THE EXTENT, when there are any. A box drawn
+        # round part of a field is usually WHY that extent is worth keeping,
+        # and returning to the extent without it loses the annotation.
+        #
+        # Bare list when there is nothing to add, so a place saved with no
+        # drawings is byte-identical to what this wrote before and the file
+        # does not gain a key it has no use for.
+        _shapes = st.session_state.get("_last_drawings") or []
         _p = _load_user_prefs()
-        _p.setdefault("places", {})[_newname.strip()] = _b
+        _p.setdefault("places", {})[_newname.strip()] = (
+            {"bounds": _b, "shapes": _shapes} if _shapes else _b)
         _save_user_prefs(_p)
         st.session_state["wm_place_ver"] = _pv + 1   # fresh, empty box
         st.session_state["wm_place_msg"] = _newname.strip()
@@ -10739,6 +10767,31 @@ def run(engine=None):
                        tiles=bm["tiles"], attr=bm["attr"],
                        max_zoom=bm.get("max_zoom", 19))
 
+        # ── shapes saved with a place ───────────────────────────────────
+        # AN OUTLINE, NOT A DRAW-TOOL SHAPE. These come back as a GeoJson
+        # overlay: visible, in its own layer-control entry, and not editable.
+        # Putting them back into Leaflet.Draw's own layer would make them
+        # look editable and, worse, make them look DRAWN -- and a drawn shape
+        # is what triggers a drill, so re-opening a place would silently
+        # re-run a query the user did not ask for.
+        #
+        # Its own FeatureGroup so the layer control can switch it off, and
+        # dashed so it reads as an annotation rather than a data layer.
+        _psh = st.session_state.get("_place_shapes") or []
+        if _psh:
+            try:
+                _pg = folium.FeatureGroup(name="✏️ Saved shapes", show=True)
+                folium.GeoJson(
+                    {"type": "FeatureCollection", "features": _psh},
+                    style_function=lambda _f: {
+                        "color": "#ffb300", "weight": 2,
+                        "dashArray": "6,4", "fill": False},
+                ).add_to(_pg)
+                _pg.add_to(m)
+            except Exception as _pse:
+                # Never let a saved annotation stop the map drawing.
+                print(f"[place_shapes] {_pse}")
+
         # Every OTHER basemap as a selectable layer, so the map's own layer
         # control offers satellite/topo/street without a rerun. Only the
         # chosen one was ever added, which is why the control listed a single
@@ -12647,6 +12700,17 @@ def run(engine=None):
             drawings = _raw_drawings
         elif isinstance(_raw_drawings, dict):
             drawings = _raw_drawings.get("features", [])
+
+        # KEEP THE GEOMETRY, not just its hash. processed_drawings holds
+        # hashes so a shape is not re-drilled on every rerun -- which answers
+        # "have I seen this?" and cannot answer "what was it?". Saving a place
+        # with the shapes that were on the map needs the shapes.
+        #
+        # Only when there ARE drawings: st_folium reports all_drawings as
+        # empty on renders where the user did not draw, and letting that
+        # overwrite the stored set would clear the shapes on the next rerun.
+        if drawings:
+            st.session_state["_last_drawings"] = drawings
 
         # Dedupe — don't reprocess the same drawing on every rerun
         if "processed_drawings" not in st.session_state:
