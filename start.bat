@@ -55,6 +55,23 @@ set "PORT=8501"
 set "PIDFILE=%~dp0.dev_pid"
 set "SELF=%~nx0"
 
+REM THE LOG, BECAUSE THE CONSOLE WINDOW IS NOT RELIABLE. Start-Process opens a
+REM window for the server, but nothing keeps that window alive: if Streamlit
+REM exits -- a bad port, a failed import, a syntax error in a page -- the
+REM window carrying the traceback closes with it, so the one launch that
+REM needed reading is the one that leaves nothing behind. And an intermittent
+REM problem is worse: the evidence scrolls past while nobody is watching.
+REM
+REM Both streams are captured. Streamlit's own messages (the fragment
+REM warnings) go to stderr; the map timing lines are print() on stdout.
+REM Start-Process refuses to point both at ONE file, hence two.
+REM
+REM   start.bat log       follow them live
+REM   start.bat log all    dump what is already there
+set "LOGDIR=%~dp0logs"
+set "LOGOUT=%LOGDIR%\dev.out.log"
+set "LOGERR=%LOGDIR%\dev.err.log"
+
 REM A repo venv if setup.ps1 has been run, else the PATH python. Never the
 REM installed embedded build — see above.
 set "PY=%~dp0.venv\Scripts\python.exe"
@@ -90,9 +107,59 @@ if /i "%ACTION%"=="start"   goto :start
 if /i "%ACTION%"=="stop"    goto :stop
 if /i "%ACTION%"=="restart" goto :restart
 if /i "%ACTION%"=="status"  goto :status
-echo Unknown action "%ACTION%".  Use: start ^| stop ^| restart ^| status
-echo Add "nowatch" to start or restart to run without the file watcher.
+if /i "%ACTION%"=="log"     goto :log
+if /i "%ACTION%"=="run"     goto :run
+if /i "%ACTION%"=="fg"      goto :run
+echo Unknown action "%ACTION%".  Use: start ^| run ^| stop ^| restart ^| status ^| log
+echo   run     stay in THIS window, output here, Ctrl+C to stop
+echo   log     follow the background server's output
+echo Add "nowatch" to start, run or restart to skip the file watcher.
 exit /b 2
+
+REM ---------------------------------------------------------------------------
+REM FOREGROUND. The server runs in the window you typed this in: its output
+REM arrives where you are already looking, and Ctrl+C stops it. No pid file,
+REM because there is no process to go hunting for afterwards.
+REM
+REM This exists because the background window is not dependable — it belongs
+REM to a process Windows is free to close the moment Streamlit exits, which is
+REM precisely when its last words matter.
+:run
+if not exist "%~dp0%APP%" (
+    echo ERROR: %APP% not found next to this script - %~dp0
+    exit /b 1
+)
+netstat -ano | findstr /r /c:":%PORT% .*LISTENING" >nul 2>&1
+if not errorlevel 1 (
+    echo Something is already listening on port %PORT%.
+    echo Run "%SELF% stop" first, or "%SELF% status" to see what it is.
+    exit /b 1
+)
+echo Running %APP% on port %PORT% in THIS window.  Ctrl+C to stop.
+echo Using %PY%
+echo.
+"%PY%" -m streamlit run "%~dp0%APP%" --server.port %PORT% --server.headless false --server.fileWatcherType %WATCH%
+exit /b %ERRORLEVEL%
+
+REM ---------------------------------------------------------------------------
+REM Follow what the BACKGROUND server is printing. Both streams, merged and
+REM tagged, because the interesting lines are split across them: Streamlit's
+REM warnings land on stderr and the map's timing lines on stdout.
+:log
+if not exist "%LOGOUT%" if not exist "%LOGERR%" (
+    echo No log yet at %LOGDIR%.
+    echo   "%SELF% start" writes one; "%SELF% run" prints to the window instead.
+    exit /b 1
+)
+if /i "%~2"=="all" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "Get-Content -Path '%LOGOUT%','%LOGERR%' -ErrorAction SilentlyContinue"
+    exit /b 0
+)
+echo Following %LOGDIR%\dev.*.log  -  Ctrl+C to stop watching (server keeps running).
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "Get-Content -Path '%LOGOUT%','%LOGERR%' -Tail 40 -Wait -ErrorAction SilentlyContinue"
+exit /b 0
 
 REM ---------------------------------------------------------------------------
 :start
@@ -114,10 +181,13 @@ if not errorlevel 1 (
 echo Starting %APP% on port %PORT% ...
 echo Using %PY%
 
-REM Start via PowerShell purely to capture the PID. A new console window opens
-REM so Streamlit's own output stays visible - that log is worth having in view.
+if not exist "%LOGDIR%" mkdir "%LOGDIR%" >nul 2>&1
+
+REM Start via PowerShell purely to capture the PID, with both streams sent to
+REM files. The console window this used to rely on is not a place to keep a
+REM log: it closes when the process does, taking the traceback with it.
 for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "(Start-Process -FilePath '%PY%' -ArgumentList @('-m','streamlit','run','%APP%','--server.port','%PORT%','--server.headless','false','--server.fileWatcherType','%WATCH%') -WorkingDirectory '%~dp0.' -PassThru).Id"`) do set "DWPID=%%P"
+    "(Start-Process -FilePath '%PY%' -ArgumentList @('-m','streamlit','run','%APP%','--server.port','%PORT%','--server.headless','false','--server.fileWatcherType','%WATCH%') -WorkingDirectory '%~dp0.' -RedirectStandardOutput '%LOGOUT%' -RedirectStandardError '%LOGERR%' -PassThru).Id"`) do set "DWPID=%%P"
 
 if not defined DWPID (
     echo ERROR: could not start %PY%
@@ -128,6 +198,7 @@ if not defined DWPID (
 
 > "%PIDFILE%" echo %DWPID%
 echo Started, PID %DWPID%.  Browser should open at http://localhost:%PORT%
+echo Output:        %SELF% log        (or "%SELF% run" to keep it in this window)
 echo Stop it with:  %SELF% stop
 exit /b 0
 

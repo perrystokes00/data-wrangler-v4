@@ -188,3 +188,6 @@ exports/
 
 # rendered mud log plots -- regenerate with tools/plot_mudlog.py
 mudlog_*.png
+
+# dev server output (start.bat log)
+logs/
