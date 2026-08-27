@@ -293,33 +293,22 @@ def available(con):
 
 
 # ── structured vs unstructured ─────────────────────────────────────────────
-# NAMED BY EXTENSION, NOT BY FILE_TYPE_GROUP. The catalog already groups files
-# (Well Log, Seismic, TABULAR, Office, PDF, Image...), and mapping those groups
-# onto two buckets would be a THIRD list to keep in step with the two that
-# already exist -- and the failure would be silent: a new group would land in
-# whichever bucket the default chose and the percentages would still look
-# plausible.
+# PERRY'S DEFINITION, AND IT IS A CLOSED ONE: tabular files, wireline logs and
+# SEG-Y are structured; EVERYTHING ELSE is unstructured. The line is whether
+# the format states its own schema -- a SEG-Y has a binary reel header and
+# fixed trace headers, a LAS declares its curves, a CSV names its columns. A
+# mud log, a scout ticket or a completion report does not, whatever it is
+# stored as.
 #
-# So the extensions are named, and anything not named is reported as
-# UNCLASSIFIED rather than being folded into either side. A number you can see
-# is missing is worth more than a total that is quietly wrong -- the same
-# reason promote holds a row instead of guessing at it.
+# Because the rule is closed there is no third bucket and no default to get
+# wrong: an extension nobody has seen before is unstructured by definition
+# rather than by omission. An earlier cut kept an UNCLASSIFIED bucket for the
+# unnamed; under a closed rule there is nothing for it to hold.
 STRUCTURED_EXTS = (
-    ".las", ".dlis", ".lis",            # wireline
+    ".csv", ".tsv",                     # delimited text
+    ".xls", ".xlsx", ".xlsm",           # Excel
+    ".las", ".dlis", ".lis",            # wireline logs
     ".sgy", ".segy",                    # seismic
-    ".csv", ".tsv", ".xls", ".xlsx",    # tabular
-    ".xml",                             # WITSML
-    # MUD.LOG 4.4b binary — ".log" in this corpus, ".dat" in others. Named
-    # here because the UNCLASSIFIED bucket caught it: 16 records from one
-    # file, sitting in neither column until someone looked. That is what the
-    # bucket is for, and it is why nothing gets a default side.
-    ".log", ".dat",
-)
-UNSTRUCTURED_EXTS = (
-    ".pdf",
-    ".doc", ".docx", ".ppt", ".pptx", ".rtf", ".odt",
-    ".txt",
-    ".jpg", ".jpeg", ".tif", ".tiff", ".png", ".bmp",
 )
 
 
@@ -342,10 +331,8 @@ def structure_mix(engine, root=None):
     """
     ext_case = (
         "CASE WHEN LOWER(g.FILE_EXT) IN (%s) THEN 'Structured' "
-        "     WHEN LOWER(g.FILE_EXT) IN (%s) THEN 'Unstructured' "
-        "     ELSE 'Unclassified' END"
-        % (", ".join("'%s'" % e for e in STRUCTURED_EXTS),
-           ", ".join("'%s'" % e for e in UNSTRUCTURED_EXTS)))
+        "     ELSE 'Unstructured' END"
+        % ", ".join("'%s'" % e for e in STRUCTURED_EXTS))
     where_root = ""
     params = {}
     if root:
@@ -358,25 +345,91 @@ def structure_mix(engine, root=None):
             return {"rows": [], "tables": 0}
         # One SELECT per dv_ table, unioned. Each row is credited once, to the
         # file its INVENTORY_ID names.
+        # The table name rides along, so one pass answers BOTH questions --
+        # the corpus-wide split and the per-table one. Running the union twice
+        # to group it two ways would double a query that already takes seconds.
         parts = [
-            "SELECT %s AS kind, LOWER(g.FILE_EXT) AS ext, "
+            "SELECT %s AS kind, LOWER(g.FILE_EXT) AS ext, '%s' AS tbl, "
             "       d.INVENTORY_ID AS inv, COUNT(*) AS n "
             "  FROM %s.[%s] d "
             "  JOIN file_catalog.GLOBAL_FILE_CATALOG g "
             "    ON g.INVENTORY_ID = d.INVENTORY_ID "
             " WHERE d.INVENTORY_ID IS NOT NULL %s"
             " GROUP BY %s, LOWER(g.FILE_EXT), d.INVENTORY_ID"
-            % (ext_case, DV_SCHEMA, dv, where_root, ext_case)
+            % (ext_case, dv, DV_SCHEMA, dv, where_root, ext_case)
             for _cat, dv, _lbl in pairs
         ]
-        sql = ("SELECT kind, ext, COUNT(DISTINCT inv) AS files, "
-               "       SUM(n) AS records FROM (%s) q "
-               " GROUP BY kind, ext ORDER BY SUM(n) DESC"
+        # THE FILE ID COMES BACK, one row per file per table. Aggregating
+        # COUNT(DISTINCT inv) per table and then SUMMING those counts double-
+        # counts every file that fed two tables -- a LAS feeds dv_well_log AND
+        # dv_well_log_curve, which reported 2,417 .las files from a catalog
+        # holding 1,209. Distinct has to be taken across the whole set, so the
+        # ids travel and the sets are built here.
+        sql = ("SELECT kind, ext, tbl, inv, SUM(n) AS records FROM (%s) q "
+               " GROUP BY kind, ext, tbl, inv"
                % " UNION ALL ".join(parts))
-        rows = [{"kind": r[0], "ext": r[1], "files": int(r[2] or 0),
-                 "records": int(r[3] or 0)}
-                for r in con.execute(_t(sql), params).fetchall()]
-    return {"rows": rows, "tables": len(pairs)}
+        raw = [{"kind": r[0], "ext": r[1], "tbl": r[2], "inv": r[3],
+                "records": int(r[4] or 0)}
+               for r in con.execute(_t(sql), params).fetchall()]
+
+        # ROWS THAT CAME FROM NO FILE AT ALL. The join above can only see rows
+        # carrying an INVENTORY_ID; 362 rows in this database carry none --
+        # generated tracts, hand-seeded reference data, anything loaded by a
+        # path that does not stamp one. Reporting "100% structured" while
+        # quietly excluding them collapses two different facts, which is the
+        # habit this module exists to break. Counted here so the caller can
+        # show it rather than average it away.
+        #
+        # Only meaningful for the WHOLE catalog: with a root filter the
+        # question is "of the rows from these files", and a row from no file
+        # is not in that population at all.
+        totals = {}
+        if not root:
+            for _cat, dv, _lbl in pairs:
+                try:
+                    totals[dv] = int(con.execute(_t(
+                        "SELECT COUNT(*) FROM %s.[%s]"
+                        % (DV_SCHEMA, dv)).execution_options(
+                            stream_results=False)).scalar() or 0)
+                except Exception:
+                    totals[dv] = 0
+
+    # Aggregated here rather than in SQL: the grouped result is small, and two
+    # GROUP BYs over one fetched set cannot disagree the way two queries can.
+    by_ext, by_table = {}, {}
+    for r in raw:
+        e = by_ext.setdefault((r["kind"], r["ext"]),
+                              {"kind": r["kind"], "ext": r["ext"],
+                               "_ids": set(), "records": 0})
+        e["_ids"].add(r["inv"])
+        e["records"] += r["records"]
+        t = by_table.setdefault(r["tbl"], {"table": r["tbl"], "records": 0,
+                                           "_ids": set(), "Structured": 0,
+                                           "Unstructured": 0})
+        t["_ids"].add(r["inv"])
+        t["records"] += r["records"]
+        t[r["kind"]] = t.get(r["kind"], 0) + r["records"]
+    # Sets become counts; a file is one file however many tables it fed.
+    for d in list(by_ext.values()) + list(by_table.values()):
+        d["files"] = len(d.pop("_ids"))
+    # Attach the unattributed remainder per table, and total it.
+    unattributed = 0
+    for dv, total in totals.items():
+        t = by_table.setdefault(dv, {"table": dv, "records": 0, "files": 0,
+                                     "Structured": 0, "Unstructured": 0,
+                                     "Unclassified": 0})
+        t["total_rows"] = total
+        t["no_file"] = max(0, total - t["records"])
+        unattributed += t["no_file"]
+    for t in by_table.values():
+        t.setdefault("total_rows", t["records"])
+        t.setdefault("no_file", 0)
+
+    rows = sorted(by_ext.values(), key=lambda x: -x["records"])
+    tbls = sorted(by_table.values(),
+                  key=lambda x: -(x["records"] + x["no_file"]))
+    return {"rows": rows, "by_table": tbls, "tables": len(pairs),
+            "unattributed": unattributed}
 
 
 def seismic_ok(con):

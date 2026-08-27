@@ -5288,15 +5288,15 @@ def _structure_scorecard(engine):
     """
     import pandas as pd
     from dataview.file_catalog.promotion_lineage import (
-        structure_mix, STRUCTURED_EXTS, UNSTRUCTURED_EXTS)
+        structure_mix, STRUCTURED_EXTS)
 
     with st.expander("🧮 Structured vs unstructured — where the data came from",
                      expanded=False):
         st.caption(
             "Counts **records** in the gold tables, credited to the file each "
-            "one came from. Structured: %s. Documents: %s."
-            % (", ".join(e.lstrip('.') for e in STRUCTURED_EXTS[:8]),
-               ", ".join(e.lstrip('.') for e in UNSTRUCTURED_EXTS[:6])))
+            "one came from. Structured: %s — everything else counts as "
+            "unstructured."
+            % ", ".join(e.lstrip('.') for e in STRUCTURED_EXTS))
         _sc1, _sc2 = st.columns([3, 1])
         _root = _sc1.text_input(
             "Scan root (blank = whole catalog)", key="structmix_root",
@@ -5324,33 +5324,78 @@ def _structure_scorecard(engine):
             _b["files"] += r["files"]
             _b["records"] += r["records"]
 
+        # FOUR FACTS, NOT THREE. The percentages are of rows that CAN be
+        # attributed -- a row carrying no INVENTORY_ID came from no file and
+        # belongs to neither side. Folding it in either direction, or leaving
+        # it out silently, would make "100% structured" mean two different
+        # things. It gets its own card.
+        _nofile = int(_res.get("unattributed") or 0)
         _cols = st.columns(3)
-        for _i, _kind in enumerate(("Structured", "Unstructured",
-                                    "Unclassified")):
+        for _i, _kind in enumerate(("Structured", "Unstructured")):
             _b = _by.get(_kind, {"files": 0, "records": 0})
-            _pct = 100.0 * _b["records"] / _total
-            # Unclassified is shown even at zero. An extension nobody has
-            # named yet is a fact about the corpus, and a card that only
-            # appears when it is non-zero is one nobody thinks to look for.
             _cols[_i].metric(
-                _kind, "%.1f%%" % _pct,
+                _kind, "%.1f%%" % (100.0 * _b["records"] / _total),
                 "%s records · %s file(s)" % (format(_b["records"], ","),
                                              format(_b["files"], ",")),
                 delta_color="off")
-        if _by.get("Unclassified", {}).get("records"):
-            st.warning(
-                "Some records came from extensions that are in neither list. "
-                "They are counted separately rather than guessed at — add "
-                "them to STRUCTURED_EXTS or UNSTRUCTURED_EXTS in "
-                "promotion_lineage to classify them.")
+        _cols[2].metric(
+            "No source file", format(_nofile, ","),
+            "not in the percentages", delta_color="off",
+            help="Rows carrying no INVENTORY_ID: generated, hand-seeded, or "
+                 "loaded by a path that does not stamp one. They came from "
+                 "no file, so they are counted but not classified.")
 
+        # ── per mirror table, as bars ──────────────────────────────────
+        # THE TOTALS HIDE THE INTERESTING PART. Corpus-wide, one LAS corpus
+        # swamps everything; per table it is obvious that core photographs
+        # come entirely from documents and curves entirely from instruments.
+        # That is the question worth asking of a data set: which of these
+        # depends on somebody having read a PDF?
+        #
+        # ProgressColumn draws a real bar and sorts as a number -- an HTML
+        # bar in a markdown table would do neither.
+        _tbls = _res.get("by_table") or []
+        if _tbls:
+            st.markdown("**By table** — where each dataset's rows came from")
+            st.dataframe(
+                pd.DataFrame([{
+                    "Table": t["table"],
+                    "Records": t["records"],
+                    "No file": t.get("no_file", 0),
+                    "% structured": round(
+                        100.0 * t.get("Structured", 0) / t["records"], 1)
+                    if t["records"] else 0.0,
+                    "% documents": round(
+                        100.0 * t.get("Unstructured", 0) / t["records"], 1)
+                    if t["records"] else 0.0,
+                } for t in _tbls]),
+                hide_index=True, use_container_width=True,
+                column_config={
+                    "Records": st.column_config.NumberColumn(format="%d"),
+                    "% structured": st.column_config.ProgressColumn(
+                        "% structured", min_value=0, max_value=100,
+                        format="%.1f%%",
+                        help="Rows credited to LAS, SEG-Y, CSV, WITSML, "
+                             "mud-log and other machine formats."),
+                    "% documents": st.column_config.ProgressColumn(
+                        "% documents", min_value=0, max_value=100,
+                        format="%.1f%%",
+                        help="Everything else — PDFs, Office files, scans, "
+                             "images, mud logs, WITSML."),
+                })
+
+        st.markdown("**By file type**")
         st.dataframe(
             pd.DataFrame([{
                 "Kind": r["kind"], "Ext": r["ext"], "Files": r["files"],
                 "Records": r["records"],
                 "Share": round(100.0 * r["records"] / _total, 2),
             } for r in _rows]),
-            hide_index=True, use_container_width=True)
+            hide_index=True, use_container_width=True,
+            column_config={
+                "Share": st.column_config.ProgressColumn(
+                    "Share", min_value=0, max_value=100, format="%.2f%%"),
+            })
         st.caption("Across %d lineage table(s). A file appears once per "
                    "extension; a record is credited once, to the file whose "
                    "id it carries." % _res.get("tables", 0))
