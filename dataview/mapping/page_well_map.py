@@ -397,6 +397,11 @@ def _go_to_place(bounds) -> None:
         return
     st.session_state["_drawn_bounds"] = _b
     st.session_state["_drawn_bounds_oneshot"] = True
+    # FIT THIS EXACTLY. The fit path pads _drawn_bounds by 15% a side so a
+    # data-derived extent is not flush against the edge; on a box the user
+    # drew and named, that padding is what drops the recalled view a zoom
+    # level below the one it was saved at. The box IS the request.
+    st.session_state["_drawn_bounds_exact"] = True
     # 🔑 TELL THE VIEW-PERSIST JS TO DROP ITS SAVED VIEW FIRST.
     # That script restores the previous pan/zoom on every rerun — which is what
     # makes drawing usable, and also what silently undoes a camera move. Set
@@ -10488,8 +10493,19 @@ def run(engine=None):
                 # Pad 15% so the selection isn't pressed against the map edge.
                 # Smaller than the wells-in-dff path because _drawn_bounds is
                 # already the circle's bbox, not a wells-extent-bbox.
-                _pad_lat = max(0.005, (_db_max_lat - _db_min_lat) * 0.15)
-                _pad_lon = max(0.005, (_db_max_lon - _db_min_lon) * 0.15)
+                #
+                # UNLESS THE EXTENT WAS CHOSEN, NOT DERIVED. A saved place is
+                # a box someone drew and named; padding it 30% wider crosses
+                # a zoom boundary and the place opens one level further out
+                # than it was saved at. Leaflet takes the highest integer
+                # zoom at which the bounds fit, so the step is all or
+                # nothing -- measured z12 unpadded, z11 padded, on a 700x500
+                # map with the live "Teapot" box.
+                _exact = bool(st.session_state.get("_drawn_bounds_exact"))
+                _pad_lat = 0.0 if _exact else max(
+                    0.005, (_db_max_lat - _db_min_lat) * 0.15)
+                _pad_lon = 0.0 if _exact else max(
+                    0.005, (_db_max_lon - _db_min_lon) * 0.15)
                 _viewport_bounds = [
                     [_db_min_lat - _pad_lat, _db_min_lon - _pad_lon],
                     [_db_max_lat + _pad_lat, _db_max_lon + _pad_lon],
@@ -10670,6 +10686,9 @@ def run(engine=None):
         if _is_oneshot_fit_this_render:
             st.session_state.pop("_drawn_bounds", None)
             st.session_state.pop("_drawn_bounds_oneshot", None)
+            # Goes with the bounds it describes. Left behind, it would make
+            # the NEXT drill fit without its padding.
+            st.session_state.pop("_drawn_bounds_exact", None)
 
         if bm.get("overlay"):
             folium.TileLayer(
