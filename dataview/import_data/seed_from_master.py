@@ -28,6 +28,65 @@ WHAT IT WILL NOT DO
 """
 MASTER = "WELL_REF.well_ref.well_master_gold"
 
+# ── what gets copied: master expression -> dv_well column ──────────────────
+# ONE PLACE, and it is keyed by the DV_WELL NAME. The previous list was keyed
+# by the master's names and then filtered with `if c in live` against
+# dv_well's columns, so "operator", "field" and "total_depth" -- which
+# dv_well spells operator_name, field_name and final_td -- were dropped
+# SILENTLY. Three columns the master states, never arriving, with nothing
+# reporting it. Aliasing in the SELECT makes the two sides agree by
+# construction instead of by coincidence.
+#
+# well_type / well_status prefer the standardised column and fall back to the
+# raw one: std_* is NULL for every Wyoming row while raw_* is fully populated,
+# so reading only std_* copies nothing. Whichever arrives is then checked
+# against the reference table -- see sanitise_fk.
+MASTER_TO_DV = (
+    ("g.uwi14",                                     "uwi"),
+    ("g.well_name",                                 "well_name"),
+    ("g.well_num",                                  "well_num"),
+    ("g.api_10",                                    "api_num"),
+    ("g.operator_name",                             "operator_name"),
+    ("g.field_name",                                "field_name"),
+    ("g.county",                                    "county"),
+    ("g.province_state",                            "province_state"),
+    ("g.country",                                   "country"),
+    ("g.surface_latitude",                          "surface_latitude"),
+    ("g.surface_longitude",                         "surface_longitude"),
+    ("g.bottom_hole_latitude",                      "bottom_hole_latitude"),
+    ("g.bottom_hole_longitude",                     "bottom_hole_longitude"),
+    ("g.total_depth",                               "final_td"),
+    ("g.kb_elevation",                              "kb_elevation"),
+    ("g.ground_elevation",                          "ground_elevation"),
+    ("g.elevation_ouom",                            "elevation_ouom"),
+    ("g.spud_date",                                 "spud_date"),
+    ("g.completion_date",                           "completion_date"),
+    ("g.abandonment_date",                          "abandonment_date"),
+    ("g.formation_at_td",                           "formation_at_td"),
+    ("g.producing_formation",                       "producing_formation"),
+    ("g.lease_name",                                "lease_name"),
+    ("g.well_profile_type",                         "well_profile_type"),
+    ("g.long_lat_source",                           "long_lat_source"),
+    ("COALESCE(g.std_well_type, g.raw_well_type)",  "well_type"),
+    ("COALESCE(g.std_well_status, g.raw_well_status)", "well_status"),
+    # The master computes these from the same coordinates it hands over, so
+    # they cannot disagree with the point. h3_refresh is still the authority
+    # for wells loaded any other way.
+    ("g.h3_r4", "h3_r4"), ("g.h3_r5", "h3_r5"),
+    ("g.h3_r6", "h3_r6"), ("g.h3_r7", "h3_r7"),
+)
+
+# dv_well column -> (reference table, its column). A value the reference table
+# does not hold is set to NULL rather than inserted: the FK would reject the
+# row outright, and inventing a registration to make it fit ARMS A GUARD for
+# every other loader (CLAUDE.md: creating a reference value is its own
+# decision). Missing is visible; wrong is not.
+FK_GUARDED = {
+    "well_type":   ("dataview.dv_r_well_type",   "well_type"),
+    "well_status": ("dataview.dv_r_well_status", "well_status"),
+    "source":      ("dataview.dv_r_source",      "source"),
+}
+
 # The staged children that key on dv_well.uwi, and the column each keys with.
 # Deliberately a literal list, not an INFORMATION_SCHEMA sweep: this is the set
 # whose parents we are willing to seed, and widening it should be a visible
@@ -95,16 +154,126 @@ def master_rows(conn, uwis):
     if not uwis:
         return []
     inlist = ",".join("'" + str(u).replace("'", "''") + "'" for u in uwis)
+    return _select(conn, f"g.uwi14 IN ({inlist})")
+
+
+def _select(conn, where, limit=None, params=None):
+    """Read MASTER_TO_DV columns, aliased to their dv_well names.
+
+    Every caller comes through here so the orphan path and the scope path
+    cannot copy different column sets -- which is the shape of bug this
+    module's own docstring warns about.
+    """
+    import sqlalchemy as sa
+    cols = ", ".join("%s AS [%s]" % (expr, name) for expr, name in MASTER_TO_DV)
+    top = "TOP (%d) " % int(limit) if limit and int(limit) > 0 else ""
     rows = conn.execute(sa.text(
-        f"SELECT g.uwi14, g.well_name, g.operator_name, g.field_name, "
-        f"       g.surface_latitude, g.surface_longitude, g.county, "
-        f"       g.province_state, g.total_depth, g.spud_date "
-        f"  FROM {MASTER} g "
-        f" WHERE g.uwi14 IN ({inlist})"))
-    keys = ("uwi", "well_name", "operator", "field", "surface_latitude",
-            "surface_longitude", "county", "province_state", "total_depth",
-            "spud_date")
-    return [dict(zip(keys, (r[0].strip(),) + tuple(r[1:]))) for r in rows]
+        f"SELECT {top}{cols} FROM {MASTER} g WHERE {where}"), params or {})
+    names = [name for _e, name in MASTER_TO_DV]
+    out = []
+    for r in rows:
+        d = dict(zip(names, r))
+        # char(14): the key is compared as text everywhere downstream.
+        d["uwi"] = str(d.get("uwi") or "").strip()
+        if d["uwi"]:
+            out.append(d)
+    return out
+
+
+def scope_where(state=None, county=None, bbox=None):
+    """(sql, params) for a state / county / bounding-box scope.
+
+    A bbox is (min_lat, min_lon, max_lat, max_lon) -- the shape the map's
+    drawn rectangle already carries.
+    """
+    sql, p = ["1=1"], {}
+    if state:
+        sql.append("g.province_state = :st")
+        p["st"] = state
+    if county:
+        # The master stores "NATRONA"; a UI usually offers "Natrona County".
+        sql.append("UPPER(LTRIM(RTRIM(g.county))) = :co")
+        p["co"] = str(county).upper().replace(" COUNTY", "").strip()
+    if bbox:
+        _mnla, _mnlo, _mxla, _mxlo = bbox
+        sql.append("g.surface_latitude BETWEEN :mnla AND :mxla")
+        sql.append("g.surface_longitude BETWEEN :mnlo AND :mxlo")
+        p.update(mnla=_mnla, mxla=_mxla, mnlo=_mnlo, mxlo=_mxlo)
+    # A well with no location cannot be plotted and cannot be checked, which
+    # is the whole reason for copying it here rather than minting a key.
+    sql.append("g.surface_latitude IS NOT NULL")
+    sql.append("g.surface_longitude IS NOT NULL")
+    return " AND ".join(sql), p
+
+
+def scope_count(conn, state=None, county=None, bbox=None):
+    """How many the scope holds, and how many are NOT already in dv_well."""
+    import sqlalchemy as sa
+    where, p = scope_where(state, county, bbox)
+    total = conn.execute(sa.text(
+        f"SELECT COUNT(*) FROM {MASTER} g WHERE {where}"), p).scalar() or 0
+    new = conn.execute(sa.text(
+        f"SELECT COUNT(*) FROM {MASTER} g WHERE {where} AND NOT EXISTS "
+        f"(SELECT 1 FROM dataview.dv_well w WHERE w.uwi = g.uwi14)"),
+        p).scalar() or 0
+    return int(total), int(new)
+
+
+def scope_rows(conn, state=None, county=None, bbox=None, limit=None,
+               only_new=True):
+    """The wells a scope would seed, as dv_well-keyed dicts.
+
+    only_new skips those dv_well already holds -- not for correctness (the
+    insert is NOT EXISTS-guarded either way) but so the preview count is the
+    number of rows that will actually appear.
+    """
+    where, p = scope_where(state, county, bbox)
+    if only_new:
+        where += (" AND NOT EXISTS (SELECT 1 FROM dataview.dv_well w "
+                  "WHERE w.uwi = g.uwi14)")
+    return _select(conn, where, limit=limit, params=p)
+
+
+def counties(conn, state):
+    """[(county, n)] in the master for a state, most wells first."""
+    import sqlalchemy as sa
+    return [(str(r[0]).strip(), int(r[1])) for r in conn.execute(sa.text(
+        f"SELECT LTRIM(RTRIM(g.county)) c, COUNT(*) n FROM {MASTER} g "
+        f" WHERE g.province_state = :st AND g.county IS NOT NULL "
+        f"   AND g.surface_latitude IS NOT NULL "
+        f" GROUP BY LTRIM(RTRIM(g.county)) ORDER BY n DESC"), {"st": state})]
+
+
+def sanitise_fk(conn, rows):
+    """NULL any FK-guarded value the reference table does not hold.
+
+    Returns {column: {"nulled": n, "values": {value: n}}} so the caller can
+    SAY what it dropped. Silently blanking a column the operator can see in
+    the source is the same class of dishonesty as inventing one.
+
+    The alternative -- letting the INSERT fail on the FK -- loses the whole
+    row for one unregistered code, and the row's name, operator and location
+    are worth having without its well type.
+    """
+    import sqlalchemy as sa
+    report = {}
+    for col, (table, refcol) in FK_GUARDED.items():
+        try:
+            ok = {str(r[0]).strip().upper() for r in conn.execute(
+                sa.text(f"SELECT [{refcol}] FROM {table}"))}
+        except Exception:
+            continue                      # no reference table: nothing to check
+        dropped = {}
+        for r in rows:
+            v = r.get(col)
+            if v is None:
+                continue
+            if str(v).strip().upper() not in ok:
+                dropped[str(v)] = dropped.get(str(v), 0) + 1
+                r[col] = None
+        if dropped:
+            report[col] = {"nulled": sum(dropped.values()), "values": dropped}
+    return report
 
 
 def validate_source(conn, code):
@@ -152,9 +321,12 @@ def seed(engine, rows, source=None, created_by=CREATED_BY):
         live = {r[0].lower() for r in cx.execute(sa.text(
             "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
             "WHERE TABLE_SCHEMA='dataview' AND TABLE_NAME='dv_well'"))}
-    cand = ["uwi", "well_name", "operator", "field", "surface_latitude",
-            "surface_longitude", "county", "province_state", "total_depth",
-            "spud_date", "active_ind", "row_created_by"]
+    # Keyed by the DV_WELL name, so `c in live` narrows to what this database
+    # actually has rather than quietly discarding a rename. The old list said
+    # "operator", "field", "total_depth"; dv_well says operator_name,
+    # field_name, final_td; all three failed the test and were dropped without
+    # a word. Whatever MASTER_TO_DV carries is offered here.
+    cand = [name for _e, name in MASTER_TO_DV] + ["active_ind", "row_created_by"]
     use = [c for c in cand if c in live]
     if source and "source" in live:
         use.append("source")
@@ -162,11 +334,19 @@ def seed(engine, rows, source=None, created_by=CREATED_BY):
     stampv = ", SYSUTCDATETIME()" if "row_created_date" in live else ""
     # Counted BEFORE the insert: afterwards every row exists and the two
     # outcomes are indistinguishable.
+    #
+    # CHUNKED. This built ONE IN-list from every row, which was fine for the
+    # handful of orphans it was written for and is a ~200 KB literal for a
+    # county of ten thousand -- the scope path this now also serves.
+    present = 0
+    _uwis = [str(r["uwi"]) for r in rows]
     with engine.connect() as cx:
-        present = cx.execute(sa.text(
-            "SELECT COUNT(*) FROM dataview.dv_well WHERE uwi IN ("
-            + ",".join("'" + str(r["uwi"]).replace("'", "''") + "'" for r in rows)
-            + ")")).scalar() or 0
+        for _i in range(0, len(_uwis), 1000):
+            _chunk = _uwis[_i:_i + 1000]
+            present += cx.execute(sa.text(
+                "SELECT COUNT(*) FROM dataview.dv_well WHERE uwi IN ("
+                + ",".join("'" + u.replace("'", "''") + "'" for u in _chunk)
+                + ")")).scalar() or 0
 
     n = 0
     with engine.begin() as cx:

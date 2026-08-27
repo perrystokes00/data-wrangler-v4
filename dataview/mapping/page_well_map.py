@@ -328,6 +328,9 @@ _OPT_DENY = frozenset({
     "wm_ai_question", "wm_ai_scope", "wm_ai_run", "wm_ai_clear",
     "wm_near_dist", "wm_near_feat", "wm_near_run", "wm_near_open",
     "wm_compute_paths",
+    # the reference-well loader: picking a county in it is not a map option,
+    # and holding the map because someone opened the picker would be absurd
+    "wm_seed_county",
     "seis_basket_sel", "seis_basket_all", "seis_basket_clear",
     "seis_open_sel", "seis_pick_clear", "seis_il_no", "seis_xl_no",
     "wells_clear_viewport", "wells_reset_view",
@@ -8229,6 +8232,144 @@ def _render_results_documents(engine, uwis):
         st.rerun()
 
 
+def _render_seed_reference(engine):
+    """Copy reference wells from the gold master into dv_well, a county at a time.
+
+    THE MAP SHOWS TWO POPULATIONS THAT ARE NOT THE SAME SET. The Wells layer
+    reads dataview.dv_well; the H3 density layer reads
+    dataview_federation.v_well_density_r*, which aggregates v_well -- dv_well
+    UNION the 3.9M-row reference master. So a hot hexagon can hold thousands
+    of wells and no clickable spot. This is the control that closes the gap
+    for an area you care about.
+
+    COUNTY AT A TIME, ON PURPOSE. The whole master is 3.9M rows and the map's
+    own draw cap is 30,000; loading "everything" would exceed it and show a
+    truncated subset, which reads as data. A county is a unit an operator
+    means, and the count is on screen before anything is written.
+
+    NOT A ONE-BUTTON LOAD. Counting is separate from writing and the write
+    says what it dropped -- seeding a parent is a decision (Perry's law), and
+    this is 8,960 of them in one click.
+    """
+    from dataview.import_data import seed_from_master as _sfm
+
+    with st.expander("⬇ Load reference wells into the database", expanded=False):
+        st.caption(
+            "Copies wells from the **gold master** into `dv_well`, so the "
+            "🔶 density hexagons and the 📍 Wells layer describe the same "
+            "wells. Insert-only — a well another load already owns is left "
+            "alone.")
+        _st_code = (st.session_state.get("wm_sc_state") or "").strip()
+        if not _st_code or _st_code.startswith("—"):
+            st.info("Pick a **state** in *Constrain to* first — this loads a "
+                    "county at a time, and the county list comes from it.")
+            return
+        try:
+            _cts = _sfm.counties(_engine_for_seed(engine), _st_code)
+        except Exception as _ce:
+            st.warning("Could not read the master: %s" % str(_ce)[:160])
+            return
+        if not _cts:
+            st.info("The reference master holds no located wells for %s."
+                    % _st_code)
+            return
+
+        # Default to the county the map is already constrained to, so the
+        # control agrees with what is on screen rather than offering a
+        # choice the operator has already made.
+        _map_co = (st.session_state.get("wm_sc_county") or "").strip()
+        _labels = ["%s  (%s wells)" % (c, format(n, ",")) for c, n in _cts]
+        _idx = 0
+        for _i, (_c, _n) in enumerate(_cts):
+            if _map_co and _c.upper().startswith(_map_co.upper().replace(" COUNTY", "").strip()):
+                _idx = _i
+                break
+        _pick = st.selectbox("County", _labels, index=_idx, key="wm_seed_county")
+        _county = _cts[_labels.index(_pick)][0]
+
+        _c1, _c2 = st.columns([1, 1])
+        if _c1.button("🔢 Count", key="wm_seed_count_btn",
+                      use_container_width=True):
+            try:
+                with _engine_for_seed(engine).connect() as _cx:
+                    _tot, _new = _sfm.scope_count(_cx, state=_st_code,
+                                                  county=_county)
+                st.session_state["_seed_counts"] = (_county, _tot, _new)
+            except Exception as _e:
+                st.error("Count failed: %s" % str(_e)[:200])
+
+        _counts = st.session_state.get("_seed_counts")
+        if not _counts or _counts[0] != _county:
+            st.caption("Press **Count** to see how many wells this county "
+                       "would add.")
+            return
+        _, _tot, _new = _counts
+        _m1, _m2 = st.columns(2)
+        _m1.metric("In the master", format(_tot, ","))
+        _m2.metric("Not yet in dv_well", format(_new, ","),
+                   help="What this would insert. The rest are already here "
+                        "and are left untouched.")
+        if not _new:
+            st.success("Every located well in %s is already in the database."
+                       % _county)
+            return
+        if _new > 30000:
+            st.warning(
+                "⚠ %s wells is more than the map's 30,000 draw cap "
+                "(`_WELLS_LOAD_CAP`). They will all load, but the Wells layer "
+                "will show a truncated subset until the view is narrowed."
+                % format(_new, ","))
+
+        if _c2.button("⬇ Load %s wells" % format(_new, ","),
+                      key="wm_seed_apply_btn", type="primary",
+                      use_container_width=True):
+            try:
+                _eng = _engine_for_seed(engine)
+                with st.spinner("Reading the master…"):
+                    with _eng.connect() as _cx:
+                        _rows = _sfm.scope_rows(_cx, state=_st_code,
+                                                county=_county)
+                        _rep = _sfm.sanitise_fk(_cx, _rows)
+                with st.spinner("Inserting %s wells…" % format(len(_rows), ",")):
+                    _n, _present = _sfm.seed(_eng, _rows)
+                st.success("Inserted **%s** wells from %s. %s were already here."
+                           % (format(_n, ","), _county, format(_present, ",")))
+                # SAY WHAT WAS DROPPED. A code the reference table does not
+                # hold is set to NULL rather than failing the row -- silently
+                # blanking a column the operator can see in the source is the
+                # same dishonesty as inventing one.
+                if _rep:
+                    st.caption("Unregistered coded values were set to NULL "
+                               "rather than rejected:")
+                    for _col, _d in _rep.items():
+                        st.caption("• `%s` — %d row(s): %s"
+                                   % (_col, _d["nulled"],
+                                      ", ".join("%s×%d" % (_v, _c)
+                                                for _v, _c in
+                                                list(_d["values"].items())[:8])))
+                st.caption("H3 cells came from the master alongside the "
+                           "coordinates, so they agree with the point and "
+                           "`h3_refresh` is not needed for these rows.")
+                st.session_state.pop("_seed_counts", None)
+                st.cache_data.clear()      # the wells query is cached
+            except Exception as _e:
+                st.error("Load failed: %s" % str(_e)[:300])
+                import traceback as _tb
+                print("[map] seed reference wells failed:\n%s"
+                      % _tb.format_exc(), flush=True)
+
+
+def _engine_for_seed(engine):
+    """The engine the seeder should use.
+
+    seed_from_master reaches WELL_REF by three-part name, so it needs a
+    connection to the DataView database, which is what the map already holds.
+    A separate helper because the map's `engine` argument has been a
+    connection in one code path before now.
+    """
+    return getattr(engine, "engine", engine)
+
+
 @st.fragment
 def _render_saved_places(engine):
     """Go to / save / rename / re-point / delete a saved place.
@@ -13306,6 +13447,7 @@ def run(engine=None):
         # last thing left in the control rail.
         # Saved places, in a fragment: see _render_saved_places.
         _render_saved_places(engine)
+        _render_seed_reference(engine)
         # RESET VIEW AND CLEAR WELLS SIT TOGETHER because they are the pair:
         # one resets the CAMERA and keeps the data, the other clears the DATA
         # and leaves the camera. That distinction is drawn all through this
