@@ -194,8 +194,18 @@ _BUILTIN_PLACES = {
 }
 
 
+@st.cache_data(ttl=600, show_spinner=False)
 def _region_bounds(_engine, state: str, counties) -> list | None:
     """The extent of a petroleum region's WELLS, measured not declared.
+
+    CACHED BECAUSE IT RUNS ONCE PER REGION, EVERY RENDER. _saved_places calls
+    this for every petroleum play to build the "Go to" dropdown -- 13 queries
+    on every rerun of every page that draws the map, to produce extents that
+    only move when wells are loaded. Profiling put it second behind the
+    Teacup panel. The TTL is the backstop for a load happening elsewhere.
+
+    Leading underscore on _engine so Streamlit does not try to hash it; the
+    signature already had it, for the same reason.
 
     PETROLEUM_REGIONS already names the canonical plays — Permian, Eagle Ford,
     Bakken — as (state, [counties]) for the region FILTER. Rather than write a
@@ -12443,7 +12453,7 @@ def run(engine=None):
         # map serialize is what costs) and the map is simply not drawn until
         # Apply. Off restores the draw-on-every-change behaviour.
         _rvh.toggle(
-            "⏸ Hold for Apply", key="wm_hold_map", value=True,
+            "⏸ Hold for Map", key="wm_hold_map", value=True,
             help="Don't redraw the map on every option change. Pick your "
                  "area, query and layers, then press Apply to draw once. "
                  "Map interactions — drawing a box, drilling, picking a "
@@ -12547,7 +12557,7 @@ def run(engine=None):
             _skip_folium = True
             st.warning(
                 "⏸ **Map held** — options changed. Finish selecting, then "
-                "press Apply. (Turn off *Hold for Apply* to draw on every "
+                "press Apply. (Turn off *Hold for Map* to draw on every "
                 "change.)")
             if st.button("▶ Apply — draw the map", key="wm_apply_map_btn",
                          type="primary", use_container_width=True):

@@ -536,6 +536,27 @@ footer,
 # SESSION STATE
 # ═══════════════════════════════════════════════════════════════════════
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _teacup_counts_cached(_engine, _ver):
+    """Teacup row counts, cached. THE SIDEBAR RENDERS ON EVERY PAGE.
+
+    Profiling a single map render found 157 SQL round trips, and 128 of them
+    were this panel: well_counts alone issues one query per child table of
+    dv_well -- 54 of them, 1.4 s -- and catalog_counts another 70. Every page
+    in the app paid that on every rerun, just to show three numbers in a
+    collapsed expander. An expander body executes whether or not it is open,
+    so "they only cost when you look" was never true.
+
+    _ver is the cache key, not a value: bump S["_teacup_ver"] after anything
+    that changes the counts and the next render recomputes. TTL is a backstop
+    for changes made outside this session -- a pipeline run in a terminal.
+
+    Leading underscore on _engine so Streamlit does not try to hash it.
+    """
+    _tc = _teacup_mod()
+    return _tc.counts(_engine) if _tc else {}
+
+
 def _teacup_mod():
     """tools/demo_teacup, or None. Imported lazily so a missing tool cannot
     stop the app from starting."""
@@ -1013,7 +1034,8 @@ with st.sidebar:
                 st.caption("⚠️ tools/demo_teacup.py not importable.")
             else:
                 try:
-                    _tcc = _tc.counts(S.engine)
+                    _tcc = _teacup_counts_cached(
+                        S.engine, S.get("_teacup_ver", 0))
                     _tct = sum(sum(v for v in d.values()
                                    if isinstance(v, int))
                                for d in _tcc.values())
@@ -1042,6 +1064,10 @@ with st.sidebar:
                             try:
                                 S["_reset_teacup_result"] = _tc.reset_all(
                                     S.engine, apply=True)
+                                # The counts just changed to zero, so retire
+                                # the cached copy -- the panel would otherwise
+                                # keep reporting what it removed.
+                                S["_teacup_ver"] = S.get("_teacup_ver", 0) + 1
                             except Exception as _te:
                                 S["_reset_teacup_result"] = {
                                     "error": str(_te)}
