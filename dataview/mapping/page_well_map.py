@@ -8279,22 +8279,6 @@ def run(engine=None):
         st.info("Connect to the DataView database first.")
         return
 
-    # ── THE MAP GOES HERE, WHATEVER ORDER THE CODE RUNS IN ──────────────
-    # A container reserves its position when it is CREATED, not when it is
-    # filled. Everything the map needs -- the area, the query, the layer
-    # chips -- has to run BEFORE the map is built, and each of those draws
-    # its own controls as it goes: three expanders, three selectboxes,
-    # Constrain-to, the query box, twelve wrapping geography chips, two mode
-    # toggles, two guidance captions, the saved-places row and the
-    # Reset/Clear/Freeze/Hold row. On a laptop that is a screenful, and the
-    # map -- the thing the page is for -- started below the fold.
-    #
-    # Claiming the slot first puts the map at the top and leaves every
-    # control exactly where it is, in the order that still works. The file
-    # already used this trick once, to put mapcol above ctrl; this is the
-    # same move applied to the map ITSELF rather than to its column.
-    _mapslot = st.container()
-
     # ── Active database resolution ─────────────────────────────────────
     # The map reads from ONE database, used by both the SQLAlchemy engine
     # AND the bcp.exe well fetch. Default to the database the app connected
@@ -13015,93 +12999,89 @@ def run(engine=None):
         )))
         _map_widget_key = f"well_map_folium_{_sel_key_hash}"
 
-        with _mapslot:
-            # ── hold the map until Apply ────────────────────────────────────
-            # THE SIGNATURE IS DELIBERATELY NARROW, and which way it errs matters.
-            # A determinant left OUT of it simply redraws immediately, which is
-            # today's behaviour -- no worse. A map INTERACTION accidentally put
-            # IN would leave the map refusing to draw after a drill until Apply
-            # was pressed, which on camera reads as broken. So this lists the
-            # option inputs explicitly and nothing that a drill, a pick or a
-            # drawing touches: viewport_uwis, _drawn_bounds, _seis_pick and the
-            # rest are all absent on purpose.
-            # OPTION WIDGETS, NOT VALUES DERIVED FROM THEM. The first cut hashed
-            # active_area["id"], qtype, basemap and active_db -- and two identical
-            # fresh sessions produced different signatures ('all' vs 'none'),
-            # because a cached query resolved differently on the second. A
-            # signature over derived values therefore holds the map for changes
-            # nobody made. A widget value changes when, and only when, someone
-            # changes it, which is the actual question being asked.
-            #
-            # Named explicitly and kept narrow. Deliberately absent: wm_place_*
-            # (Go applies itself), wm_freeze_map and wm_hold_map (meta-controls --
-            # holding the map because you toggled hold is absurd), and everything
-            # a drill, pick or drawing touches.
-            _OPT_KEYS = ("wm_area_sel", "wm_query_sel", "wm_basemap",
-                         "wm_map_db", "wm_geo_pills", "h3_resolution")
-            _opt_sig = repr(sorted(
-                [(k, repr(st.session_state.get(k))) for k in _OPT_KEYS]
-                + [(str(k), repr(v)) for k, v in st.session_state.items()
-                   if isinstance(k, str) and k.startswith("wm_q_")]))
-            # FIRST OPEN ALWAYS DRAWS. With no recorded signature there is nothing
-            # to have changed, and a page that opens holding its own map behind an
-            # Apply button is a page that looks broken on arrival.
-            _drawn_sig = st.session_state.get("_map_drawn_sig")
-            _opts_changed = _drawn_sig is not None and _drawn_sig != _opt_sig
-            if st.session_state.get("wm_hold_map", True) and _opts_changed:
-                _skip_folium = True
-                st.warning(
-                    "⏸ **Map held** — options changed. Finish selecting, then "
-                    "press Apply. (Turn off *Hold for Map* to draw on every "
-                    "change.)")
-                if st.button("▶ Apply — draw the map", key="wm_apply_map_btn",
-                             type="primary", use_container_width=True):
-                    st.session_state["_map_drawn_sig"] = _opt_sig
-                    st.rerun()
-            else:
-                # Drawing IS applying: record what this render is showing, so the
-                # next option change is measured against what is on screen.
+        # ── hold the map until Apply ────────────────────────────────────
+        # THE SIGNATURE IS DELIBERATELY NARROW, and which way it errs matters.
+        # A determinant left OUT of it simply redraws immediately, which is
+        # today's behaviour -- no worse. A map INTERACTION accidentally put
+        # IN would leave the map refusing to draw after a drill until Apply
+        # was pressed, which on camera reads as broken. So this lists the
+        # option inputs explicitly and nothing that a drill, a pick or a
+        # drawing touches: viewport_uwis, _drawn_bounds, _seis_pick and the
+        # rest are all absent on purpose.
+        # OPTION WIDGETS, NOT VALUES DERIVED FROM THEM. The first cut hashed
+        # active_area["id"], qtype, basemap and active_db -- and two identical
+        # fresh sessions produced different signatures ('all' vs 'none'),
+        # because a cached query resolved differently on the second. A
+        # signature over derived values therefore holds the map for changes
+        # nobody made. A widget value changes when, and only when, someone
+        # changes it, which is the actual question being asked.
+        #
+        # Named explicitly and kept narrow. Deliberately absent: wm_place_*
+        # (Go applies itself), wm_freeze_map and wm_hold_map (meta-controls --
+        # holding the map because you toggled hold is absurd), and everything
+        # a drill, pick or drawing touches.
+        _OPT_KEYS = ("wm_area_sel", "wm_query_sel", "wm_basemap",
+                     "wm_map_db", "wm_geo_pills", "h3_resolution")
+        _opt_sig = repr(sorted(
+            [(k, repr(st.session_state.get(k))) for k in _OPT_KEYS]
+            + [(str(k), repr(v)) for k, v in st.session_state.items()
+               if isinstance(k, str) and k.startswith("wm_q_")]))
+        # FIRST OPEN ALWAYS DRAWS. With no recorded signature there is nothing
+        # to have changed, and a page that opens holding its own map behind an
+        # Apply button is a page that looks broken on arrival.
+        _drawn_sig = st.session_state.get("_map_drawn_sig")
+        _opts_changed = _drawn_sig is not None and _drawn_sig != _opt_sig
+        if st.session_state.get("wm_hold_map", True) and _opts_changed:
+            _skip_folium = True
+            st.warning(
+                "⏸ **Map held** — options changed. Finish selecting, then "
+                "press Apply. (Turn off *Hold for Map* to draw on every "
+                "change.)")
+            if st.button("▶ Apply — draw the map", key="wm_apply_map_btn",
+                         type="primary", use_container_width=True):
                 st.session_state["_map_drawn_sig"] = _opt_sig
+                st.rerun()
+        else:
+            # Drawing IS applying: record what this render is showing, so the
+            # next option change is measured against what is on screen.
+            st.session_state["_map_drawn_sig"] = _opt_sig
 
-            # NAME THE LAYERS THAT HAD NOTHING TO DRAW. Switching a chip on and
-            # seeing no change is indistinguishable from a broken layer, and the
-            # honest answer -- that table is empty on this database -- is one the
-            # reader can act on: load it, or stop clicking it.
-            if _geo_empty:
-                st.caption("· ".join([
-                    "ℹ️ Nothing to draw for: **%s**" % "**, **".join(_geo_empty),
-                    "those tables have no rows with geometry in this database."]))
+        # NAME THE LAYERS THAT HAD NOTHING TO DRAW. Switching a chip on and
+        # seeing no change is indistinguishable from a broken layer, and the
+        # honest answer -- that table is empty on this database -- is one the
+        # reader can act on: load it, or stop clicking it.
+        if _geo_empty:
+            st.caption("· ".join([
+                "ℹ️ Nothing to draw for: **%s**" % "**, **".join(_geo_empty),
+                "those tables have no rows with geometry in this database."]))
 
-            # SAY IT, RIGHT ABOVE THE MAP. A mode that silently swallows clicks is
-            # worse than the redraw it replaces -- the click looks broken instead
-            # of cheap. This sits immediately above the map so it is read before
-            # the first click, not after it.
-            if st.session_state.get("wm_freeze_map", False):
-                st.info("🔒 **Map frozen** — clicks won't open wells or lines, and "
-                        "won't rebuild the map. **Hover** to identify anything; "
-                        "the **box** and **circle** tools still select. "
-                        "Turn off *Freeze map* to click one open.")
+        # SAY IT, RIGHT ABOVE THE MAP. A mode that silently swallows clicks is
+        # worse than the redraw it replaces -- the click looks broken instead
+        # of cheap. This sits immediately above the map so it is read before
+        # the first click, not after it.
+        if st.session_state.get("wm_freeze_map", False):
+            st.info("🔒 **Map frozen** — clicks won't open wells or lines, and "
+                    "won't rebuild the map. **Hover** to identify anything; "
+                    "the **box** and **circle** tools still select. "
+                    "Turn off *Freeze map* to click one open.")
 
-            # INTO THE SLOT CLAIMED AT THE TOP OF run(). Only the map itself
-            # moves; every control above stays where the code puts it, because
-            # they all have to run first to decide what the map draws.
-            if _skip_folium:
-                map_data = None
-            else:
-                _phase(90, "🌐 Rendering map in browser…")
-                try:
-                    map_data = st_folium(
-                        m, height=500, use_container_width=True,
-                        returned_objects=_ret,
-                        key=_map_widget_key,
-                    )
-                except TypeError:
-                    # Older streamlit-folium
-                    map_data = st_folium(
-                        m, width=None, height=500,
-                        returned_objects=_ret,
-                        key=_map_widget_key,
-                    )
+        if _skip_folium:
+            map_data = None
+        else:
+            _phase(90, "🌐 Rendering map in browser…")
+            try:
+                map_data = st_folium(
+                m, height=500, use_container_width=True,
+                returned_objects=_ret,
+                key=_map_widget_key,
+            )
+            except TypeError:
+                # Older streamlit-folium
+                map_data = st_folium(
+                    m, width=None, height=500,
+                    returned_objects=_ret,
+                    key=_map_widget_key,
+                )
         _phase(100)
         _msg.empty()
         # The stamp is taken at the TOP of the build -- see _skip_folium.
