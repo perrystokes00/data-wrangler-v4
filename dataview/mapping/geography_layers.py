@@ -576,6 +576,68 @@ def add_horizon_contours(m, engine, show=False):
     return drawn
 
 
+_BY_TITLE = {"owner": "Lease owner", "producing": "Lease · producing",
+             "status": "Lease status", "vintage": "Lease · effective decade",
+             "size": "Lease · size"}
+
+
+def _add_lease_legend(m, entries, by):
+    """A floating legend built from the colours the layer JUST assigned.
+
+    TAKES THE COLOURS RATHER THAN RECOMPUTING THEM. A legend that derives its
+    own swatches is a second implementation of the colour rule, and the two
+    drift the first time one of them changes -- a legend that disagrees with
+    the map is worse than none, because it is believed.
+
+    BOTTOM-LEFT, because _add_status_legend pins bottom-right and both are on
+    screen whenever wells and leases are drawn together.
+
+    Same <details> + sessionStorage pattern as the status legend: the map is
+    rebuilt on every rerun, so a Python-side fold would cost a redraw to
+    close a box. The browser owns this one.
+    """
+    from branca.element import Template, MacroElement
+    rows, extra = [], 0
+    if len(entries) > 16:                 # SAY IT, do not silently truncate
+        extra = len(entries) - 15
+        entries = entries[:15]
+    for label, colour, n in entries:
+        rows.append(
+            "<div style='display:flex;align-items:center;gap:6px;margin:2px 0'>"
+            "<span style='width:12px;height:12px;background:%s;"
+            "border:1px solid rgba(0,0,0,.35);display:inline-block;"
+            "flex:0 0 auto'></span>"
+            "<span style='font-size:11px;color:#1e293b;white-space:nowrap'>"
+            "%s <span style='color:#64748b'>(%s)</span></span></div>"
+            % (colour, label, format(n, ",")))
+    if extra:
+        rows.append("<div style='font-size:10px;color:#64748b;margin-top:3px'>"
+                    "+%d more not listed</div>" % extra)
+    html = (
+        "<details id='wm-lease-legend' open style='position:fixed;"
+        "bottom:22px;left:12px;z-index:9999;"
+        "background:rgba(255,255,255,0.94);padding:6px 11px 8px;"
+        "border-radius:6px;box-shadow:0 1px 5px rgba(0,0,0,0.35);"
+        "max-height:48%;overflow:auto'>"
+        "<summary style='font-size:11px;font-weight:700;color:#0f172a;"
+        "cursor:pointer;outline:none;user-select:none'>" + _BY_TITLE.get(
+            by, "Leases") + "</summary>"
+        "<div style='margin-top:4px'>" + "".join(rows) + "</div></details>"
+        "<script>(function(){"
+        "var d=document.getElementById('wm-lease-legend');"
+        "if(!d){return;}"
+        "try{if(sessionStorage.getItem('dv_lease_legend_open')==='0')"
+        "{d.removeAttribute('open');}}catch(e){}"
+        "d.addEventListener('toggle',function(){"
+        "try{sessionStorage.setItem('dv_lease_legend_open',d.open?'1':'0');}"
+        "catch(e){}});"
+        "})();</script>")
+    el = MacroElement()
+    el._template = Template("{% macro html(this, kwargs) %}" + html
+                            + "{% endmacro %}")
+    m.get_root().add_child(el)
+
+
 # ── Well symbols ─────────────────────────────────────────────────────────────
 # A COLOURED DOT IS NOT A WELL SYMBOL. The industry set is a SHAPE vocabulary
 # that predates colour printing and is still what a geologist reads first: a
@@ -808,7 +870,8 @@ _SIZE_SQL = ("CASE WHEN area_km2 IS NULL THEN NULL"
              " ELSE '6. 1280+ ac' END")
 
 
-def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
+def add_lease_layer(m, engine, show=True, limit=5000, by="owner",
+                    legend=True):
     """dv_land_tract coloured by owner (or producing status), grouped for the
     layer control.
 
@@ -862,6 +925,7 @@ def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
         by_owner.setdefault((r.own or _unknown).strip(), []).append(r)
 
     drawn = 0
+    _legend = []
     # BY SIZE for identity, BY TIME for vintage. Sorting decades by how many
     # leases they hold would scatter the ramp through the layer control and
     # throw away the ordering the ramp exists to show.
@@ -941,6 +1005,13 @@ def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
         ).add_to(fg)
         fg.add_to(m)
         drawn += len(feats)
+        _legend.append((owner, colour, len(feats)))
+    # BUILT FROM THE COLOURS JUST ASSIGNED, never recomputed: a legend that
+    # derives its own swatches is a second copy of the colour rule, and the
+    # two drift the first time one changes. A legend that disagrees with the
+    # map is worse than none, because it is believed.
+    if legend and _legend:
+        _add_lease_legend(m, _legend, by)
     return drawn
 
 

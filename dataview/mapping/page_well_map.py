@@ -12657,7 +12657,9 @@ def run(engine=None):
                         _drew = add_lease_layer(
                             m, engine, show=True,
                             by=st.session_state.get("wm_lease_color_by",
-                                                    "owner")) or 0
+                                                    "producing"),
+                            legend=bool(st.session_state.get(
+                                "wm_show_legend", True))) or 0
                     elif _geo_keys[_ak] == "seismic":
                         # None, not an empty set, when nothing was chosen:
                         # empty means "the page asked for none" and would
@@ -13938,8 +13940,11 @@ def run(engine=None):
 
         with _rv2.expander("🏷 Map display", expanded=False):
             _show_legend = st.checkbox(
-                "🏷 Status legend", key="wm_show_legend",
-                help="Show a colour/symbol key for well status on the map")
+                "🏷 Map legends", key="wm_show_legend",
+                help="Floating keys on the map: well status bottom-right, "
+                     "leases bottom-left. Both fold to their title bar — the "
+                     "fold is remembered in the browser, so collapsing one "
+                     "costs no redraw.")
             # COLOUR THE LEASES BY SOMETHING THEY HAVE. Owner is the natural
             # choice and is NULL on every federal lease -- BLM publishes no
             # lessee -- so colouring by it puts all 288 in one grey pile while
