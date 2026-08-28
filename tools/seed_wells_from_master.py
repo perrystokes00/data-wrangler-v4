@@ -48,6 +48,26 @@ def main(argv=None):
                          "reference master, not from a loaded file.")
     ap.add_argument("--apply", action="store_true",
                     help="write. Without it, nothing is inserted.")
+    # ── scope, and the CSV route ────────────────────────────────────────
+    # Without --state/--county this stays the orphan seeder it has always
+    # been: wells that staged children reference. WITH them it takes a whole
+    # county, which the map panel could already do and this could not.
+    #
+    # --csv writes the file instead of inserting. seed() is row-by-row, each
+    # guarded by its own NOT EXISTS -- right for the handful of orphans it was
+    # written for, thousands of round trips for a county. The Bulk Tabular
+    # Loader already owns the set-based path, so handing it a file beats
+    # growing a second bulk loader here. CLAUDE.md, measured three times:
+    # pyodbc for statements, bcp for sets.
+    ap.add_argument("--state", default=None,
+                    help="province_state code, e.g. WY. With --county, seeds "
+                         "that scope instead of the orphan set.")
+    ap.add_argument("--county", default=None, help="county name, e.g. Converse")
+    ap.add_argument("--limit", type=int, default=30000,
+                    help="most wells in one go (default 30000, the map's cap)")
+    ap.add_argument("--csv", default=None,
+                    help="write a CSV for the Bulk Tabular Loader instead of "
+                         "inserting. Far faster for a county.")
     a = ap.parse_args(argv)
 
     import sqlalchemy as sa
@@ -64,6 +84,44 @@ def main(argv=None):
                       f"so seeding one here would push the problem downstream.\n"
                       f"  Registered: {', '.join(registered)}")
                 return 2
+
+        # ── scope path: a county, rather than the orphan set ─────────
+        if a.state or a.county:
+            tot, new = sfm.scope_count(cx, state=a.state, county=a.county)
+            rows = sfm.scope_rows(cx, state=a.state, county=a.county,
+                                  limit=a.limit)
+            rep = sfm.sanitise_fk(cx, rows)
+            print("scope %s%s: %s in master, %s not in dv_well, taking %s"
+                  % (a.state or "", "/" + a.county if a.county else "",
+                     format(tot, ","), format(new, ","), format(len(rows), ",")))
+            for col, d in (rep or {}).items():
+                print("   %s: %d value(s) NULLed as unregistered -- %s"
+                      % (col, d["nulled"],
+                         ", ".join("%s x%d" % kv
+                                   for kv in list(d["values"].items())[:6])))
+            if not rows:
+                return 0
+            if a.csv:
+                if not a.apply:
+                    print("\nDRY RUN -- re-run with --apply to write %s" % a.csv)
+                    return 0
+                path, n, cols = sfm.write_csv(rows, a.csv, source=a.source,
+                                              created_by=a.created_by)
+                print("\nwrote %s row(s) x %d column(s) to\n   %s"
+                      % (format(n, ","), len(cols), path))
+                print("\nLoad it with the Data Assistant (Bulk Tabular Loader) "
+                      "into dataview.dv_well.\nThe header is dv_well's own "
+                      "column names, so it maps without help.")
+                return 0
+            if not a.apply:
+                print("\nDRY RUN -- re-run with --apply to insert, or add "
+                      "--csv for the faster bulk route.")
+                return 0
+            n, present = sfm.seed(eng, rows, source=a.source,
+                                  created_by=a.created_by)
+            print("\ninserted %s; %s were already here."
+                  % (format(n, ","), format(present, ",")))
+            return 0
 
         orphans = sfm.orphan_uwis(cx)
         if not orphans:

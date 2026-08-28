@@ -168,6 +168,20 @@ _TRAY_AUTO_ADD_CAP = 500
 # here if needed.
 _WELLS_LOAD_CAP = 30000
 
+# How many individual markers the browser is actually asked to draw. The cap
+# above bounds the QUERY; this bounds the RENDER, and they are not the same
+# limit. Measured on this machine: 1,373 wells ~2.0s per render, 28,173 wells
+# 593s -- ten minutes, with the page greyed out throughout, which reads as a
+# frozen app. Clustering is deliberately off, so every marker is serialised
+# into the map HTML on every rerun and the cost grows faster than the count.
+#
+# 5,000 is chosen from that curve, not from taste: it is roughly where a
+# render stays inside a few seconds. DW_MAP_WELL_DRAW_CAP overrides it.
+try:
+    _WELLS_DRAW_CAP = int(os.environ.get("DW_MAP_WELL_DRAW_CAP", "5000"))
+except ValueError:
+    _WELLS_DRAW_CAP = 5000
+
 # Sentinel "state" for the offshore Gulf of Mexico in the Constrain-to State
 # dropdown. Picking it swaps the County sub-list for Protraction Areas and
 # constrains wells to the Gulf (whole footprint, or a specific area).
@@ -3575,6 +3589,38 @@ def _add_wells(m, df, exclude_uwis=None, disable_clustering_at_zoom=13,
         df = df[~df["uwi"].astype(str).isin(excl)].reset_index(drop=True)
         if df.empty:
             return
+
+    # ── THE CAP THAT MATTERS IS ON MARKERS DRAWN, NOT ROWS LOADED ──────
+    # MEASURED, not guessed: 1,373 wells rendered in ~2.0s; 28,173 wells --
+    # one county seeded from the reference master -- took 593 SECONDS for a
+    # single render, and Streamlit greys the page for the duration, so it
+    # reads as a frozen app rather than a slow one. Twenty times the wells,
+    # three hundred times the time: the cost is superlinear, because
+    # clustering is off (maxClusterRadius 1) and every marker is serialised
+    # into the map HTML on EVERY rerun.
+    #
+    # _WELLS_LOAD_CAP is 30,000 and never fired, because it caps the QUERY.
+    # Nothing capped the drawing. This does.
+    #
+    # It draws the first N and SAYS SO. Silently truncating would be the
+    # "wrong is worse than missing" case -- a map that looks complete and is
+    # not. H3 density is the honest way to see them all, and the message says
+    # that too.
+    if len(df) > _WELLS_DRAW_CAP:
+        _shown = len(df)
+        df = df.head(_WELLS_DRAW_CAP).reset_index(drop=True)
+        try:
+            st.warning(
+                "📍 **%s wells in scope — drawing the first %s.** Individual "
+                "markers are re-serialised on every interaction, and past a "
+                "few thousand that costs minutes per render. Narrow the area, "
+                "draw a box, or switch to 🔶 **H3 density**, which aggregates "
+                "and shows every well."
+                % (format(_shown, ","), format(_WELLS_DRAW_CAP, ",")))
+        except Exception:
+            pass
+        _say("[map] well draw cap: %s in scope, drawing %s"
+             % (format(_shown, ","), format(_WELLS_DRAW_CAP, ",")))
 
     sc = df["well_status"].astype(str).str.upper().fillna("UNKNOWN")
 

@@ -272,6 +272,43 @@ def counties(conn, state):
         f" GROUP BY LTRIM(RTRIM(g.county)) ORDER BY n DESC"), {"st": state})]
 
 
+def write_csv(rows, path, source=SEED_SOURCE, created_by=CREATED_BY):
+    """Write scope rows as a CSV the Bulk Tabular Loader can ingest.
+
+    WHY A CSV AT ALL. seed() inserts row by row, each guarded by its own
+    NOT EXISTS -- correct, and the right shape for the handful of orphans it
+    was written for. For a county it is thousands of round trips, and
+    CLAUDE.md's own measurement applies: pyodbc for statements, bcp for sets.
+    The Bulk Tabular Loader already owns the set-based path, with mapping and
+    FK resolution, so the fastest route is to hand it a file rather than to
+    grow a second bulk loader here.
+
+    THE HEADER IS dv_well's OWN COLUMN NAMES, which is what makes the loader
+    map it without help -- the same shape as synth_data\\dv_well.csv.
+
+    Plain csv.writer with default quoting, NOT the tab/QUOTE_NONE/escapechar
+    combination path_identity exists to prevent: that one doubles every
+    backslash and is the reason a file once took two identities. No column
+    here carries a path, but the default dialect is correct anyway and
+    choosing it deliberately is cheaper than explaining it later.
+
+    Returns (path, n_rows, columns).
+    """
+    import csv as _csv
+    cols = [name for _e, name in MASTER_TO_DV] + [
+        "active_ind", "source", "row_created_by"]
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        w = _csv.writer(fh)
+        w.writerow(cols)
+        for r in rows:
+            d = dict(r)
+            d["active_ind"] = "Y"
+            d["source"] = source
+            d["row_created_by"] = created_by
+            w.writerow(["" if d.get(c) is None else d.get(c) for c in cols])
+    return path, len(rows), cols
+
+
 def sanitise_fk(conn, rows):
     """NULL any FK-guarded value the reference table does not hold.
 
