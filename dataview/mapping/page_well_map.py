@@ -14155,6 +14155,13 @@ def run(engine=None):
             st.session_state.processed_drawings = set()
 
         if drawings:
+            # "I drew a box and nothing happened" has four silent endings:
+            # no drawing arrived, the drawing was already processed, the
+            # cell pick came back empty, or no area was selected. Only the
+            # last one said anything, so the log could not tell them apart.
+            _say("[map] drawings arrived: %d (processed so far: %d)"
+                 % (len(drawings),
+                    len(st.session_state.get("processed_drawings") or ())))
             for drawing in drawings:
                 geom   = drawing.get("geometry", {})
                 gtype  = geom.get("type", "")
@@ -14220,6 +14227,9 @@ def run(engine=None):
                         # CENTRE lies in the polygon, which is the containment
                         # rule this wants, computed rather than looked up.
                         _box_res = int(st.session_state.get("h3_resolution", 4))
+                        _say("[map] box: h3_on=%s res=R%s  %.4f,%.4f .. %.4f,%.4f"
+                             % (st.session_state.get("h3_layer_on"), _box_res,
+                                _min_lat, _min_lon, _max_lat, _max_lon))
                         if (st.session_state.get("h3_layer_on")
                                 and _box_res in (4, 5, 6, 7)):
                             try:
@@ -14231,6 +14241,9 @@ def run(engine=None):
                             except Exception as _pce:
                                 _say("[map] box->cells failed: %s" % str(_pce)[:120])
                                 _picked = []
+                            _say("[map] box -> %d cell(s) at R%d%s"
+                                 % (len(_picked), _box_res,
+                                    "" if _picked else "  (falling through to the wells drill)"))
                             if _picked:
                                 _store = dict(st.session_state.get(
                                     "_h3_cell_uwis", {}))
