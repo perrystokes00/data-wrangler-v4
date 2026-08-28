@@ -9312,6 +9312,15 @@ def run(engine=None):
         st.session_state.setdefault("wm_freeze_map", True)
         st.session_state["_wm_page_entered"] = True
 
+    # ── CONSUME THE CLIP REQUEST BEFORE ITS WIDGET DRAWS ──────────
+    # Drawing a box asks for the constraint; it cannot set wm_clip_to_box
+    # itself because the checkbox has already been built by then, and
+    # assigning a widget its own key after it exists raises on a later run,
+    # on whatever page draws next. Consumed here, at the top, the assignment
+    # happens before the widget is created and is therefore legal.
+    if st.session_state.pop("_clip_request", False):
+        st.session_state["wm_clip_to_box"] = True
+
     _status = st.empty()
 
     # ── Phased progress indicator at the top of the page ───────────────
@@ -12450,11 +12459,7 @@ def run(engine=None):
         # wells and hexes both off the toggle produced NO output at all and
         # was indistinguishable from one that had not been read. Reported as
         # exactly that. This runs whatever is on.
-        if st.session_state.pop("_clip_hint", False) and not (
-                st.session_state.get("wm_clip_to_box")):
-            _msg.info(
-                "🔲 Box saved. Tick **Clip to selection** in "
-                "🏷 Map display to draw only what is inside it.")
+        # (the "tick Clip" hint is gone: a drawn box turns it on itself now)
         _clip_state = _clip_bounds_now()
         if st.session_state.get("wm_clip_to_box"):
             if _clip_state:
@@ -12465,11 +12470,10 @@ def run(engine=None):
                 # A CONTROL THAT CANNOT ACT MUST SAY SO. Silence here reads
                 # as a broken toggle rather than a missing box.
                 _say("[map] clip ON but no box drawn -- nothing to clip to")
-                _msg.warning(
-                    "🔲 **Clip to selection** is on and waiting — "
-                    "**leave it on** and draw a box now with the rectangle "
-                    "tool. The clip applies to the box you draw NEXT; "
-                    "turning it off first is why nothing clips.")
+                _msg.info(
+                    "🔲 **Clip to selection** is on and waiting for a "
+                    "box — draw one with the rectangle tool and everything "
+                    "drawn after it is constrained to that box.")
         _show_h3_layer = (not _render_held
                           and st.session_state.get("h3_layer_on", True))
         # Render the Wells block whenever the toggle is on OR a drill selection
@@ -14507,10 +14511,21 @@ def run(engine=None):
                         # renders of "clip ON but no box", then the toggle
                         # went off, then the box arrived. Saying it here
                         # means either order gets the operator there.
+                        # THE BOX IS THE CONSTRAINT. Drawing one now turns
+                        # the clip on by itself: "draw a box and then anything
+                        # added is constrained by the box" is the whole idea,
+                        # and a separate toggle you had to remember produced
+                        # the exact backwards order that broke it -- tick,
+                        # nothing happens, untick, draw.
+                        #
+                        # A REQUEST, NOT AN ASSIGNMENT. This handler runs
+                        # AFTER the checkbox has drawn, and assigning a
+                        # widget its own key once it exists raises on a LATER
+                        # run on whatever page draws next -- scar #6. The top
+                        # of run() consumes this before the widget is built.
                         if not st.session_state.get("wm_clip_to_box"):
-                            _say("[map] box recorded; ⚠ Clip to selection is "
-                                 "OFF so nothing will be clipped")
-                            st.session_state["_clip_hint"] = True
+                            st.session_state["_clip_request"] = True
+                            _say("[map] box drawn -> requesting clip ON")
 
                         # ── A BOX OVER HEXAGONS SELECTS HEXAGONS ────────
                         # "I tried to draw a box over the cells but that did
