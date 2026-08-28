@@ -9627,11 +9627,26 @@ def run(engine=None):
                 _broad_over_cap = True
                 if _broad_n == -1:
                     # The count FAILED, which is not the same as being large.
-                    # Nothing is known about the scope, so the old behaviour
-                    # is right here: fall back to the aggregate.
+                    # Nothing is known about the scope, so fall back to the
+                    # aggregate: it is the right answer to a question we could
+                    # not ask.
                     st.session_state["map_mode"] = "h3"
                     st.session_state["map_mode_radio"] = "h3"
                     st.session_state["wells_layer_on"] = False
+                    st.session_state["h3_layer_on"] = True
+                elif not st.session_state.get("wells_layer_on"):
+                    # ── DEFAULT TO HEXAGONS, DO NOT OVERRIDE ───────────────
+                    # A broad scope with tens of thousands of wells wants the
+                    # aggregate, and H3 earns that default because CLICKING A
+                    # CELL IS EXACT: the drill filters on the well's own
+                    # h3_r<res>, not on the cell's bounding box, which holds
+                    # ~30% more wells (measured: 3,062 in the box of R5 cell
+                    # 8526a01bfffffff against 2,364 in the hexagon).
+                    #
+                    # The distinction from what this code used to do is the
+                    # whole point: it fills in a layer nobody chose, and does
+                    # not take away one somebody did. Turn Wells on and it
+                    # stays on, capped and reported.
                     st.session_state["h3_layer_on"] = True
 
     _need_wells = (
