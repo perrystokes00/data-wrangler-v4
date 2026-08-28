@@ -904,6 +904,8 @@ def _clear_wells_state() -> None:
     st.session_state.pop("_last_drawings", None)
     st.session_state.pop("_drawn_bounds", None)
     st.session_state.pop("_active_drill_bbox", None)
+    # The clip box goes with the selection it described.
+    st.session_state.pop("_clip_box", None)
     # The camera fits only when its target CHANGES, so the extent just
     # cleared has to stop counting as fitted -- otherwise the next drill of
     # the same area would load its wells and not frame them.
@@ -2743,15 +2745,21 @@ def _h3_cell_center(cell):
 
 
 def _clip_bounds_now():
-    """[[min_lat, min_lon], [max_lat, max_lon]] to clip to, or None.
+    """The DRAWN RECTANGLE to clip to, or None.
 
-    Only when the operator asked for it AND there is something to clip to.
-    A toggle that silently does nothing because no box was drawn is the
-    control-that-looks-broken failure; the caller says so instead.
+    NOT _drawn_bounds. That name means "whatever last moved the camera" --
+    an area selection sets it to the whole continental US and, being
+    oneshot=False, it then persists. Clipping to that is clipping to
+    everything, so the toggle appeared to do nothing at all: reported as
+    "clip is on but it did not do anything when I drew a box", with the box
+    itself detected correctly in the same log.
+
+    _clip_box is set by the rectangle handler and by nothing else, so it
+    means exactly one thing. _active_drill_bbox is the circle equivalent.
     """
     if not st.session_state.get("wm_clip_to_box"):
         return None
-    return _norm_bounds(st.session_state.get("_drawn_bounds")
+    return _norm_bounds(st.session_state.get("_clip_box")
                         or st.session_state.get("_active_drill_bbox"))
 
 
@@ -12368,6 +12376,25 @@ def run(engine=None):
         # directly (both blocks below are separate `if`s, so both layers
         # can draw at once). map_mode is kept only for the non-render logic
         # that still reads it (centroid, broad-scope guard, controls).
+        # ── SAY WHAT THE CLIP RESOLVED TO, ONCE ──────────────────
+        # The per-layer clip lines only print when that layer draws, so with
+        # wells and hexes both off the toggle produced NO output at all and
+        # was indistinguishable from one that had not been read. Reported as
+        # exactly that. This runs whatever is on.
+        _clip_state = _clip_bounds_now()
+        if st.session_state.get("wm_clip_to_box"):
+            if _clip_state:
+                _say("[map] clip ON -> %.4f,%.4f .. %.4f,%.4f"
+                     % (_clip_state[0][0], _clip_state[0][1],
+                        _clip_state[1][0], _clip_state[1][1]))
+            else:
+                # A CONTROL THAT CANNOT ACT MUST SAY SO. Silence here reads
+                # as a broken toggle rather than a missing box.
+                _say("[map] clip ON but no box drawn -- nothing to clip to")
+                _msg.warning(
+                    "🔲 **Clip to selection** is on but nothing has been "
+                    "drawn. Use the rectangle or circle tool, then the map "
+                    "draws only what falls inside it.")
         _show_h3_layer = (not _render_held
                           and st.session_state.get("h3_layer_on", True))
         # Render the Wells block whenever the toggle is on OR a drill selection
@@ -14392,6 +14419,12 @@ def run(engine=None):
                         _max_lon = max(c[0] for c in ring)
 
                         st.session_state.processed_drawings.add(_geom_hash)
+                        # THE BOX, RECORDED AS ITSELF. Set here rather than in
+                        # either branch below so a rectangle means the same
+                        # thing to the clip whether it went on to select cells
+                        # or to drill wells.
+                        st.session_state["_clip_box"] = [
+                            [_min_lat, _min_lon], [_max_lat, _max_lon]]
 
                         # ── A BOX OVER HEXAGONS SELECTS HEXAGONS ────────
                         # "I tried to draw a box over the cells but that did
