@@ -924,6 +924,28 @@ def add_lease_layer(m, engine, show=True, limit=5000, by="owner",
     for r in rows:
         by_owner.setdefault((r.own or _unknown).strip(), []).append(r)
 
+    # ── LEASES GO UNDER EVERYTHING ──────────────────────────────────────
+    # Leaflet draws vector overlays in add order within one pane, and the
+    # geography block runs AFTER the wells and H3 blocks -- so 4,618 filled
+    # polygons landed on top of the wells and hexagons and bled through.
+    #
+    # A PANE, NOT bringToBack(). Draw order is only the default: toggling a
+    # layer off and on in the layer control re-adds it, which puts it back
+    # on top and undoes any one-off reordering. A pane is a standing
+    # z-index, so it survives the toggle. 350 sits below the default
+    # overlayPane (400), where the wells and hexagons draw.
+    #
+    # pointer_events=True IS LOAD-BEARING: folium's CustomPane defaults it
+    # to False, which emits pointerEvents:none -- the pane would take no
+    # clicks at all, silently killing the tooltip and the popup.
+    if not getattr(m, "_dv_lease_pane", False):
+        from folium.map import CustomPane
+        CustomPane("dvleases", z_index=350, pointer_events=True).add_to(m)
+        try:
+            m._dv_lease_pane = True
+        except Exception:
+            pass
+
     drawn = 0
     _legend = []
     # BY SIZE for identity, BY TIME for vintage. Sorting decades by how many
@@ -981,6 +1003,7 @@ def add_lease_layer(m, engine, show=True, limit=5000, by="owner",
         fg = folium.FeatureGroup(name=f"▩ {owner} ({len(feats)})", show=show)
         folium.GeoJson(
             {"type": "FeatureCollection", "features": feats},
+            pane="dvleases",
             style_function=lambda _f, _c=colour: {
                 "color": _c, "weight": 1.6, "opacity": 0.95,
                 "fillColor": _c, "fillOpacity": 0.32},
