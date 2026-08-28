@@ -2544,13 +2544,37 @@ def _qry_h3_grid(_engine, resolution: int = 5,
     view = f"dataview_federation.v_well_density_r{resolution}"
 
     if schema_filter is None:
-        # Cross-schema: sum across the two UNION ALL arms.
-        # A given hex might exist in both schemas (e.g. coastal cells
-        # at low resolutions that span the GOM boundary).
+        # Cross-schema: sum across the UNION ALL arms, MINUS the wells that
+        # appear in more than one of them.
+        #
+        # v_well is dv_well UNION ALL the national reference, and seeding
+        # wells FROM that reference INTO dv_well makes the overlap the normal
+        # case rather than a curiosity: after one county, 28,150 of dv_well's
+        # 28,173 rows existed in both arms and every one was counted twice. A
+        # single R5 cell read 4,728 where 2,364 wells stand. The help text on
+        # the Density source picker already warned that blending makes "a
+        # count nobody can interpret" -- this is that, and it is now
+        # subtractable rather than only avoidable.
+        #
+        # AFFORDABLE BECAUSE dv_well IS THE SMALL SIDE. The duplicate is
+        # always a dv_well row that also exists in the reference, so the
+        # correction is grouped over ~28k rows, not 3.9M: 53 cells, 5.2s
+        # measured, and it is cached like the rest of this query.
+        _cell = f"h3_r{resolution}"
         sql = f"""
-            SELECT h3, SUM(well_count) AS well_count
-            FROM {view}
-            GROUP BY h3
+            SELECT s.h3,
+                   s.well_count - ISNULL(d.dupes, 0) AS well_count
+              FROM (SELECT h3, SUM(well_count) AS well_count
+                      FROM {view} GROUP BY h3) s
+              LEFT JOIN (
+                    SELECT w.{_cell} AS h3, COUNT(*) AS dupes
+                      FROM dataview.dv_well w
+                     WHERE w.{_cell} IS NOT NULL
+                       AND EXISTS (SELECT 1
+                                     FROM dataview_federation.v_well_master_arm m
+                                    WHERE m.uwi = w.uwi)
+                     GROUP BY w.{_cell}) d
+                ON d.h3 = s.h3
         """
         params = {}
     else:
