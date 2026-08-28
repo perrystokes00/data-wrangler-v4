@@ -9135,6 +9135,21 @@ def run(engine=None):
         st.session_state.pop("wm_adv_comp_op", None)
         st.session_state.pop("_zoom_target_label", None)
         st.session_state.pop("ai_filter_spec", None)
+        # ── FREEZE ON BY DEFAULT ───────────────────────────────
+        # A pick and a rebuild are the same signal (see the _ret block), so
+        # unfrozen, reading one popup costs a full re-serialise of the map --
+        # reported as "click a well, the popup appears, the screen greys out".
+        # Panning and zooming were always free; clicking was not, and that is
+        # the interaction people actually make while exploring.
+        #
+        # SEEDED HERE RATHER THAN value=True ON THE TOGGLE. Streamlit scar #1:
+        # a fixed-key widget never re-defaults. Worse, the sub-page persist
+        # loops self-assign every settable key, so a widget carrying BOTH a
+        # value= and a session_state entry raises "created with a default
+        # value but also had its value set via the Session State API" -- the
+        # exact warning this page has already produced once, for wm_near_dist.
+        # setdefault seeds the first entry and never overrides a real choice.
+        st.session_state.setdefault("wm_freeze_map", True)
         st.session_state["_wm_page_entered"] = True
 
     _status = st.empty()
@@ -13704,7 +13719,7 @@ def run(engine=None):
         # Read before the widget draws, which is safe: Streamlit puts a
         # widget's new value into session_state before the script runs, so
         # this sees the CURRENT state of the toggle, not the previous one.
-        if st.session_state.get("wm_freeze_map", False):
+        if st.session_state.get("wm_freeze_map", True):
             _ret = ["all_drawings"]
         # The st_folium call below is the actual long pole — it serializes
         # the whole map to HTML/JS and the browser parses + renders it.
@@ -13778,10 +13793,11 @@ def run(engine=None):
         # it reads as a mode, not an action -- it stays on until turned off.
         _frozen = _rvf.toggle(
             "🔒 Freeze map", key="wm_freeze_map",
-            help="Stop clicks rebuilding the map. Hover still identifies "
-                 "every well and line, and the box / circle tools still "
-                 "select — so you can explore freely and pick in one go. "
-                 "Turn off to click a single well or line open again.")
+            help="ON BY DEFAULT. Stop clicks rebuilding the map. Hover "
+                 "still identifies every well and line, and the box / "
+                 "circle tools still select — so you can explore freely "
+                 "and pick in one go. Turn OFF to click a single well or "
+                 "line open into a scout ticket.")
         if _rvc.button("✗ Clear wells", key="wells_clear_viewport",
                        use_container_width=True,
                        disabled=not _wells_on_map(),
@@ -13908,7 +13924,7 @@ def run(engine=None):
         # worse than the redraw it replaces -- the click looks broken instead
         # of cheap. This sits immediately above the map so it is read before
         # the first click, not after it.
-        if st.session_state.get("wm_freeze_map", False):
+        if st.session_state.get("wm_freeze_map", True):
             st.info("🔒 **Map frozen** — clicks won't open wells or lines, and "
                     "won't rebuild the map. **Hover** to identify anything; "
                     "the **box** and **circle** tools still select. "
