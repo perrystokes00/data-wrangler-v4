@@ -12125,7 +12125,22 @@ def run(engine=None):
                     [lat0 - _zt_half, lon0 - _zt_half],
                     [lat0 + _zt_half, lon0 + _zt_half],
                 ]
-            elif st.session_state.get("map_mode", "none") == "none":
+            elif (st.session_state.get("map_mode", "none") == "none"
+                    and not st.session_state.get("_last_fit_sig")):
+                # AN OPENING VIEW, NOT A RECURRING ONE. The _last_fit_sig
+                # guard is the whole point: without it this fires on EVERY
+                # render where no layer is on, which includes the render
+                # right after "Go to" a saved place. The Go fitted the place
+                # (oneshot, then popped), this re-fitted the lower 48 over the
+                # top with oneshot=False so it then stuck -- reported as "Go
+                # Teapot Clipped zoomed out to North America", and the log
+                # showed both fits one after the other.
+                #
+                # _last_fit_sig is empty only before anything has been framed,
+                # which is exactly "the map just opened". 🎯 Reset view pops
+                # it, so returning to the country framing still works on
+                # demand -- it just stops happening behind the operator.
+                #
                 # NOTHING IS BEING DRAWN, SO FRAME THE COUNTRY. Both layer
                 # toggles start off, and the branches below would still
                 # centroid-zoom onto whatever wells the schema happens to
