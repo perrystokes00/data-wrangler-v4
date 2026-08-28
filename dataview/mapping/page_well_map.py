@@ -817,7 +817,8 @@ def _capture_map_view() -> dict:
     _pills = st.session_state.get("wm_geo_pills")
     if _pills:
         out["pills"] = list(_pills)
-    for _k in ("map_mode", "wells_layer_on", "h3_layer_on", "h3_resolution"):
+    for _k in ("map_mode", "wells_layer_on", "h3_layer_on", "h3_resolution",
+               "wm_clip_to_box", "wm_lease_color_by"):
         _v = st.session_state.get(_k)
         if _v not in (None, False, "none"):
             out[_k] = _v
@@ -2715,6 +2716,77 @@ def _h3_cell_bbox(h3_id: str) -> tuple[float, float, float, float] | None:
     lats = [p[0] for p in boundary]
     lons = [p[1] for p in boundary]
     return min(lats), max(lats), min(lons), max(lons)
+def _h3_cell_center(cell):
+    """Centre of one H3 cell as (lat, lon), or None.
+
+    THE CELL ID IS COERCED AND THE FAILURE IS CONTAINED. h3 parses an id with
+    int(cell, 16), so a null, a NaN or an integer column all raise the same
+    "int() can't convert non-string with explicit base" -- and raising killed
+    the entire density layer for one bad row, reported as "H3 render skipped".
+
+    Module level because two callers need it now: the state/county constraint
+    and the clip-to-selection filter. A second copy of this would be the
+    parallel-worse-version failure this codebase keeps paying for.
+    """
+    _s = str(cell or "").strip()
+    if not _s or _s.lower() == "nan":
+        return None
+    try:
+        return h3.cell_to_latlng(_s)          # h3 v4
+    except AttributeError:
+        try:
+            return h3.h3_to_geo(_s)           # h3 v3
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+def _clip_bounds_now():
+    """[[min_lat, min_lon], [max_lat, max_lon]] to clip to, or None.
+
+    Only when the operator asked for it AND there is something to clip to.
+    A toggle that silently does nothing because no box was drawn is the
+    control-that-looks-broken failure; the caller says so instead.
+    """
+    if not st.session_state.get("wm_clip_to_box"):
+        return None
+    return _norm_bounds(st.session_state.get("_drawn_bounds")
+                        or st.session_state.get("_active_drill_bbox"))
+
+
+def _clip_h3_df(df, bounds):
+    """Keep only hexes whose CENTRE lies in bounds.
+
+    Centre-in-box, matching what a drawn box already means for cell SELECTION
+    (h3.polygon_to_cells) -- so clipping and selecting agree on which cells a
+    box contains. Intersects would disagree with the selection by ~30%.
+    """
+    if df is None or df.empty or not bounds:
+        return df
+    (mnla, mnlo), (mxla, mxlo) = bounds[0], bounds[1]
+    _ctr = df["h3"].map(_h3_cell_center)
+    _nan = float("nan")
+    _la = _ctr.map(lambda p: p[0] if p else _nan)
+    _lo = _ctr.map(lambda p: p[1] if p else _nan)
+    # NaN for a cell that cannot be placed: it fails every comparison and
+    # drops out, which is the honest answer -- a cell we cannot locate
+    # cannot be shown to be inside.
+    return df[(_la >= mnla) & (_la <= mxla)
+              & (_lo >= mnlo) & (_lo <= mxlo)].reset_index(drop=True)
+
+
+def _clip_wells_df(df, bounds):
+    """Keep only wells inside bounds. Coordinates coerced, nulls dropped."""
+    if df is None or df.empty or not bounds:
+        return df
+    if "lat" not in df.columns or "lon" not in df.columns:
+        return df
+    (mnla, mnlo), (mxla, mxlo) = bounds[0], bounds[1]
+    _la = pd.to_numeric(df["lat"], errors="coerce")
+    _lo = pd.to_numeric(df["lon"], errors="coerce")
+    return df[(_la >= mnla) & (_la <= mxla)
+              & (_lo >= mnlo) & (_lo <= mxlo)].reset_index(drop=True)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -12428,32 +12500,13 @@ def run(engine=None):
                             _hbb = _us_geo.bbox(_hst, _hcty)
                             if _hbb:
                                 _mnla, _mnlo, _mxla, _mxlo = _hbb
-                                def _h3_center(_c):
-                                    """Centre of one cell, or None.
-
-                                    THE CELL ID IS COERCED AND THE FAILURE IS
-                                    CONTAINED. h3 parses an id with
-                                    int(cell, 16), so a null, a NaN or an
-                                    integer column all raise the same
-                                    "int() can't convert non-string with
-                                    explicit base" -- and raising HERE killed
-                                    the entire density layer for one bad row,
-                                    reported as "H3 render skipped". Every
-                                    other h3 call on this page already does
-                                    str(); this one did not.
-                                    """
-                                    _s = str(_c or "").strip()
-                                    if not _s or _s.lower() == "nan":
-                                        return None
-                                    try:
-                                        return h3.cell_to_latlng(_s)   # h3 v4
-                                    except AttributeError:
-                                        try:
-                                            return h3.h3_to_geo(_s)    # h3 v3
-                                        except Exception:
-                                            return None
-                                    except Exception:
-                                        return None
+                                # ONE IMPLEMENTATION, at module level: the
+                                # clip filter needs the same hardened parse,
+                                # and a second copy is the parallel-worse-
+                                # version failure this codebase keeps paying
+                                # for. The str() coercion and the contained
+                                # failure live there now.
+                                _h3_center = _h3_cell_center
                                 _ctr = _h3_df["h3"].map(_h3_center)
                                 # NaN for a cell that could not be located: it
                                 # then fails every bbox comparison and drops
@@ -12466,6 +12519,16 @@ def run(engine=None):
                                     (_cla >= _mnla) & (_cla <= _mxla)
                                     & (_clo >= _mnlo) & (_clo <= _mxlo)
                                 ].reset_index(drop=True)
+                    # CLIP AFTER the state/county constraint, not instead of
+                    # it: they answer different questions and both can be on.
+                    # _clip_bounds_now() returns None unless the operator
+                    # asked AND an extent exists.
+                    _clipb = _clip_bounds_now()
+                    if _clipb is not None:
+                        _n_before = len(_h3_df)
+                        _h3_df = _clip_h3_df(_h3_df, _clipb)
+                        _say("[map] clip: hexes %d -> %d"
+                             % (_n_before, len(_h3_df)))
                     if not _h3_df.empty:
                         _phase(50, f"🔶 Rendering {len(_h3_df):,} hexes…")
                         # Selected hexes from session state — same buffer
@@ -12589,6 +12652,12 @@ def run(engine=None):
                         _base_df["cum_gas"] = _ustr.map(lambda u: _prod.get(u, (0, 0))[1])
                     except Exception:
                         pass
+                    _clipb = _clip_bounds_now()
+                    if _clipb is not None:
+                        _n_before = len(_base_df)
+                        _base_df = _clip_wells_df(_base_df, _clipb)
+                        _say("[map] clip: wells %d -> %d"
+                             % (_n_before, len(_base_df)))
                     _add_wells(m, _base_df, exclude_uwis=_vp_excl,
                                ppdm=bool(st.session_state.get("wm_ppdm_symbols")))
                     if st.session_state.get("wm_show_legend", True):
@@ -12762,7 +12831,8 @@ def run(engine=None):
                                 add_lease_layer_file(
                                     m, _lpath, "/app/static/" + LEASE_GEOJSON_NAME,
                                     by=_by, show=True,
-                                    legend=(_lgd.get(_by) if _lg_on else None))
+                                    legend=(_lgd.get(_by) if _lg_on else None),
+                                    clip=_clip_bounds_now())
                                 _drew = int(st.session_state.get("_lease_gj_n") or 0)
                             except Exception as _lfe:
                                 # NOT swallowed: a discarded diagnostic makes
@@ -14085,6 +14155,18 @@ def run(engine=None):
                      "two worth using. Owner is operator_name, which BLM does "
                      "not publish — 34 of 4,618 rows. Status is a single "
                      "value once non-authorized leases are filtered out.")
+            # ── SHOW ONLY WHAT IS IN THE BOX ───────────────────
+            # Selecting cells OUTLINES them and leaves everything else drawn,
+            # which is right for building a selection and wrong for showing
+            # one. This clips the hexes, the wells and the leases to the
+            # drawn extent instead. Captured by _capture_map_view, so a saved
+            # place comes back clipped the way it was saved.
+            st.checkbox(
+                "🔲 Clip to selection", key="wm_clip_to_box",
+                help="Draw only what falls inside the box or circle you "
+                     "drew — hexagons by their centre, wells and leases by "
+                     "position. Needs a drawn extent; with none it says so "
+                     "rather than quietly doing nothing.")
             _ppdm_symbols = st.checkbox(
                 "🛢 PPDM well symbols", key="wm_ppdm_symbols",
                 help="Draw wells as standard PPDM/API symbols (shape = status) "

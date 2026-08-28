@@ -1140,6 +1140,12 @@ def _wkt_geometry(wkt):
 # and the popup in the browser instead.
 LEASE_GEOJSON_NAME = "dv_leases.geojson"
 
+# BUMP WHEN THE FILE FORMAT CHANGES, not only when the data does. The
+# signature exists to decide whether to rebuild; keyed on the data alone, a
+# code change that adds a property serves the old file forever and the new
+# feature is silently missing. v2 added _la/_lo for clip-to-selection.
+LEASE_GEOJSON_FORMAT = 2
+
 
 def lease_data_signature(engine) -> str:
     """Cheap fingerprint of the lease table, for deciding whether to rebuild.
@@ -1154,7 +1160,7 @@ def lease_data_signature(engine) -> str:
             r = con.execute(text(
                 "SELECT COUNT(*), CONVERT(varchar(30), MAX(row_created_date), 126) "
                 "FROM dataview.dv_land_tract WHERE geog IS NOT NULL")).first()
-        return "%s|%s" % (r[0], r[1])
+        return "v%s|%s|%s" % (LEASE_GEOJSON_FORMAT, r[0], r[1])
     except Exception as exc:
         print(f"[geography_layers] lease signature failed: {exc}")
         return ""
@@ -1242,6 +1248,19 @@ def write_lease_geojson(engine, out_dir, limit=200000):
         }
         for k, v in lab.items():
             props["_l_" + k] = v
+        # BBOX CENTRE, for clip-to-selection. Centre-in-box matches what a
+        # drawn box already means for hexagons, so the three layers agree on
+        # what "inside" is instead of each having its own rule.
+        _xs, _ys = [], []
+        _cs = geom.get("coordinates") or []
+        _polys = _cs if geom.get("type") == "MultiPolygon" else [_cs]
+        for _poly in _polys:
+            for _ring in (_poly or []):
+                for _pt in (_ring or []):
+                    _xs.append(_pt[0]); _ys.append(_pt[1])
+        if _xs:
+            props["_lo"] = round((min(_xs) + max(_xs)) / 2.0, 6)
+            props["_la"] = round((min(_ys) + max(_ys)) / 2.0, 6)
         feats.append({"type": "Feature", "geometry": geom, "properties": props})
 
     # Colours assigned exactly as the embedded path assigns them: a ramp for
@@ -1282,6 +1301,17 @@ _LEASE_ON_EACH = """
 function(feature, layer) {
     var p = feature.properties;
     var c = p['_c___BY__'] || '#9aa0a6';
+    // OUTSIDE THE CLIP BOX: hidden, and not clickable. opacity alone leaves
+    // an invisible polygon still swallowing clicks over the wells beneath.
+    var CLIP = __CLIP__;
+    if (CLIP && (p._la < CLIP[0] || p._la > CLIP[2] ||
+                 p._lo < CLIP[1] || p._lo > CLIP[3])) {
+        var gone = {opacity: 0, fillOpacity: 0};
+        feature.properties.style = gone;
+        layer.setStyle(gone);
+        if (layer._path) { layer._path.style.pointerEvents = "none"; }
+        return;
+    }
     var base = {color: c, weight: 1.6, opacity: 0.95,
                 fillColor: c, fillOpacity: 0.32};
     // AND ON THE FEATURE, not only the layer. folium emits its own
@@ -1313,7 +1343,7 @@ function(feature, layer) {
 
 
 def add_lease_layer_file(m, path, url, by="producing", show=True,
-                         legend=None):
+                         legend=None, clip=None):
     """Leases from a SERVED GeoJSON file, styled entirely in the browser.
 
     TWO ARGUMENTS FOR ONE FILE, and they are not interchangeable:
@@ -1340,7 +1370,12 @@ def add_lease_layer_file(m, path, url, by="producing", show=True,
     _gj = _f.GeoJson(
         path, embed=False, pane="dvleases", show=show,
         name="▩ Leases",
-        on_each_feature=_f.JsCode(_LEASE_ON_EACH.replace("__BY__", key)),
+        on_each_feature=_f.JsCode(
+            _LEASE_ON_EACH.replace("__BY__", key).replace(
+                "__CLIP__",
+                ("[%r, %r, %r, %r]" % (clip[0][0], clip[0][1],
+                                       clip[1][0], clip[1][1]))
+                if clip else "null")),
     )
     # The link folium emits must be the BROWSER's, not ours.
     _gj.embed_link = url
