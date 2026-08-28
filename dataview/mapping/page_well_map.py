@@ -12627,6 +12627,7 @@ def run(engine=None):
                      "geo_boundaries": "boundaries", "geo_pipelines": "pipelines",
                      "geo_seismic": "seismic"}
         _geo_on = [k for k in _geo_keys if k in active_db]
+        _say("[map] geo chips on: %s" % (sorted(_geo_on) or "none"))
         # Defined HERE, not inside the try below: it is read ~1,200 lines
         # further down, and with no geography chip on, that block never runs.
         # A name that exists only on some paths is a NameError waiting for
@@ -12676,6 +12677,16 @@ def run(engine=None):
                                                     show=True) or 0
                     if not _drew:
                         _geo_empty.append(_flag_to_label.get(_ak, _ak))
+                    # SAY WHAT THE LAYER DECIDED, TO THE LOG. "No leases"
+                    # took four wrong theories to chase -- chip off, wrong
+                    # extent, hold gate, freeze -- because the only signal
+                    # was a caption that appears just for the ZERO case.
+                    # A layer that drew 322 and a chip that was never
+                    # ticked look identical from outside, and the timing
+                    # cannot separate them either: the whole lease layer
+                    # costs 0.06-0.11s, which is the same as the block
+                    # measured when it is skipped entirely.
+                    _say("[map] geo layer %-14s drew %s" % (_ak, _drew))
                 # Real 2D line paths ride along with the Seismic pill. The
                 # geog layer above holds SURVEY footprints; these are the
                 # individual LINES inside them, which is the thing you
