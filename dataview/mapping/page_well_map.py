@@ -12414,7 +12414,10 @@ def run(engine=None):
                     if _ak == "geo_leases":
                         from dataview.mapping.geography_layers import (
                             add_lease_layer)
-                        _drew = add_lease_layer(m, engine, show=True) or 0
+                        _drew = add_lease_layer(
+                            m, engine, show=True,
+                            by=st.session_state.get("wm_lease_color_by",
+                                                    "owner")) or 0
                     elif _geo_keys[_ak] == "seismic":
                         # None, not an empty set, when nothing was chosen:
                         # empty means "the page asked for none" and would
@@ -13677,6 +13680,17 @@ def run(engine=None):
             _show_legend = st.checkbox(
                 "🏷 Status legend", key="wm_show_legend",
                 help="Show a colour/symbol key for well status on the map")
+            # COLOUR THE LEASES BY SOMETHING THEY HAVE. Owner is the natural
+            # choice and is NULL on every federal lease -- BLM publishes no
+            # lessee -- so colouring by it puts all 288 in one grey pile while
+            # producing status and case status are fully populated on exactly
+            # that data. Hence a choice rather than a constant.
+            st.radio(
+                "🟦 Colour leases by", ["owner", "producing", "status"],
+                key="wm_lease_color_by", horizontal=True,
+                help="Owner comes from operator_name, which BLM leases do not "
+                     "carry. Producing and status come from the BLM case "
+                     "record and are populated there.")
             _ppdm_symbols = st.checkbox(
                 "🛢 PPDM well symbols", key="wm_ppdm_symbols",
                 help="Draw wells as standard PPDM/API symbols (shape = status) "

@@ -745,8 +745,21 @@ def lease_colour(owner):
                              % len(_FALLBACK_COLOURS)]
 
 
-def add_lease_layer(m, engine, show=True, limit=5000):
-    """dv_land_tract coloured by owner, one toggleable group each.
+# What the lease colours can mean. THE DEFAULT IS OWNER AND OFTEN CANNOT BE:
+# BLM publishes no lessee, so operator_name is NULL on every federal lease and
+# colouring by it puts all 288 in one grey pile. The other two are populated on
+# exactly the data the first one is not, which is why this is a choice and not
+# a constant.
+LEASE_COLOUR_BY = {
+    "owner":     ("operator_name", "Unknown owner"),
+    "producing": ("producing_ind", "Unknown status"),
+    "status":    ("lease_status",  "Unknown status"),
+}
+
+
+def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
+    """dv_land_tract coloured by owner (or producing status), grouped for the
+    layer control.
 
     Returns the number of leases drawn.
     """
@@ -754,13 +767,14 @@ def add_lease_layer(m, engine, show=True, limit=5000):
     if not have or "geog" not in have:
         return 0
     _c = lambda n: n if n in have else "NULL"          # noqa: E731
+    _col, _unknown = LEASE_COLOUR_BY.get(by) or LEASE_COLOUR_BY["owner"]
     try:
         with engine.connect() as con:
             rows = con.execute(text(f"""
                 SELECT TOP {int(limit)}
                        {_c('tract_name')}   AS nm,
                        {_c('lease_number')} AS ln,
-                       {_c('operator_name')} AS own,
+                       {_c(_col)}           AS own,
                        {_c('area_km2')}     AS km2,
                        geog.STAsText()      AS wkt
                   FROM dataview.dv_land_tract
@@ -775,7 +789,7 @@ def add_lease_layer(m, engine, show=True, limit=5000):
 
     by_owner = {}
     for r in rows:
-        by_owner.setdefault((r.own or "Unknown owner").strip(), []).append(r)
+        by_owner.setdefault((r.own or _unknown).strip(), []).append(r)
 
     drawn = 0
     for owner in sorted(by_owner, key=lambda o: -len(by_owner[o])):
@@ -783,12 +797,12 @@ def add_lease_layer(m, engine, show=True, limit=5000):
         colour = lease_colour(owner)
         feats = []
         for r in group:
-            ring = _polygon_rings(r.wkt)
-            if not ring:
+            geom = _wkt_geometry(r.wkt)
+            if not geom:
                 continue
             feats.append({
                 "type": "Feature",
-                "geometry": {"type": "Polygon", "coordinates": ring},
+                "geometry": geom,
                 "properties": {
                     "nm": r.nm or "(unnamed)",
                     "ln": r.ln or "",
@@ -856,3 +870,45 @@ def _polygon_rings(wkt):
         if len(pts) >= 4:
             out.append(pts)
     return out or None
+
+
+def _wkt_geometry(wkt):
+    """GeoJSON geometry from POLYGON *or* MULTIPOLYGON WKT. None if neither.
+
+    _polygon_rings returns None for a MULTIPOLYGON -- its ring walker sees the
+    extra nesting level and gives up -- and the caller's `if not ring: continue`
+    turned that into a SILENT DROP. Harmless while dv_land_tract held 34
+    synthetic single-part tracts; not harmless once real BLM leases arrived,
+    where 40 of 288 are MultiPolygon carrying 101 parts between them. A lease
+    serial covering non-contiguous tracts is one legal instrument and the map
+    was drawing none of it.
+    """
+    if not wkt:
+        return None
+    head = wkt.strip().upper()
+    if head.startswith("MULTIPOLYGON"):
+        body = wkt[wkt.find("(") + 1: wkt.rfind(")")]
+        polys, depth, cur = [], 0, ""
+        for ch in body:
+            if ch == "(":
+                depth += 1
+                if depth == 1:
+                    cur = ""
+                    continue
+            if ch == ")":
+                depth -= 1
+                if depth == 0:
+                    polys.append(cur)
+                    continue
+            if depth >= 1:
+                cur += ch
+        coords = []
+        for p in polys:
+            # Each part is the inside of a POLYGON's parentheses, so hand it
+            # back through the single-polygon walker rather than repeating it.
+            rings = _polygon_rings("POLYGON (" + p + ")")
+            if rings:
+                coords.append(rings)
+        return {"type": "MultiPolygon", "coordinates": coords} if coords else None
+    rings = _polygon_rings(wkt)
+    return {"type": "Polygon", "coordinates": rings} if rings else None
