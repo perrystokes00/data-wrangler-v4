@@ -24,6 +24,16 @@
 headless = true
 fileWatcherType = "none"
 
+# STATIC SERVING, for the layers that are files rather than payload.
+# The lease layer serialises 4,618 polygons into the map HTML on EVERY
+# render -- ~4 MB and ~1.5-2.3s each time, the largest single item in a
+# render once real BLM data was loaded. Served from ./static instead, the
+# browser fetches it once and caches it: map HTML 3.95 MB -> ~0, folium
+# render 1.04s -> 0.14s, measured.
+#
+# Files land in ./static and are reachable at /app/static/<name>.
+enableStaticServing = true
+
 [browser]
 # No telemetry from a customer's machine.
 gatherUsageStats = false

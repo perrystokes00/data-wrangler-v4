@@ -12699,14 +12699,65 @@ def run(engine=None):
                 for _ak in _geo_on:
                     _drew = 0
                     if _ak == "geo_leases":
+                        # ── A FILE THE BROWSER CACHES, NOT PAYLOAD ────────
+                        # Embedded, 4,618 leases put 4.8 MB of geometry into
+                        # the map HTML on EVERY rerun and cost 1.5-2.3s of
+                        # folium render -- the largest single item once real
+                        # BLM data was loaded. Served as a static file:
+                        # 0.008 MB and 0.31s, measured, and the browser keeps
+                        # the file across renders.
+                        #
+                        # REBUILT ON A SIGNATURE, not on a timer and not on
+                        # every render. Count plus newest row stamp: a rebuild
+                        # that never fires shows stale leases, one that always
+                        # fires is the cost being removed. Both are silent, so
+                        # the rebuild says so in the log.
                         from dataview.mapping.geography_layers import (
-                            add_lease_layer)
-                        _drew = add_lease_layer(
-                            m, engine, show=True,
-                            by=st.session_state.get("wm_lease_color_by",
-                                                    "producing"),
-                            legend=bool(st.session_state.get(
-                                "wm_show_legend", True))) or 0
+                            add_lease_layer, add_lease_layer_file,
+                            write_lease_geojson, lease_data_signature,
+                            LEASE_GEOJSON_NAME)
+                        _by = st.session_state.get("wm_lease_color_by",
+                                                   "producing")
+                        _lg_on = bool(st.session_state.get("wm_show_legend",
+                                                           True))
+                        # DW_MAP_LEASE_FILE=0 falls back to embedding, so a
+                        # static-serving problem is one env var from a fix
+                        # rather than a redeploy.
+                        _use_file = os.environ.get("DW_MAP_LEASE_FILE", "1") != "0"
+                        _sdir = os.path.join(os.path.dirname(os.path.dirname(
+                            os.path.dirname(os.path.abspath(__file__)))), "static")
+                        _lpath = os.path.join(_sdir, LEASE_GEOJSON_NAME)
+                        _drew = 0
+                        if _use_file:
+                            try:
+                                _sig = lease_data_signature(engine)
+                                if _sig and (
+                                        st.session_state.get("_lease_gj_sig") != _sig
+                                        or not os.path.exists(_lpath)):
+                                    _lpath, _n, _lgd = write_lease_geojson(
+                                        engine, _sdir)
+                                    st.session_state["_lease_gj_sig"] = _sig
+                                    st.session_state["_lease_gj_legend"] = _lgd
+                                    st.session_state["_lease_gj_n"] = _n
+                                    _say("[map] lease geojson rebuilt: %d "
+                                         "feature(s)" % _n)
+                                _lgd = st.session_state.get("_lease_gj_legend") or {}
+                                add_lease_layer_file(
+                                    m, _lpath, "/app/static/" + LEASE_GEOJSON_NAME,
+                                    by=_by, show=True,
+                                    legend=(_lgd.get(_by) if _lg_on else None))
+                                _drew = int(st.session_state.get("_lease_gj_n") or 0)
+                            except Exception as _lfe:
+                                # NOT swallowed: a discarded diagnostic makes
+                                # the next failure undiagnosable, and this
+                                # falls back silently otherwise.
+                                _say("[map] lease file layer failed, embedding "
+                                     "instead: %s" % str(_lfe)[:160])
+                                _use_file = False
+                        if not _use_file:
+                            _drew = add_lease_layer(
+                                m, engine, show=True, by=_by,
+                                legend=_lg_on) or 0
                     elif _geo_keys[_ak] == "seismic":
                         # None, not an empty set, when nothing was chosen:
                         # empty means "the page asked for none" and would

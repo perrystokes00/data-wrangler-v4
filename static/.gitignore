@@ -1,0 +1,3 @@
+# Generated map layers -- rebuilt from the database on demand.
+*.geojson
+*.json

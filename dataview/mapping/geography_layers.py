@@ -1118,3 +1118,233 @@ def _wkt_geometry(wkt):
         return {"type": "MultiPolygon", "coordinates": coords} if coords else None
     rings = _polygon_rings(wkt)
     return {"type": "Polygon", "coordinates": rings} if rings else None
+
+
+# ── Leases as a STATIC FILE rather than payload ─────────────────────────────
+# Measured on 4,618 real BLM leases: embedded, the layer puts ~4 MB of geometry
+# into the map HTML and costs ~1.0s of folium render on EVERY rerun -- the
+# largest single item in a render. Served as a file with embed=False, the map
+# HTML carries a link instead: ~0 MB and 0.14s, and the browser caches the file
+# across renders.
+#
+# ONE FILE SERVES EVERY COLOURING. The colour for all five dimensions is baked
+# into each feature (_c_owner, _c_producing, _c_status, _c_vintage, _c_size),
+# and the JS picks the one named at render time -- so changing the colour-by
+# costs no rebuild, no re-fetch and no new file. Baking a single colour would
+# have made the file a function of the dropdown: a cache key nobody would
+# remember to invalidate, and a stale map is a wrong one.
+#
+# style_function CANNOT be used on this path. folium requires a Python callable
+# and rejects JsCode, and with embed=False there are no local features to call
+# it on. on_each_feature is typed for JsCode and does the styling, the tooltip
+# and the popup in the browser instead.
+LEASE_GEOJSON_NAME = "dv_leases.geojson"
+
+
+def lease_data_signature(engine) -> str:
+    """Cheap fingerprint of the lease table, for deciding whether to rebuild.
+
+    Count plus the newest row stamp. A rebuild that never fires shows stale
+    data; a rebuild on every render is the cost this whole path exists to
+    remove. Both failures are silent, so the signature is deliberately dumb
+    and cheap rather than clever.
+    """
+    try:
+        with engine.connect() as con:
+            r = con.execute(text(
+                "SELECT COUNT(*), CONVERT(varchar(30), MAX(row_created_date), 126) "
+                "FROM dataview.dv_land_tract WHERE geog IS NOT NULL")).first()
+        return "%s|%s" % (r[0], r[1])
+    except Exception as exc:
+        print(f"[geography_layers] lease signature failed: {exc}")
+        return ""
+
+
+def _vintage_label(eff):
+    return "" if not eff else "%ss" % ((int(str(eff)[:4]) // 10) * 10)
+
+
+def _size_label(km2):
+    if km2 is None:
+        return ""
+    ac = float(km2) * 247.105
+    for lim, lbl in ((40, "1. under 40 ac"), (160, "2. 40-160 ac"),
+                     (320, "3. 160-320 ac"), (640, "4. 320-640 ac"),
+                     (1280, "5. 640-1280 ac")):
+        if ac < lim:
+            return lbl
+    return "6. 1280+ ac"
+
+
+def write_lease_geojson(engine, out_dir, limit=200000):
+    """Write every lease to one GeoJSON file, colours for all dimensions baked.
+
+    Returns (path, feature_count, legend) where legend is
+    {by: [(label, colour, n), ...]}, already ordered the way each dimension
+    wants -- by size for the categorical ones, by time or band for the ramps.
+    Built here so the legend and the map cannot disagree, which is the rule the
+    embedded path follows too.
+    """
+    # LOCAL, AND BOTH OF THEM. os is NOT imported at module level in this
+    # file (only folium and sqlalchemy.text are), so os.makedirs/join/
+    # replace below would have raised NameError the first time anyone
+    # built the file -- and only then. The bare-name trap CLAUDE.md opens
+    # with, caught by checking rather than by reading.
+    import json
+    import os
+    have = _table_columns(engine, "dv_land_tract")
+    if not have or "geog" not in have:
+        return None, 0, {}
+    _c = lambda n: n if n in have else "NULL"            # noqa: E731
+    with engine.connect() as con:
+        rows = con.execute(text(f"""
+            SELECT TOP {int(limit)}
+                   {_c('tract_name')}     AS nm,
+                   {_c('lease_number')}   AS ln,
+                   {_c('operator_name')}  AS opr,
+                   {_c('producing_ind')}  AS prd,
+                   {_c('lease_status')}   AS lst,
+                   {_c('effective_date')} AS eff,
+                   {_c('expiry_date')}    AS exp,
+                   {_c('area_km2')}       AS km2,
+                   {_c('province_state')} AS st,
+                   {_c('source')}         AS src,
+                   {_c('quality_note')}   AS qly,
+                   geog.STAsText()        AS wkt
+              FROM dataview.dv_land_tract
+             WHERE geog IS NOT NULL AND ISNULL(active_ind, 'Y') = 'Y'
+        """)).fetchall()
+
+    DIMS = ("owner", "producing", "status", "vintage", "size")
+    feats = []
+    counts = {k: {} for k in DIMS}
+    for r in rows:
+        geom = _wkt_geometry(r.wkt)
+        if not geom:
+            continue
+        lab = {
+            "owner":     _t(r.opr) or "Unknown owner",
+            "producing": _t(r.prd) or "Unknown status",
+            "status":    _t(r.lst) or "Unknown status",
+            "vintage":   _vintage_label(r.eff) or "Unknown vintage",
+            "size":      _size_label(r.km2) or "Unknown size",
+        }
+        for k, v in lab.items():
+            counts[k][v] = counts[k].get(v, 0) + 1
+        props = {
+            "nm": (_t(r.nm) or _t(r.ln) or "(unnamed)"), "ln": _t(r.ln),
+            "lst": _t(r.lst), "prd": _t(r.prd), "eff": _d(r.eff),
+            "exp": _d(r.exp), "opr": _t(r.opr), "st": _t(r.st),
+            "src": _t(r.src), "qly": _t(r.qly),
+            "ac": ("%s ac" % format(int(float(r.km2) * 247.105), ",")
+                   if r.km2 is not None else ""),
+            "km": ("%.2f km2" % float(r.km2) if r.km2 is not None else ""),
+        }
+        for k, v in lab.items():
+            props["_l_" + k] = v
+        feats.append({"type": "Feature", "geometry": geom, "properties": props})
+
+    # Colours assigned exactly as the embedded path assigns them: a ramp for
+    # the ordered dimensions, the CRC hue for identity.
+    legend, cmaps = {}, {}
+    for k in DIMS:
+        if k in _SEQUENTIAL:
+            unk = LEASE_COLOUR_BY[k][1]
+            ordered = sorted(x for x in counts[k] if x != unk)
+            ramp = _SEQUENTIAL[k]
+            n_ord = len(ordered)
+            cmap = {x: ramp[round(i * (len(ramp) - 1) / max(n_ord - 1, 1))]
+                    for i, x in enumerate(ordered)}
+            cmap[unk] = "#9aa0a6"
+            order = ordered + ([unk] if unk in counts[k] else [])
+        else:
+            cmap = {x: lease_colour(x) for x in counts[k]}
+            order = sorted(counts[k], key=lambda x: -counts[k][x])
+        cmaps[k] = cmap
+        legend[k] = [(x, cmap[x], counts[k][x]) for x in order]
+    for f in feats:
+        for k in DIMS:
+            f["properties"]["_c_" + k] = cmaps[k][f["properties"]["_l_" + k]]
+
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, LEASE_GEOJSON_NAME)
+    tmp = path + ".tmp"
+    # WRITE THEN REPLACE. The browser can request this file while it is being
+    # rebuilt, and half a GeoJSON is a layer that fails to parse -- silently,
+    # because a fetch error in the browser never reaches Python.
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"type": "FeatureCollection", "features": feats}, fh)
+    os.replace(tmp, path)
+    return path, len(feats), legend
+
+
+_LEASE_ON_EACH = """
+function(feature, layer) {
+    var p = feature.properties;
+    var c = p['_c___BY__'] || '#9aa0a6';
+    var base = {color: c, weight: 1.6, opacity: 0.95,
+                fillColor: c, fillOpacity: 0.32};
+    // AND ON THE FEATURE, not only the layer. folium emits its own
+    // setStyle(f => f.properties.style) AFTER addData, so a style set only
+    // on the layer here is overwritten with undefined a moment later --
+    // every polygon would fall back to Leaflet's default blue. Writing the
+    // property makes folium's own call apply exactly this style.
+    feature.properties.style = base;
+    layer.setStyle(base);
+    layer.on('mouseover', function(){
+        layer.setStyle({weight: 3, fillOpacity: 0.5}); });
+    layer.on('mouseout', function(){ layer.setStyle(base); });
+    layer.bindTooltip('<b>' + p.nm + '</b><br>' + p['_l___BY__'] +
+                      (p.ac ? '<br>' + p.ac : ''), {sticky: true});
+    var rows = [['Lease', p.nm], ['Lease number', p.ln],
+                ['Status', p.lst], ['Producing', p.prd],
+                ['Effective', p.eff], ['Expires', p.exp],
+                ['Area', p.ac], ['Area (km2)', p.km],
+                ['Operator', p.opr], ['State', p.st],
+                ['Source', p.src], ['Quality', p.qly]];
+    var h = '<table style="font-size:11px;border-collapse:collapse">';
+    for (var i = 0; i < rows.length; i++) {
+        if (!rows[i][1]) { continue; }
+        h += '<tr><td style="color:#64748b;padding-right:8px">' + rows[i][0] +
+             '</td><td>' + rows[i][1] + '</td></tr>';
+    }
+    layer.bindPopup(h + '</table>', {maxWidth: 420});
+}"""
+
+
+def add_lease_layer_file(m, path, url, by="producing", show=True,
+                         legend=None):
+    """Leases from a SERVED GeoJSON file, styled entirely in the browser.
+
+    TWO ARGUMENTS FOR ONE FILE, and they are not interchangeable:
+      path -- where THIS PROCESS reads it from (./static/...)
+      url  -- where the BROWSER fetches it from (/app/static/...)
+
+    folium needs the data even when embed=False: process_data() opens a
+    filename or fetches an http URL regardless, because it derives the
+    layer bounds from it. Only the EMITTED LINK changes. So handing it the
+    browser path raised FileNotFoundError, and handing it an http URL would
+    have made the server fetch its own file over the network. It reads the
+    local file (~0.15s, once per render) and embed_link is then pointed at
+    the URL the browser should use.
+    """
+    import folium as _f
+    if not getattr(m, "_dv_lease_pane", False):
+        from folium.map import CustomPane
+        CustomPane("dvleases", z_index=350, pointer_events=True).add_to(m)
+        try:
+            m._dv_lease_pane = True
+        except Exception:
+            pass
+    key = by if by in LEASE_COLOUR_BY else "producing"
+    _gj = _f.GeoJson(
+        path, embed=False, pane="dvleases", show=show,
+        name="▩ Leases",
+        on_each_feature=_f.JsCode(_LEASE_ON_EACH.replace("__BY__", key)),
+    )
+    # The link folium emits must be the BROWSER's, not ours.
+    _gj.embed_link = url
+    _gj.add_to(m)
+    if legend:
+        _add_lease_legend(m, legend, key)
+    return url
