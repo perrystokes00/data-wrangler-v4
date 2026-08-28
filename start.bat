@@ -163,6 +163,27 @@ REM quietly tails yesterday's log, which looks exactly like an app that
 REM opened a terminal and did not launch -- reported as precisely that.
 call "%~f0" restart
 if errorlevel 1 exit /b 1
+
+REM VERIFY IT ACTUALLY CAME UP BEFORE TAILING. restart reported "Nothing was
+REM running" while a server still held the port, then started a second one
+REM whose pid was never captured -- so dev fell through to the log and sat
+REM there looking like a hang. Tailing a file for a server that did not start
+REM is the same silent failure this action was added to remove.
+set "DWUP="
+for /l %%N in (1,1,20) do (
+    if not defined DWUP (
+        netstat -ano | findstr /r /c:":%PORT% .*LISTENING" >nul 2>&1
+        if not errorlevel 1 set "DWUP=1"
+        if not defined DWUP ping -n 2 127.0.0.1 >nul 2>&1
+    )
+)
+if not defined DWUP (
+    echo.
+    echo ERROR: nothing is listening on port %PORT% after 20 tries.
+    echo   The server did not start. Check %LOGERR% for the traceback,
+    echo   or run "%SELF% run" to see it in this window.
+    exit /b 1
+)
 echo.
 goto :log
 
