@@ -12141,6 +12141,13 @@ def run(engine=None):
         # lists-that-must-agree failure this codebase keeps paying for. One
         # site decides, and _did_fit becomes the honest answer to the only
         # question the JS is asking -- did Python move the camera this render?
+        # SAY WHETHER THE CAMERA MOVED. "it is not zooming to the box"
+        # cannot be answered from a log that records neither the bounds
+        # nor the decision -- and there are three ways to end up not
+        # fitting: no bounds at all, bounds identical to the last fit
+        # (so deliberately skipped), or the JS restoring a saved view
+        # over the top. Only the first two are visible from Python, and
+        # neither said anything.
         if _viewport_bounds is not None:
             _fit_sig = repr([[round(float(v), 6) for v in _p]
                              for _p in _viewport_bounds])
@@ -12148,6 +12155,16 @@ def run(engine=None):
                 st.session_state["_last_fit_sig"] = _fit_sig
                 m.fit_bounds(_viewport_bounds)
                 _did_fit = True
+                _say("[map] fit_bounds %s (oneshot=%s)"
+                     % (_fit_sig, bool(st.session_state.get(
+                        "_drawn_bounds_oneshot"))))
+            else:
+                _say("[map] fit SKIPPED: bounds unchanged since the "
+                     "last fit %s" % _fit_sig)
+        elif st.session_state.get("viewport_uwis") or st.session_state.get(
+                "_h3_cell_uwis"):
+            _say("[map] fit SKIPPED: a selection is active but no "
+                 "bounds were derived (_drawn_bounds is absent)")
 
         # Consume one-shot _drawn_bounds. The area-change auto-zoom sets
         # _drawn_bounds_oneshot=True so the bounds fit the map ONCE on
