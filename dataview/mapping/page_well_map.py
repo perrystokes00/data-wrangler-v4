@@ -279,8 +279,7 @@ def _marks_begin(tag=""):
     _s["_wm_marks"], _s["_wm_calls"] = [], []
     _s["_wm_mark_t0"] = _s["_wm_render_t0"] = _now
     _say("[map] ===== render #%d start  (previous %.2fs, %.1fs in %d renders)"
-          "  %s" % (_n, _prev_total, _s["_wm_render_total"], _n - 1, tag or ""),
-          flush=True)
+         "  %s" % (_n, _prev_total, _s["_wm_render_total"], _n - 1, tag or ""))
 
 
 def _mark(label):
