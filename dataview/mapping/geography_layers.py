@@ -733,6 +733,16 @@ _FALLBACK_COLOURS = ["#d35400", "#2c3e50", "#c2185b", "#00838f", "#5d4037",
                      "#455a64", "#6a1b9a", "#00695c"]
 
 
+def _d(v):
+    """A date as YYYY-MM-DD. Empty when absent, never the word None."""
+    return "" if v is None else str(v)[:10]
+
+
+def _t(v):
+    """A trimmed string, empty when absent. Keeps "None" off the popup."""
+    return "" if v is None else str(v).strip()
+
+
 def lease_colour(owner):
     """A stable colour for an owner, known or not."""
     key = (owner or "").strip().lower()
@@ -755,6 +765,7 @@ LEASE_COLOUR_BY = {
     "producing": ("producing_ind", "Unknown status"),
     "status":    ("lease_status",  "Unknown status"),
     "vintage":   ("effective_date", "Unknown vintage"),
+    "size":      ("area_km2",       "Unknown size"),
 }
 
 # VINTAGE IS SEQUENTIAL, SO IT GETS A RAMP AND NOT THE HASH. lease_colour()
@@ -770,6 +781,31 @@ _VINTAGE_RAMP = [
     "#0b2a52", "#12406f", "#1a568b", "#246ca6", "#3382bc",
     "#4c97cc", "#68abd8", "#87bfe2", "#a6d1ec", "#c4e1f4", "#dcecf9",
 ]
+
+# Size is sequential too, and gets its OWN hue so the two are never confused
+# at a glance: blue reads as time on this map, warm as extent. Dark is BIGGER
+# here, which is the direction the quantity runs -- the opposite convention to
+# vintage on purpose, because "more acres" and "further back in time" are not
+# the same kind of more.
+_SIZE_RAMP = [
+    "#fde6c8", "#f8c98c", "#ee9f4f", "#d97528", "#b2530f", "#7d3708",
+]
+
+# Which options are ORDERED. A hue picked by CRC is right for identity and
+# wrong for a quantity, so these two take a ramp and everything else does not.
+_SEQUENTIAL = {"vintage": _VINTAGE_RAMP, "size": _SIZE_RAMP}
+
+# Acreage bands, ordered by a numeric prefix so the legend and the ramp agree.
+# Fixed land bands rather than quantiles: 40 / 160 / 320 / 640 are the survey
+# subdivisions a landman already reads, and a quantile boundary at 173.4 acres
+# would mean nothing to anyone.
+_SIZE_SQL = ("CASE WHEN area_km2 IS NULL THEN NULL"
+             " WHEN area_km2*247.105 <   40 THEN '1. under 40 ac'"
+             " WHEN area_km2*247.105 <  160 THEN '2. 40-160 ac'"
+             " WHEN area_km2*247.105 <  320 THEN '3. 160-320 ac'"
+             " WHEN area_km2*247.105 <  640 THEN '4. 320-640 ac'"
+             " WHEN area_km2*247.105 < 1280 THEN '5. 640-1280 ac'"
+             " ELSE '6. 1280+ ac' END")
 
 
 def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
@@ -788,19 +824,29 @@ def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
     if by == "vintage" and "effective_date" in have:
         _own_sql = ("CASE WHEN effective_date IS NULL THEN NULL ELSE "
                     "CAST((YEAR(effective_date)/10)*10 AS varchar(4)) + 's' END")
+    elif by == "size" and "area_km2" in have:
+        _own_sql = _SIZE_SQL
     else:
         _own_sql = _c(_col)
-        if by == "vintage":
-            by = "owner"
+        if by in _SEQUENTIAL:
+            by = "owner"          # column absent: fall back, never return 0
     try:
         with engine.connect() as con:
             rows = con.execute(text(f"""
                 SELECT TOP {int(limit)}
-                       {_c('tract_name')}   AS nm,
-                       {_c('lease_number')} AS ln,
-                       {_own_sql}           AS own,
-                       {_c('area_km2')}     AS km2,
-                       geog.STAsText()      AS wkt
+                       {_c('tract_name')}     AS nm,
+                       {_c('lease_number')}   AS ln,
+                       {_own_sql}             AS own,
+                       {_c('area_km2')}       AS km2,
+                       {_c('effective_date')} AS eff,
+                       {_c('expiry_date')}    AS exp,
+                       {_c('lease_status')}   AS lst,
+                       {_c('producing_ind')}  AS prd,
+                       {_c('operator_name')}  AS opr,
+                       {_c('province_state')} AS st,
+                       {_c('source')}         AS src,
+                       {_c('quality_note')}   AS qly,
+                       geog.STAsText()        AS wkt
                   FROM dataview.dv_land_tract
                  WHERE geog IS NOT NULL
                    AND ISNULL(active_ind, 'Y') = 'Y'
@@ -819,10 +865,11 @@ def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
     # BY SIZE for identity, BY TIME for vintage. Sorting decades by how many
     # leases they hold would scatter the ramp through the layer control and
     # throw away the ordering the ramp exists to show.
-    if by == "vintage":
+    if by in _SEQUENTIAL:
+        _ramp = _SEQUENTIAL[by]
         _dec = sorted(k for k in by_owner if k != _unknown)
-        _step = (lambda i: _VINTAGE_RAMP[
-            round(i * (len(_VINTAGE_RAMP) - 1) / max(len(_dec) - 1, 1))])
+        _step = (lambda i: _ramp[
+            round(i * (len(_ramp) - 1) / max(len(_dec) - 1, 1))])
         _cmap = {k: _step(i) for i, k in enumerate(_dec)}
         _cmap[_unknown] = "#9aa0a6"          # neutral, outside the ramp
         _order = _dec + ([_unknown] if _unknown in by_owner else [])
@@ -842,13 +889,27 @@ def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
                 "type": "Feature",
                 "geometry": geom,
                 "properties": {
-                    "nm": r.nm or "(unnamed)",
+                    # tract_name is NULL on every BLM lease, so leading with
+                    # it labelled 4,584 of 4,618 polygons "(unnamed)". The
+                    # lease number is populated on all of them and is what
+                    # the record is actually known by.
+                    "nm": (r.nm or r.ln or "(unnamed)"),
                     "ln": r.ln or "",
                     "own": owner,
                     # Pre-formatted: a GeoJsonTooltip prints the property as
                     # it finds it, and Decimal('5.8671') is not an area.
                     "ac": (f"{float(r.km2) * 247.105:,.0f} ac"
                            if r.km2 is not None else ""),
+                    "km": (f"{float(r.km2):,.2f} km2"
+                           if r.km2 is not None else ""),
+                    "eff": _d(getattr(r, "eff", None)),
+                    "exp": _d(getattr(r, "exp", None)),
+                    "lst": _t(getattr(r, "lst", None)),
+                    "prd": _t(getattr(r, "prd", None)),
+                    "opr": _t(getattr(r, "opr", None)),
+                    "st":  _t(getattr(r, "st", None)),
+                    "src": _t(getattr(r, "src", None)),
+                    "qly": _t(getattr(r, "qly", None)),
                 },
             })
         if not feats:
@@ -861,9 +922,22 @@ def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
                 "fillColor": _c, "fillOpacity": 0.32},
             highlight_function=lambda _f, _c=colour: {
                 "weight": 3, "fillOpacity": 0.5},
+            # HOVER IDENTIFIES, CLICK REPORTS. Two questions, and one control
+            # cannot answer both: a tooltip long enough to hold the record
+            # follows the pointer and hides what is under it. The popup is
+            # pure Leaflet, so it costs nothing -- and, the point here, it
+            # still opens with Freeze map on, where a click never reaches
+            # Python at all.
             tooltip=folium.GeoJsonTooltip(
                 fields=["nm", "own", "ln", "ac"],
                 aliases=["Lease", "Owner", "Number", "Area"], sticky=True),
+            popup=folium.GeoJsonPopup(
+                fields=["nm", "ln", "lst", "prd", "eff", "exp",
+                        "ac", "km", "opr", "st", "src", "qly"],
+                aliases=["Lease", "Lease number", "Status", "Producing",
+                         "Effective", "Expires", "Area", "Area (km2)",
+                         "Operator", "State", "Source", "Quality"],
+                labels=True, max_width=420),
         ).add_to(fg)
         fg.add_to(m)
         drawn += len(feats)

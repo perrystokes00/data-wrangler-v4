@@ -13956,9 +13956,11 @@ def run(engine=None):
             # keeps only Authorized. Two of the four colour nothing.
             st.selectbox(
                 "🟦 Lease colour",
-                ["producing", "vintage", "owner", "status"],
+                ["producing", "vintage", "size", "owner", "status"],
                 key="wm_lease_color_by",
-                help="Producing (3 groups) and Vintage (effective decade, "
+                help="Producing (3 groups), Vintage (effective decade, "
+                     "dark = older) and Size (acreage band, dark = bigger) "
+                     "are populated on every BLM lease. Vintage (effective decade, "
                      "dark = older) are populated on BLM leases and are the "
                      "two worth using. Owner is operator_name, which BLM does "
                      "not publish — 34 of 4,618 rows. Status is a single "
