@@ -8798,8 +8798,20 @@ def _render_saved_places(engine):
     # thing that looked dead stayed dead until you argued with it. Now the
     # state is honest before you touch it: genuinely disabled when there is
     # nothing to save, and the placeholder says which.
-    _can_save = bool(st.session_state.get("_drawn_bounds")
-                     or st.session_state.get("_active_drill_bbox"))
+    # _clip_box FIRST, AND IT IS WHY THIS WORKS AT ALL. A drawn box sets
+    # _drawn_bounds with oneshot=True, and the very next render fits the
+    # camera and POPS it -- so testing _drawn_bounds asked whether a box had
+    # been drawn using a value the camera had already eaten. Reported as "I
+    # redrew the box but save a place did not light up", and it never could.
+    #
+    # ORDER MATTERS BEYOND THAT. _drawn_bounds means "whatever last moved the
+    # camera", which after an area change is the whole continental US -- so
+    # it is the last resort here, not the first. Saving that under a name
+    # would store the country as a place and look like a working save.
+    _save_src = (st.session_state.get("_clip_box")
+                 or st.session_state.get("_active_drill_bbox")
+                 or st.session_state.get("_drawn_bounds"))
+    _can_save = bool(_save_src)
     _pv = st.session_state.get("wm_place_ver", 0)
     # KEY IS VERSIONED, NOT REASSIGNED. Clearing the box after a save by
     # writing st.session_state["wm_place_new"] = "" is illegal -- Streamlit
@@ -8823,8 +8835,10 @@ def _render_saved_places(engine):
         # NORMALISE BEFORE STORING. The fallback is a different shape
         # from the first choice -- see _norm_bounds -- and storing it raw
         # is what put four bare numbers in the file.
-        _b = _norm_bounds(st.session_state.get("_drawn_bounds")
-                          or st.session_state.get("_active_drill_bbox"))
+        # THE SAME SOURCE THE BUTTON WAS ENABLED FROM. Two different
+        # expressions for "the extent to save" is how one of them ends
+        # up storing the continental US.
+        _b = _norm_bounds(_save_src)
         if _b is None:
             st.session_state["wm_place_err"] = _newname.strip()
             st.rerun()
