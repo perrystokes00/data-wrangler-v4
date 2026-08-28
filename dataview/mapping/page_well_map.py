@@ -8723,6 +8723,25 @@ def run(engine=None):
         st.session_state.get("wells_layer_on"),
         st.session_state.get("h3_layer_on")))
 
+    # ── the second-screen watcher, registered FIRST ────────────────────
+    # "The fragment with id ... does not exist anymore - it might have been
+    # removed during a preceding full-app rerun", arriving every two seconds
+    # -- which is exactly this fragment's run_every.
+    #
+    # It used to be called at the very END of the map build. Between there
+    # and here sit 20 early `return`s and 16 st.rerun() calls, and st.rerun()
+    # RAISES: any one of them ends the render before the fragment is
+    # re-registered, while the browser keeps its two-second timer pointed at
+    # the id from the previous run. Opening Documents or Export returns
+    # earlier still.
+    #
+    # A fragment has to be re-created on EVERY run that could follow it, so
+    # it belongs before anything that can end the run -- not after everything
+    # that can. It draws nothing and only stats a file, so the position costs
+    # nothing. Its own guard still applies: with no recorded mtime it returns
+    # immediately, which is the first render's case.
+    _watch_seis_choice()
+
     # ── reclaim Streamlit's top padding ─────────────────────────────────
     # MEASURED, NOT GUESSED: stMainBlockContainer carries 96px of padding
     # before a single element renders, so the map began at 128px. Add a
@@ -13671,8 +13690,10 @@ def run(engine=None):
                 )
         _phase(100)
         _msg.empty()
-        # The stamp is taken at the TOP of the build -- see _skip_folium.
-        _watch_seis_choice()
+        # _watch_seis_choice() USED TO BE CALLED HERE and is now registered at
+        # the top of run(). See the note there: 36 statements between the two
+        # points can end the render early, and each one left the browser
+        # polling a fragment that no longer existed.
 
         st.caption(
             "💡 **Map:** Toggle **Show grid** to see/hide the density heatmap. "
