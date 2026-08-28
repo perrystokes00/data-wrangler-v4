@@ -14532,6 +14532,41 @@ def run(engine=None):
                                     "tray_well_data", {}))
                                 _existing.update(_h3_drill_shadow)
                                 st.session_state["tray_well_data"] = _existing
+                                # ── FRAME WHAT WAS CLICKED ─────────────────
+                                # "it selects the well but then the map zooms
+                                # out to default." In H3 mode with the Wells
+                                # layer off, dff is empty -- so the centroid
+                                # chain lands on `lat0, lon0, zoom0 = 39.5,
+                                # -98.35, 4`, the CONUS default, and NOTHING
+                                # calls fit_bounds. The camera then depends
+                                # entirely on the view-persist JS restoring
+                                # sessionStorage, and when that does not take,
+                                # the map is simply where folium built it: the
+                                # whole country.
+                                #
+                                # A drill should not be relying on a restore
+                                # to stay put. It knows exactly where it went,
+                                # so it says so: the union bbox of the
+                                # SELECTED cells, which also means removing a
+                                # cell re-frames the rest instead of leaving
+                                # the camera on a hexagon that is no longer in
+                                # the selection.
+                                #
+                                # ONE-SHOT, so it frames once and then leaves
+                                # the camera alone -- the same flag the
+                                # area-change auto-zoom uses. Without it every
+                                # later rerun would re-fit and destroy any
+                                # manual zoom, which is a bug this file has
+                                # already been through once.
+                                _bbs = [_h3_cell_bbox(_cc) for _cc in _cells]
+                                _bbs = [_b for _b in _bbs if _b]
+                                if _bbs:
+                                    st.session_state["_drawn_bounds"] = [
+                                        [min(_b[0] for _b in _bbs),
+                                         min(_b[2] for _b in _bbs)],
+                                        [max(_b[1] for _b in _bbs),
+                                         max(_b[3] for _b in _bbs)]]
+                                    st.session_state["_drawn_bounds_oneshot"] = True
                                 st.success(
                                     "🔶 Hex drill: %s R%s cell %s — "
                                     "**%s wells** across **%d cell(s)**.%s"
