@@ -2780,6 +2780,34 @@ def _clip_bounds_now():
         return None
     return _norm_bounds(st.session_state.get("_clip_box")
                         or st.session_state.get("_active_drill_bbox"))
+def _clip_sql(alias="w"):
+    """ AND lat/lon BETWEEN ... for the drawn box, or "" when there is none.
+
+    PUSHING THE BOX INTO THE QUERY, not filtering after it. Clipping the frame
+    after the fetch drew the right map while still pulling every well in scope
+    and throwing most of it away.
+
+    NO INDEX BACKS THIS, and the comment here used to claim one did.
+    dataview.dv_well carries pk_dv_well(uwi), IX_dv_well_h3_r5 and
+    IX_dv_well_h3_r6 -- no lat/lon index at all -- so the predicate is a
+    clustered scan with a cheap filter. Measured at 28,173 rows: 0.033s
+    unconstrained, 0.053s with the box, which is why this is still worth
+    doing (less data crosses the wire and less is built into the map) and
+    also why it is NOT yet the win it would be on a large table.
+
+    NUMBERS ARE FORMATTED, NOT INTERPOLATED RAW. These are floats this module
+    computed from a drawn rectangle, but where_extra is concatenated into SQL,
+    and "it cannot be a string here" is exactly the assumption that stops being
+    true later. %.8f cannot carry anything but a number.
+    """
+    b = _clip_bounds_now()
+    if not b:
+        return ""
+    (mnla, mnlo), (mxla, mxlo) = b[0], b[1]
+    return (" AND %s.surface_latitude  BETWEEN %.8f AND %.8f"
+            " AND %s.surface_longitude BETWEEN %.8f AND %.8f"
+            % (alias, float(mnla), float(mxla),
+               alias, float(mnlo), float(mxlo)))
 
 
 def _clip_h3_df(df, bounds):
@@ -2832,8 +2860,12 @@ def _qry_wells_in_bbox(
       total_count — true count of wells in the bbox (may exceed len(wells))
 
     The total_count tells the UI whether to warn about the cap being hit.
-    The IX_dv_well_lat_lon composite index makes this query fast (sub-second
-    for any reasonable bbox even at 4M scale).
+
+    THE INDEX THIS DOCSTRING NAMED DOES NOT EXIST. It claimed
+    IX_dv_well_lat_lon made the query "sub-second for any reasonable bbox
+    even at 4M scale"; dv_well has only pk_dv_well(uwi) and the h3_r5/h3_r6
+    indexes. The query is a clustered scan, which is fine at 28K rows and is
+    not what the claim promised at 4M. Checked 28 Aug against sys.indexes.
 
     Cache TTL is 300s — bbox queries are user-driven by rectangle drawing,
     so we don't need session-long persistence but want to avoid re-firing
@@ -10067,11 +10099,16 @@ def run(engine=None):
                 # value (default 10,000). Prevents accidentally loading and
                 # rendering the full 500K+ table. The slider lives in the
                 # Wells-mode caption; its value persists in session_state.
+              # THE BOX GOES INTO THE QUERY. Clipping only the frame
+              # still pulled every well in scope and threw most away.
+              _clip_pred = _clip_sql("w")
+              if _clip_pred:
+                  _say("[map] wells query constrained to the drawn box")
               _wells_raw = _qry_wells_bcp(
                     engine, limit=_well_limit,
                     center_lat=_load_center_lat,
                     center_lon=_load_center_lon,
-                    where_extra=_qry_where,
+                    where_extra=_qry_where + _clip_pred,
                 )
             _prog_bar.progress(80)
             _prog_msg.info(f"⏳ Processing {len(_wells_raw):,} wells…")
