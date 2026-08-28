@@ -210,6 +210,35 @@ except ValueError:
     _MAP_TIMER_FLOOR = 0.05
 
 
+def _say(msg):
+    """Print a diagnostic that can NEVER be the thing that breaks the page.
+
+    "Well Map error: 'charmap' codec can't encode character '\\U0001f310'" --
+    the timing instrumentation took down the page it was measuring.
+
+    The phase labels carry emoji ("Rendering map in browser"), _mark prints
+    them, and start.bat now redirects stdout to logs\\dev.out.log. A REDIRECTED
+    stdout on Windows gets the ANSI codepage, not the console's, so print()
+    raised UnicodeEncodeError where the same line had been fine in a console
+    window. Two harmless changes, combining.
+
+    A measurement must not be able to break what it measures. Every print here
+    goes through this, and the fallback degrades the characters rather than the
+    render. sys is deliberately not used: it is NOT imported in this module,
+    and reaching for a bare name that only fails when the line runs is the
+    exact trap CLAUDE.md opens with.
+    """
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        try:
+            print(msg.encode("ascii", "replace").decode("ascii"), flush=True)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _tstate():
     """session_state, or a throwaway dict when there is no script context.
 
@@ -249,7 +278,7 @@ def _marks_begin(tag=""):
     _now = time.perf_counter()
     _s["_wm_marks"], _s["_wm_calls"] = [], []
     _s["_wm_mark_t0"] = _s["_wm_render_t0"] = _now
-    print("[map] ===== render #%d start  (previous %.2fs, %.1fs in %d renders)"
+    _say("[map] ===== render #%d start  (previous %.2fs, %.1fs in %d renders)"
           "  %s" % (_n, _prev_total, _s["_wm_render_total"], _n - 1, tag or ""),
           flush=True)
 
@@ -271,8 +300,8 @@ def _mark(label):
         {"step": str(label)[:70], "seconds": round(_dt, 3),
          "cumulative": round(_cum, 3)})
     if _dt >= _MAP_TIMER_FLOOR:
-        print("[map] %8.3fs  %-44s (cum %6.2fs)"
-              % (_dt, str(label)[:44], _cum), flush=True)
+        _say("[map] %8.3fs  %-44s (cum %6.2fs)"
+              % (_dt, str(label)[:44], _cum))
 
 
 def _timed(name, fn):
@@ -297,7 +326,7 @@ def _timed(name, fn):
                         {"call": name, "seconds": round(_dt, 3)})
                 except Exception:
                     pass
-                print("[map] %8.3fs  %s()" % (_dt, name), flush=True)
+                _say("[map] %8.3fs  %s()" % (_dt, name))
     return _w
 
 
@@ -393,8 +422,8 @@ def _install_timers():
             _g[_name] = _wrapped
             _n_wrapped += 1
     if _n_wrapped:
-        print("[map] timing enabled on %d function(s); DW_MAP_TIMERS=0 to "
-              "switch off" % _n_wrapped, flush=True)
+        _say("[map] timing enabled on %d function(s); DW_MAP_TIMERS=0 to "
+              "switch off" % _n_wrapped)
 
 
 # ── SAVED PLACES ───────────────────────────────────────────────────────────
@@ -8285,8 +8314,7 @@ def _render_seed_reference(engine):
         except Exception as _ce:
             st.warning("Could not read the master: %s" % str(_ce)[:160])
             import traceback as _tb
-            print("[map] seed county list failed:\n%s" % _tb.format_exc(),
-                  flush=True)
+            _say("[map] seed county list failed:\n%s" % _tb.format_exc())
             return
         if not _cts:
             st.info("The reference master holds no located wells for %s."
@@ -8441,8 +8469,8 @@ def _render_seed_reference(engine):
             except Exception as _e:
                 st.error("Load failed: %s" % str(_e)[:300])
                 import traceback as _tb
-                print("[map] seed reference wells failed:\n%s"
-                      % _tb.format_exc(), flush=True)
+                _say("[map] seed reference wells failed:\n%s"
+                      % _tb.format_exc())
 
 
 def _seed_counties_cached(_engine, state):
@@ -12176,8 +12204,8 @@ def run(engine=None):
                     # discarded diagnostic is the failure mode CLAUDE.md opens
                     # with; the toast stays short, the log gets the stack.
                     import traceback as _tb
-                    print("[map] H3 render skipped: %s\n%s"
-                          % (_e, _tb.format_exc()), flush=True)
+                    _say("[map] H3 render skipped: %s\n%s"
+                          % (_e, _tb.format_exc()))
                     st.warning(f"H3 render skipped: {_e}  (traceback in the log)")
                     # If H3 fails, drop the layer (safe — no heavy load); the
                     # user can re-enable it or turn on Wells for the full list.

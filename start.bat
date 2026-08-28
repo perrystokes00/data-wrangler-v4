@@ -72,6 +72,15 @@ set "LOGDIR=%~dp0logs"
 set "LOGOUT=%LOGDIR%\dev.out.log"
 set "LOGERR=%LOGDIR%\dev.err.log"
 
+REM UTF-8 ON STDOUT, BECAUSE REDIRECTION CHANGES THE ENCODING. A console gets
+REM one encoder; a REDIRECTED stdout gets the ANSI codepage (cp1252 here). The
+REM map's phase labels carry emoji, so the moment this script started writing
+REM to a file instead of a window, print() raised UnicodeEncodeError and took
+REM the page down with it -- "Well Map error: 'charmap' codec can't encode
+REM character '\U0001f310'". The code no longer depends on this (see _say in
+REM page_well_map), but without it the LOG holds "?" where the labels were.
+set "PYTHONIOENCODING=utf-8"
+
 REM A repo venv if setup.ps1 has been run, else the PATH python. Never the
 REM installed embedded build — see above.
 set "PY=%~dp0.venv\Scripts\python.exe"
