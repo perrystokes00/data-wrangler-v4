@@ -12381,6 +12381,11 @@ def run(engine=None):
         # wells and hexes both off the toggle produced NO output at all and
         # was indistinguishable from one that had not been read. Reported as
         # exactly that. This runs whatever is on.
+        if st.session_state.pop("_clip_hint", False) and not (
+                st.session_state.get("wm_clip_to_box")):
+            _msg.info(
+                "🔲 Box saved. Tick **Clip to selection** in "
+                "🏷 Map display to draw only what is inside it.")
         _clip_state = _clip_bounds_now()
         if st.session_state.get("wm_clip_to_box"):
             if _clip_state:
@@ -12392,9 +12397,10 @@ def run(engine=None):
                 # as a broken toggle rather than a missing box.
                 _say("[map] clip ON but no box drawn -- nothing to clip to")
                 _msg.warning(
-                    "🔲 **Clip to selection** is on but nothing has been "
-                    "drawn. Use the rectangle or circle tool, then the map "
-                    "draws only what falls inside it.")
+                    "🔲 **Clip to selection** is on and waiting — "
+                    "**leave it on** and draw a box now with the rectangle "
+                    "tool. The clip applies to the box you draw NEXT; "
+                    "turning it off first is why nothing clips.")
         _show_h3_layer = (not _render_held
                           and st.session_state.get("h3_layer_on", True))
         # Render the Wells block whenever the toggle is on OR a drill selection
@@ -14425,6 +14431,17 @@ def run(engine=None):
                         # or to drill wells.
                         st.session_state["_clip_box"] = [
                             [_min_lat, _min_lon], [_max_lat, _max_lon]]
+                        # CLOSE THE LOOP FROM THE OTHER SIDE. Ticking Clip
+                        # before a box exists warns and does nothing, so the
+                        # natural move is to untick it and draw -- which is
+                        # exactly backwards, and is what happened: three
+                        # renders of "clip ON but no box", then the toggle
+                        # went off, then the box arrived. Saying it here
+                        # means either order gets the operator there.
+                        if not st.session_state.get("wm_clip_to_box"):
+                            _say("[map] box recorded; ⚠ Clip to selection is "
+                                 "OFF so nothing will be clipped")
+                            st.session_state["_clip_hint"] = True
 
                         # ── A BOX OVER HEXAGONS SELECTS HEXAGONS ────────
                         # "I tried to draw a box over the cells but that did
