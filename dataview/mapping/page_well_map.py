@@ -8265,9 +8265,16 @@ def _render_seed_reference(engine):
                     "county at a time, and the county list comes from it.")
             return
         try:
-            _cts = _sfm.counties(_engine_for_seed(engine), _st_code)
+            # A CONNECTION, not the Engine. SQLAlchemy 2.0 removed
+            # Engine.execute, so passing the engine here raised "'Engine'
+            # object has no attribute 'execute'" -- and every other function
+            # in seed_from_master takes a connection too.
+            _cts = _seed_counties_cached(_engine_for_seed(engine), _st_code)
         except Exception as _ce:
             st.warning("Could not read the master: %s" % str(_ce)[:160])
+            import traceback as _tb
+            print("[map] seed county list failed:\n%s" % _tb.format_exc(),
+                  flush=True)
             return
         if not _cts:
             st.info("The reference master holds no located wells for %s."
@@ -8392,6 +8399,24 @@ def _render_seed_reference(engine):
                 import traceback as _tb
                 print("[map] seed reference wells failed:\n%s"
                       % _tb.format_exc(), flush=True)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _seed_counties_cached(_engine, state):
+    """[(county, n)] for a state, cached.
+
+    CACHED BECAUSE AN EXPANDER'S BODY ALWAYS RUNS. Streamlit executes what is
+    inside st.expander whether or not it is open, so an uncached call here is
+    a GROUP BY over 3.9M master rows on EVERY render of the map -- roughly
+    three seconds added to a page that already renders fifty times a session,
+    paid by everyone who never opens the panel.
+
+    The leading underscore on _engine keeps Streamlit from trying to hash it;
+    `state` is what actually varies.
+    """
+    from dataview.import_data import seed_from_master as _sfm
+    with _engine.connect() as _cx:
+        return _sfm.counties(_cx, state)
 
 
 def _engine_for_seed(engine):
