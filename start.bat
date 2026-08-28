@@ -155,6 +155,14 @@ REM Follow what the BACKGROUND server is printing. Both streams, merged and
 REM tagged, because the interesting lines are split across them: Streamlit's
 REM warnings land on stderr and the map's timing lines on stdout.
 :log
+REM UTF-8 BOTH WAYS OR THE LOG IS UNREADABLE. The server writes UTF-8
+REM (PYTHONIOENCODING above, because a REDIRECTED stdout otherwise gets
+REM cp1252 and the emoji in the phase labels crashed print()). Windows
+REM PowerShell 5.1 then READS it back as the ANSI codepage, so the same
+REM emoji came out as "M-pM-^_M-^TM-^6" -- correct in the file, mangled only
+REM in the window. chcp sets the console to UTF-8 so it can display them,
+REM -Encoding UTF8 tells Get-Content how to decode. Both are needed.
+chcp 65001 >nul 2>&1
 if not exist "%LOGOUT%" if not exist "%LOGERR%" (
     echo No log yet at %LOGDIR%.
     echo   "%SELF% start" writes one; "%SELF% run" prints to the window instead.
@@ -162,12 +170,12 @@ if not exist "%LOGOUT%" if not exist "%LOGERR%" (
 )
 if /i "%~2"=="all" (
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-        "Get-Content -Path '%LOGOUT%','%LOGERR%' -ErrorAction SilentlyContinue"
+        "Get-Content -Encoding UTF8 -Path '%LOGOUT%','%LOGERR%' -ErrorAction SilentlyContinue"
     exit /b 0
 )
 echo Following %LOGDIR%\dev.*.log  -  Ctrl+C to stop watching (server keeps running).
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "Get-Content -Path '%LOGOUT%','%LOGERR%' -Tail 40 -Wait -ErrorAction SilentlyContinue"
+    "Get-Content -Encoding UTF8 -Path '%LOGOUT%','%LOGERR%' -Tail 40 -Wait -ErrorAction SilentlyContinue"
 exit /b 0
 
 REM ---------------------------------------------------------------------------
