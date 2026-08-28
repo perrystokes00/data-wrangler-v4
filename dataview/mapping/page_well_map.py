@@ -690,6 +690,14 @@ def _go_to_place(bounds) -> None:
         dict(bounds.get("view") or {}) if isinstance(bounds, dict) else {})
     st.session_state["_drawn_bounds"] = _b
     st.session_state["_drawn_bounds_oneshot"] = True
+    # AND THE CLIP BOX, because a named place IS a box somebody drew. The
+    # saved view can carry wm_clip_to_box=True, and _clip_bounds_now() reads
+    # _clip_box -- deliberately NOT _drawn_bounds, which means "whatever last
+    # moved the camera" and is the whole continental US after an area change.
+    # Without this line a place saved WITH the clip on came back with the
+    # toggle on, no box, and nothing clipped: the feature silently absent in
+    # exactly the state that was saved to preserve it.
+    st.session_state["_clip_box"] = _b
     # FIT THIS EXACTLY. The fit path pads _drawn_bounds by 15% a side so a
     # data-derived extent is not flush against the edge; on a box the user
     # drew and named, that padding is what drops the recalled view a zoom
