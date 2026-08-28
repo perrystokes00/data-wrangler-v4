@@ -8393,7 +8393,18 @@ def _render_seed_reference(engine):
                            "coordinates, so they agree with the point and "
                            "`h3_refresh` is not needed for these rows.")
                 st.session_state.pop("_seed_counts", None)
-                st.cache_data.clear()      # the wells query is cached
+                # EVERY well cache, because 27 of this page's 43 cached
+                # functions read dv_well and a stale one would report 1,373
+                # wells after inserting 8,960. The county list survives it --
+                # see _seed_counties_cached -- because it comes from the
+                # master, which this insert did not touch, and re-reading it
+                # cost 4.2s on the render right after a load.
+                #
+                # The NEXT render is cold and will be slow; that is the price
+                # of not showing a stale count, and it is paid once.
+                st.cache_data.clear()
+                st.info("Caches cleared — the next map render rebuilds from "
+                        "the database and will take a few seconds.")
             except Exception as _e:
                 st.error("Load failed: %s" % str(_e)[:300])
                 import traceback as _tb
@@ -8401,22 +8412,35 @@ def _render_seed_reference(engine):
                       % _tb.format_exc(), flush=True)
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def _seed_counties_cached(_engine, state):
-    """[(county, n)] for a state, cached.
+    """[(county, n)] for a state, held in session_state.
 
     CACHED BECAUSE AN EXPANDER'S BODY ALWAYS RUNS. Streamlit executes what is
     inside st.expander whether or not it is open, so an uncached call here is
-    a GROUP BY over 3.9M master rows on EVERY render of the map -- roughly
-    three seconds added to a page that already renders fifty times a session,
-    paid by everyone who never opens the panel.
+    a GROUP BY over 3.9M master rows on EVERY render of the map -- 4.2s
+    measured, on a page that renders about fifty times a session, paid by
+    everyone who never opens the panel.
 
-    The leading underscore on _engine keeps Streamlit from trying to hash it;
-    `state` is what actually varies.
+    SESSION STATE, NOT @st.cache_data, AND THAT IS THE POINT. Seeding wells
+    ends with st.cache_data.clear(), which is the honest thing to do -- 27 of
+    this page's 43 cached functions read dv_well, and a stale one would report
+    1,373 wells after inserting 8,960, which is the "wrong is worse than
+    missing" case. But this list comes from the MASTER, which inserting into
+    dv_well cannot change, and it is the single most expensive entry in the
+    cache. Clearing it made the render after a load pay 4.2s for nothing.
+    Kept out of that blast radius instead of narrowing the clear, because a
+    list of "caches a well insert invalidates" is one more list that has to
+    agree with every future @st.cache_data on this page.
     """
     from dataview.import_data import seed_from_master as _sfm
+    _key = "_seed_counties_%s" % state
+    _hit = st.session_state.get(_key)
+    if _hit is not None:
+        return _hit
     with _engine.connect() as _cx:
-        return _sfm.counties(_cx, state)
+        _out = _sfm.counties(_cx, state)
+    st.session_state[_key] = _out
+    return _out
 
 
 def _engine_for_seed(engine):
