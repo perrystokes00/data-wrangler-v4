@@ -8369,13 +8369,34 @@ def _render_seed_reference(engine):
                 _eng = _engine_for_seed(engine)
                 with st.spinner("Reading the master…"):
                     with _eng.connect() as _cx:
+                        # REFUSE BEFORE READING 9,000 ROWS, not after. An
+                        # unregistered code fails on the FK at insert time,
+                        # by which point the work is done and the message is
+                        # a constraint violation instead of a sentence.
+                        _ok, _reg = _sfm.validate_source(_cx, _sfm.SEED_SOURCE)
+                        if not _ok:
+                            st.error(
+                                "`%s` is not registered in `dv_r_source`, so "
+                                "these wells cannot be stamped with it. "
+                                "Register it in the Reference Tables app "
+                                "first — a loader never seeds a domain value. "
+                                "Registered: %s"
+                                % (_sfm.SEED_SOURCE, ", ".join(_reg)))
+                            return
                         _rows = _sfm.scope_rows(_cx, limit=_WELLS_LOAD_CAP,
                                                 **_scope)
                         _rep = _sfm.sanitise_fk(_cx, _rows)
                 with st.spinner("Inserting %s wells…" % format(len(_rows), ",")):
-                    _n, _present = _sfm.seed(_eng, _rows)
-                st.success("Inserted **%s** wells from %s. %s were already here."
-                           % (format(_n, ","), _what, format(_present, ",")))
+                    # SOURCE STAMPED. Seeded with source NULL, these wells were
+                    # invisible to every query filter keyed on source -- present,
+                    # correctly keyed, in scope, and matching nothing.
+                    _n, _present = _sfm.seed(_eng, _rows,
+                                             source=_sfm.SEED_SOURCE)
+                st.success(
+                    "Inserted **%s** wells from %s, stamped `source = %s`. "
+                    "%s were already here and were left alone."
+                    % (format(_n, ","), _what, _sfm.SEED_SOURCE,
+                       format(_present, ",")))
                 # SAY WHAT WAS DROPPED. A code the reference table does not
                 # hold is set to NULL rather than failing the row -- silently
                 # blanking a column the operator can see in the source is the

@@ -36,10 +36,13 @@ def main(argv=None):
     ap.add_argument("--server", default=r"localhost\SQLEXPRESS")
     ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--driver", default="ODBC Driver 17 for SQL Server")
-    ap.add_argument("--source", default=None,
-                    help="dv_r_source code to stamp. Must already be registered; "
-                         "omitted leaves source NULL, which is what the other "
-                         "Teapot wells carry.")
+    ap.add_argument("--source", default=sfm.SEED_SOURCE,
+                    help="dv_r_source code to stamp (default %(default)s). Must "
+                         "already be registered -- a loader never seeds a domain "
+                         "value. Pass --source '' to leave it NULL, which is what "
+                         "this did before REF_WELLS existed: the wells then match "
+                         "no query filter keyed on source, which reads as 'none "
+                         "of the wells matched' and is not a key problem at all.")
     ap.add_argument("--created-by", default=sfm.CREATED_BY,
                     help="row_created_by stamp. Says these wells came from the "
                          "reference master, not from a loaded file.")

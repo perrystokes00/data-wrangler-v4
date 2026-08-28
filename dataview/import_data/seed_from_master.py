@@ -98,6 +98,21 @@ CHILDREN = [("stg.dv_well_formation_top", "API_NUMBER"),
 
 CREATED_BY = "SEED_FROM_WELL_REF"
 
+# dv_r_source code stamped on a seeded well. Registered by Perry 27 Aug 2026.
+#
+# WHY IT MATTERS MORE THAN IT LOOKS. These wells went in with source NULL, and
+# every query filter keyed on source then returned nothing for them -- 5,480
+# wells present, correctly keyed, inside the scope, and invisible. The report
+# was "none of the wells matched", which reads as a UWI failure and is not
+# one: UWI matching was sound (14 chars both sides, no duplicates, no prefix
+# collisions). A row that came from somewhere should say so.
+#
+# STILL REFUSED IF UNREGISTERED. validate_source() is not skipped because this
+# is a constant -- a database without the code registered gets a clear refusal
+# rather than an FK error, which is the same rule the module applies to
+# well_type and well_status.
+SEED_SOURCE = "REF_WELLS"
+
 # THE ROW'S OWN KEY, not the parent's. Counting repeats of the PARENT key says
 # 41,983 of 42,059 stations are duplicates, because a well legitimately has
 # thousands of stations -- a confidently wrong number of exactly the kind this
