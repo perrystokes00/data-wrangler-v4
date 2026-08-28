@@ -9594,7 +9594,7 @@ def run(engine=None):
         and (not _sc_st_now or _sc_st_now == "— all states —")
     )
     WELLS_TOGGLE_CAP = 10000
-    _broad_forced_h3 = False
+    _broad_over_cap = False
     if _broad_scope and not _uwi_filter_active:
         if (st.session_state.get("map_mode") == "wells"
                 or st.session_state.get("map_mode_radio") == "wells"
@@ -9608,12 +9608,31 @@ def run(engine=None):
             except Exception:
                 _broad_n = -1
             if _broad_n == -1 or _broad_n >= WELLS_TOGGLE_CAP:
-                st.session_state["map_mode"] = "h3"
-                st.session_state["map_mode_radio"] = "h3"
-                # Too broad to load individual wells — force H3 on, Wells off.
-                st.session_state["wells_layer_on"] = False
-                st.session_state["h3_layer_on"] = True
-                _broad_forced_h3 = True
+                # ── WARN, DO NOT OVERRIDE ──────────────────────────────
+                # This used to switch Wells OFF and H3 ON. Reported as "when
+                # I turn on wells it starts to draw but then turns on
+                # hexagons" -- a control arguing with the person using it,
+                # which is worse than a slow map.
+                #
+                # It was written when nothing stood between the browser and
+                # 28,000 markers. _WELLS_DRAW_CAP is that something now: the
+                # layer draws at most 5,000 and says how many it did not.
+                # So the volume is already handled, and taking the toggle
+                # away solves a problem twice while making the page
+                # unpredictable.
+                #
+                # The count still matters, so it is still SAID -- see the
+                # caption below, which now reports rather than announces a
+                # decision already taken.
+                _broad_over_cap = True
+                if _broad_n == -1:
+                    # The count FAILED, which is not the same as being large.
+                    # Nothing is known about the scope, so the old behaviour
+                    # is right here: fall back to the aggregate.
+                    st.session_state["map_mode"] = "h3"
+                    st.session_state["map_mode_radio"] = "h3"
+                    st.session_state["wells_layer_on"] = False
+                    st.session_state["h3_layer_on"] = True
 
     _need_wells = (
         _has_real_selection
@@ -9622,8 +9641,16 @@ def run(engine=None):
             _uwi_filter_active   # explicit UWI lookup — allowed at any scope
             or _data_filter_active  # has_* is just as narrow: same bypass
             or (
-                # small dataset at broad scope: guard let it through, so plot
-                _broad_scope and not _broad_forced_h3
+                # BROAD SCOPE NO LONGER SUPPRESSES THE LOAD. This read
+                # `not _broad_over_cap`, which paired with the old
+                # forced switch. With the switch gone the flag is only
+                # advisory, and leaving it here would make the Wells
+                # toggle look like it worked while loading nothing --
+                # a control that appears to work and does not, which is
+                # worse than one that is absent. The wells_layer_on test
+                # below is the real gate, and the count-failed fallback
+                # clears it explicitly.
+                _broad_scope
                 and (st.session_state.get("map_mode", "none") == "wells"
                      or st.session_state.get("wells_layer_on"))
             )
@@ -11585,10 +11612,18 @@ def run(engine=None):
         with _mode_help:
             if _broad_scope and not _uwi_filter_active:
                 st.caption(
-                    "🌎 **All states** — only 🔶 H3 density is available at this "
-                    "scope; the individual-well list is too broad to load. "
-                    "Pick a state in **Constrain to** to enable 📍 Wells."
-                    + ("  ·  *Wells was switched to H3.*" if _broad_forced_h3 else "")
+                    # REPORTS, RATHER THAN ANNOUNCING A DECISION ALREADY MADE.
+                    # The old wording ("only H3 is available") described a
+                    # switch this code had just flipped for you. Wells now
+                    # stays where you put it and the draw cap bounds the cost,
+                    # so the caption's job is to say what the scope holds.
+                    "🌎 **All states** — a broad scope. 📍 Wells draws at most "
+                    "%s markers here; 🔶 H3 density aggregates every well. "
+                    "Pick a state in **Constrain to** to narrow it."
+                    % format(_WELLS_DRAW_CAP, ",")
+                    + ("  ·  *Well count unavailable — fell back to H3.*"
+                       if _broad_over_cap and not st.session_state.get(
+                           "wells_layer_on") else "")
                 )
             elif _new_mode == "h3":
                 st.caption(
