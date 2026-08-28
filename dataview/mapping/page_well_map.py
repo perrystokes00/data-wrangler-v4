@@ -888,6 +888,14 @@ def _clear_wells_state() -> None:
     st.session_state["viewport_uwis"] = []
     st.session_state["viewport_gom_wells"] = []
     st.session_state["processed_drawings"] = set()
+    # The accumulated hexagon selection goes with them. viewport_uwis is
+    # REBUILT from _h3_cell_uwis on the next cell click, so clearing the list
+    # without clearing its source would put every previously-clicked cell
+    # straight back -- and selected_h3_cells would keep drawing outlines
+    # around a selection the operator just cleared.
+    st.session_state.pop("_h3_cell_uwis", None)
+    st.session_state.pop("selected_h3_cells", None)
+    st.session_state.pop("_last_h3_click", None)
     # The saved-place outline and the retained geometry go too: "clear the
     # wells" plainly includes the box that selected them, and leaving the
     # outline behind would draw a selection that no longer exists.
@@ -14473,8 +14481,50 @@ def run(engine=None):
                                     _h3_drill_shadow[_key] = _r
 
                             if _h3_drilled_uwis:
-                                st.session_state["viewport_uwis"] = \
-                                    _h3_drilled_uwis
+                                # ── CELLS ACCUMULATE ───────────────────────
+                                # This assigned viewport_uwis outright, so
+                                # each click threw the previous cell away and
+                                # a two-hexagon selection was impossible. The
+                                # highlight machinery for a multi-select was
+                                # already here -- _add_h3_layer takes a
+                                # selected_set and outlines those cells -- and
+                                # nothing populated it. Now the click does.
+                                #
+                                # Kept per cell rather than as one merged list
+                                # so a SECOND click on the same hexagon can
+                                # take it back out again: a multi-select you
+                                # cannot undo is a trap, and rebuilding the
+                                # union from the parts is exact where
+                                # subtracting a set of uwis would not be --
+                                # two adjacent cells can share no well, but a
+                                # well removed from one must not vanish from
+                                # another that also holds it.
+                                _cells = dict(st.session_state.get(
+                                    "_h3_cell_uwis", {}))
+                                if _clicked_h3 in _cells:
+                                    _cells.pop(_clicked_h3, None)
+                                    _verb = "removed"
+                                else:
+                                    _cells[_clicked_h3] = _h3_drilled_uwis
+                                    _verb = "added"
+                                st.session_state["_h3_cell_uwis"] = _cells
+                                st.session_state["selected_h3_cells"] = \
+                                    list(_cells)
+                                # Union, in click order, deduplicated: a well
+                                # sits in exactly one cell per resolution, but
+                                # the GOM branch can contribute the same well
+                                # twice, and a repeated uwi is a repeated row
+                                # in the tray.
+                                _seen, _union = set(), []
+                                for _cu in _cells.values():
+                                    for _u in _cu:
+                                        if _u not in _seen:
+                                            _seen.add(_u)
+                                            _union.append(_u)
+                                _over = len(_union) > _MAX_H3
+                                if _over:
+                                    _union = _union[:_MAX_H3]
+                                st.session_state["viewport_uwis"] = _union
                                 # Merge into the tray-shadow cache so
                                 # subsequent renders can pull full well
                                 # dicts without re-querying
@@ -14483,10 +14533,19 @@ def run(engine=None):
                                 _existing.update(_h3_drill_shadow)
                                 st.session_state["tray_well_data"] = _existing
                                 st.success(
-                                    f"🔶 Hex drill: "
-                                    f"{len(_h3_drilled_uwis):,} wells in "
-                                    f"R{_h3_res_active} cell {_clicked_h3}"
-                                )
+                                    "🔶 Hex drill: %s R%s cell %s — "
+                                    "**%s wells** across **%d cell(s)**.%s"
+                                    % (_verb, _h3_res_active, _clicked_h3,
+                                       format(len(_union), ","), len(_cells),
+                                       ("  Click a selected cell again to "
+                                        "remove it; ✗ Clear wells resets."
+                                        if len(_cells) == 1 else "")))
+                                if _over:
+                                    st.warning(
+                                        "Selection capped at %s wells — the "
+                                        "cells hold more. Remove a cell or "
+                                        "drop to a finer resolution."
+                                        % format(_MAX_H3, ","))
                                 _handled_as_cell = True
                                 st.rerun()
                             else:
