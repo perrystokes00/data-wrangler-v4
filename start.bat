@@ -117,11 +117,13 @@ if /i "%ACTION%"=="stop"    goto :stop
 if /i "%ACTION%"=="restart" goto :restart
 if /i "%ACTION%"=="status"  goto :status
 if /i "%ACTION%"=="log"     goto :log
+if /i "%ACTION%"=="dev"     goto :dev
 if /i "%ACTION%"=="run"     goto :run
 if /i "%ACTION%"=="fg"      goto :run
-echo Unknown action "%ACTION%".  Use: start ^| run ^| stop ^| restart ^| status ^| log
+echo Unknown action "%ACTION%".  Use: dev ^| start ^| run ^| stop ^| restart ^| status ^| log
 echo   run     stay in THIS window, output here, Ctrl+C to stop
 echo   log     follow the background server's output
+echo   dev     restart AND follow the log in this window (the usual one)
 echo Add "nowatch" to start, run or restart to skip the file watcher.
 exit /b 2
 
@@ -154,6 +156,17 @@ REM ---------------------------------------------------------------------------
 REM Follow what the BACKGROUND server is printing. Both streams, merged and
 REM tagged, because the interesting lines are split across them: Streamlit's
 REM warnings land on stderr and the map's timing lines on stdout.
+:dev
+REM ONE COMMAND, BECAUSE TWO IS WHERE IT WENT WRONG. "start.bat log" only
+REM FOLLOWS a file; it starts nothing. Run against a stopped server it
+REM quietly tails yesterday's log, which looks exactly like an app that
+REM opened a terminal and did not launch -- reported as precisely that.
+call "%~f0" restart
+if errorlevel 1 exit /b 1
+echo.
+goto :log
+
+REM ---------------------------------------------------------------------------
 :log
 REM UTF-8 BOTH WAYS OR THE LOG IS UNREADABLE. The server writes UTF-8
 REM (PYTHONIOENCODING above, because a REDIRECTED stdout otherwise gets
@@ -172,6 +185,13 @@ if /i "%~2"=="all" (
     powershell -NoProfile -ExecutionPolicy Bypass -Command ^
         "Get-Content -Encoding UTF8 -Path '%LOGOUT%','%LOGERR%' -ErrorAction SilentlyContinue"
     exit /b 0
+)
+netstat -ano | findstr /r /c:":%PORT% .*LISTENING" >nul 2>&1
+if errorlevel 1 (
+    echo NOTE: nothing is listening on port %PORT% - the server is NOT running.
+    echo       What follows is the log from the PREVIOUS run. It will not grow.
+    echo       Use "%SELF% dev" to start it and follow it in one step.
+    echo.
 )
 echo Following %LOGDIR%\dev.*.log  -  Ctrl+C to stop watching (server keeps running).
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
