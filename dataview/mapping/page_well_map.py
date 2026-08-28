@@ -8880,10 +8880,12 @@ def run(engine=None):
         st.session_state.setdefault(_wk, _wv)
 
     # Clock starts here, after the two guards that return without drawing.
-    _marks_begin("mode=%s wells=%s h3=%s" % (
+    _marks_begin("mode=%s wells=%s h3=%s freeze=%s hold=%s" % (
         st.session_state.get("map_mode"),
         st.session_state.get("wells_layer_on"),
-        st.session_state.get("h3_layer_on")))
+        st.session_state.get("h3_layer_on"),
+        st.session_state.get("wm_freeze_map"),
+        st.session_state.get("wm_hold_map")))
 
     # ── the second-screen watcher, registered FIRST ────────────────────
     # "The fragment with id ... does not exist anymore - it might have been
