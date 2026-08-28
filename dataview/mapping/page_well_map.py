@@ -14038,6 +14038,99 @@ def run(engine=None):
 
                         st.session_state.processed_drawings.add(_geom_hash)
 
+                        # ── A BOX OVER HEXAGONS SELECTS HEXAGONS ────────
+                        # "I tried to draw a box over the cells but that did
+                        # not work." It worked -- it drilled the WELLS in the
+                        # box and handed off to the Wells layer, which is the
+                        # right answer when you are looking at wells and the
+                        # wrong one when you are looking at cells.
+                        #
+                        # So when the H3 layer is on, a rectangle selects the
+                        # CELLS it covers, through the same store a click
+                        # uses: the two gestures then compose, and a box is
+                        # just a faster way to click several. Wells stay the
+                        # rectangle's job whenever H3 is off, which is every
+                        # pre-existing use of this tool.
+                        #
+                        # CENTRE-IN-BOX, not intersects. A hexagon straddling
+                        # the edge is half outside what was drawn, and
+                        # counting it would put wells in the selection that
+                        # are visibly outside the box -- the same complaint
+                        # that produced the exact-containment drill in the
+                        # first place, one level up.
+                        # RESOLUTION FROM SESSION STATE, and the cells from h3
+                        # itself. The first version of this read _h3_res_active
+                        # and _h3_df -- both assigned FURTHER DOWN the same
+                        # function (14515 and 12249), so it would have raised
+                        # NameError the first time anyone drew a box. h3 needs
+                        # neither: polygon_to_cells returns the cells whose
+                        # CENTRE lies in the polygon, which is the containment
+                        # rule this wants, computed rather than looked up.
+                        _box_res = int(st.session_state.get("h3_resolution", 4))
+                        if (st.session_state.get("h3_layer_on")
+                                and _box_res in (4, 5, 6, 7)):
+                            try:
+                                _picked = list(h3.polygon_to_cells(
+                                    h3.LatLngPoly([
+                                        (_min_lat, _min_lon), (_min_lat, _max_lon),
+                                        (_max_lat, _max_lon), (_max_lat, _min_lon)]),
+                                    _box_res))
+                            except Exception as _pce:
+                                _say("[map] box->cells failed: %s" % str(_pce)[:120])
+                                _picked = []
+                            if _picked:
+                                _store = dict(st.session_state.get(
+                                    "_h3_cell_uwis", {}))
+                                _cellcol = f"h3_r{_box_res}"
+                                _added = 0
+                                for _cc in _picked:
+                                    if _cc in _store:
+                                        continue
+                                    _safe = "".join(ch for ch in str(_cc)
+                                                    if ch in "0123456789abcdefABCDEF")
+                                    if len(_safe) != 15:
+                                        continue
+                                    _cb = _h3_cell_bbox(_cc)
+                                    try:
+                                        _cw, _ = _qry_wells_in_bbox(
+                                            engine, _cb[0], _cb[1], _cb[2], _cb[3],
+                                            limit=5000,
+                                            where_extra=st.session_state.get(
+                                                "_active_where_extra", "")
+                                            + f" AND w.{_cellcol} = '{_safe}'")
+                                    except Exception as _bce:
+                                        _say("[map] box-cell drill %s: %s"
+                                             % (_cc, str(_bce)[:120]))
+                                        continue
+                                    _store[_cc] = [_r["uwi"] for _r in _cw]
+                                    _added += 1
+                                if _added:
+                                    st.session_state["_h3_cell_uwis"] = _store
+                                    st.session_state["selected_h3_cells"] = list(_store)
+                                    _seen, _union = set(), []
+                                    for _cu in _store.values():
+                                        for _u in _cu:
+                                            if _u not in _seen:
+                                                _seen.add(_u)
+                                                _union.append(_u)
+                                    _capped = len(_union) > 5000
+                                    st.session_state["viewport_uwis"] = _union[:5000]
+                                    st.session_state["_drawn_bounds"] = [
+                                        [_min_lat, _min_lon], [_max_lat, _max_lon]]
+                                    st.session_state["_drawn_bounds_oneshot"] = True
+                                    st.success(
+                                        "🔶 Box: added **%d cell(s)** — "
+                                        "**%s wells** across **%d cell(s)**."
+                                        % (_added, format(min(len(_union), 5000), ","),
+                                           len(_store)))
+                                    if _capped:
+                                        st.warning(
+                                            "Selection capped at 5,000 wells — "
+                                            "the cells hold %s. Remove cells or "
+                                            "use a finer resolution."
+                                            % format(len(_union), ","))
+                                    st.rerun()
+
                         _active_sources = active_area.get("sources", [])
                         if not _active_sources:
                             st.warning(
