@@ -12566,6 +12566,7 @@ def run(engine=None):
                     st.warning(f"Viewport render skipped: {_e}")
                     st.session_state["viewport_uwis"] = []
 
+        _mark("build: wells layer")
         if "db_trajectories" in active_db:
             _msg.info("📐 Loading trajectories…")
             _add_trajectories(m, _qry_trajectories(engine))
@@ -12620,6 +12621,7 @@ def run(engine=None):
                     _msg.info("🟦 Loading 3D seismic surveys…")
                     _add_seismic_3d(m, _df3)
 
+        _mark("build: seismic 3d")
         # ── Native-geography layers (dv_*.geog) via geography_layers module ──
         _geo_keys = {"geo_fields": "fields", "geo_leases": "leases",
                      "geo_boundaries": "boundaries", "geo_pipelines": "pipelines",
@@ -12883,6 +12885,7 @@ def run(engine=None):
             except Exception as _ge:
                 _msg.warning(f"Geography layers skipped: {_ge}")
 
+        _mark("build: geography layers")
         # Phase 4: render individual GOM well markers after a Commit drill.
         # The Commit handler stashes drilled wells in viewport_gom_wells;
         # _add_gom_wells_markers renders them as amber-ring teal-fill
@@ -12915,6 +12918,7 @@ def run(engine=None):
                 if _n_gsticks:
                     _msg.info(f"➖ Drew {_n_gsticks:,} GOM surface→TD sticks…")
 
+        _mark("build: gom drilled")
         for lay in active_shp:
             _msg.info(f"🗂 Loading {lay.get('layer_name','layer')}…")
             _add_shapefile_layer(m, engine, lay)
@@ -12993,6 +12997,7 @@ def run(engine=None):
             edit_options={"edit": False, "remove": True},
         ).add_to(m)
 
+        _mark("build: Draw control")
         # ── JS patch: distinguish pan-drag from click on cells ──────────
         # Problem: when the user click-and-drags inside a grid cell to pan
         # the map, Leaflet fires BOTH the pan-drag AND a click event on
@@ -13128,6 +13133,7 @@ def run(engine=None):
             })();
             {% endmacro %}
         """)
+        _mark("build: drag_guard JS")
         drag_guard._parent = m
         m.add_child(drag_guard)
 
@@ -13296,6 +13302,7 @@ def run(engine=None):
             })();
             {% endmacro %}
         """)
+        _mark("build: view_persist JS")
         view_persist._parent = m
         m.add_child(view_persist)
 
@@ -13407,6 +13414,7 @@ def run(engine=None):
             })();
             {% endmacro %}
         """)
+        _mark("build: click_centre JS")
         click_centre._parent = m
         m.add_child(click_centre)
 
@@ -13661,6 +13669,7 @@ def run(engine=None):
             })();
             {% endmacro %}
         """)
+        _mark("build: pick_tools JS")
         pick_tools._parent = m
         m.add_child(pick_tools)
 
@@ -13729,6 +13738,7 @@ def run(engine=None):
             </style>
         """)   # NOT rendered: see _DEAD_MAP_CSS above.
 
+        _mark("build: dead-map CSS")
         # st_folium with width="100%" reserves more vertical space than the map
         # actually uses — the iframe wrapper grows tall while the map stays 500px.
         # Cap the wrapper to exactly the map height to stop the column-stretching bug.
@@ -13759,6 +13769,7 @@ def run(engine=None):
             </style>
         """, unsafe_allow_html=True)
 
+        _mark("build: map CSS")
         _msg.info("🌐 Rendering map in browser…")
         # Try use_container_width if available (streamlit-folium >= 0.18),
         # else fall back to width=None which lets st_folium auto-size.
@@ -13942,6 +13953,7 @@ def run(engine=None):
             # BELOW the map is a control nobody finds, which is exactly how
             # this one was reported missing the first time.
 
+        _mark("build: controls row")
         _sel_for_key = st.session_state.get("selected_cells", [])
         _sel_key_hash = hash(tuple(sorted(
             f"{c[0]:.4f}|{c[1]:.4f}" for c in _sel_for_key
@@ -13992,6 +14004,7 @@ def run(engine=None):
             # next option change is measured against what is on screen.
             st.session_state["_map_drawn_sig"] = _opt_sig
 
+        _mark("build: hold/apply gate")
         # NAME THE LAYERS THAT HAD NOTHING TO DRAW. Switching a chip on and
         # seeing no change is indistinguishable from a broken layer, and the
         # honest answer -- that table is empty on this database -- is one the
