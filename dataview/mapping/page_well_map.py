@@ -11603,14 +11603,27 @@ def run(engine=None):
             if _h3_on and not st.session_state.get("_h3_layer_prev", _h3_on):
                 st.session_state["grid_visible"] = True
             st.session_state["_h3_layer_prev"] = _h3_on
-            if _wells_on and not (
+            # ── ON THE TRANSITION, NOT THE STEADY STATE ────────────────
+            # This lifted suppression whenever the Wells toggle was ON, which
+            # ran on EVERY render -- so "✗ Clear wells" set wells_suppressed
+            # True and the very next render set it straight back to False.
+            # Reported as "Clear wells doesn't seem to be working", and it
+            # wasn't: the button worked and was undone a fraction of a second
+            # later, which is indistinguishable from a dead button.
+            #
+            # The intent was right -- turning Wells ON should not leave the
+            # layer blank because of a Clear from ten minutes ago. That is a
+            # statement about the MOMENT the toggle goes on, so it is now
+            # tested as an edge: lift only when wells_layer_on has just become
+            # True. Leaving it on no longer re-lifts anything.
+            _prev_wells_on = st.session_state.get("_prev_wells_layer_on")
+            st.session_state["_prev_wells_layer_on"] = bool(_wells_on)
+            if (_wells_on and not _prev_wells_on) and not (
                 st.session_state.get("viewport_uwis")
                 or st.session_state.get("_active_drill_bbox")
             ):
-                # Manual Wells-on with NO active drill → lift suppression so a
-                # prior Clear doesn't keep the layer blank and the full area
-                # loads. But when a box/circle drill IS active, keep suppression
-                # ON: the drill owns the view, and lifting it here would let
+                # When a box/circle drill IS active, suppression stays ON: the
+                # drill owns the view, and lifting it here would let
                 # _need_wells pull the whole area's wells (e.g. Allen's ~22K)
                 # even though only the drilled set is shown — which defeats the
                 # point of drawing a box to subselect.
