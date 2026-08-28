@@ -814,6 +814,18 @@ def _geojson_to_wkt(geom: dict) -> str:
     return "POLYGON(" + ", ".join(ring(r) for r in coords) + ")"
 
 
+# ── WHAT A SAVED PLACE REMEMBERS ───────────────────────────────
+# ONE LIST, READ TWICE. _capture_map_view and _apply_map_view are the two
+# halves of one contract and were written out separately -- so they drifted
+# the first time one gained a key. wm_clip_to_box was added to capture and
+# not to apply, and a place saved WITH the clip on came back without it: the
+# feature silently absent in exactly the state saved to preserve it, and the
+# save looked like it had worked. Same shape as the four lists that must
+# agree in CLAUDE.md, and the same fix: stop maintaining two.
+_VIEW_KEYS = ("map_mode", "wells_layer_on", "h3_layer_on", "h3_resolution",
+              "wm_clip_to_box", "wm_lease_color_by")
+
+
 def _capture_map_view() -> dict:
     """What is currently ON the map: layers, mode, and the seismic choice.
 
@@ -825,8 +837,7 @@ def _capture_map_view() -> dict:
     _pills = st.session_state.get("wm_geo_pills")
     if _pills:
         out["pills"] = list(_pills)
-    for _k in ("map_mode", "wells_layer_on", "h3_layer_on", "h3_resolution",
-               "wm_clip_to_box", "wm_lease_color_by"):
+    for _k in _VIEW_KEYS:
         _v = st.session_state.get(_k)
         if _v not in (None, False, "none"):
             out[_k] = _v
@@ -855,7 +866,7 @@ def _apply_map_view(view: dict) -> None:
         return
     if "pills" in view:
         st.session_state["wm_geo_pills"] = list(view["pills"] or [])
-    for _k in ("map_mode", "wells_layer_on", "h3_layer_on", "h3_resolution"):
+    for _k in _VIEW_KEYS:
         if _k in view:
             st.session_state[_k] = view[_k]
     _seis = view.get("seis")
