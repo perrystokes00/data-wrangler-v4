@@ -64,6 +64,23 @@ BOXES = {
     "teapot":  (-106.40, 43.20, -106.05, 43.55),
     "natrona": (-107.543526, 42.431094, -106.072669, 43.501362),
 }
+
+
+def county_box(state, county):
+    """A county's envelope from us_geo, in the service's lon/lat order.
+
+    us_geo.bbox returns (min_lat, min_lon, max_lat, max_lon) -- the map's
+    order. The service wants (min_lon, min_lat, max_lon, max_lat). Converting
+    in one named place beats four numbers swapped at a call site: get it wrong
+    and the query returns NOTHING rather than raising, because a Wyoming
+    latitude and longitude are both plausible numbers in each other's range.
+    """
+    from dataview.mapping import us_geo as _g
+    bb = _g.bbox(state, county)
+    if not bb:
+        return None
+    _mnla, _mnlo, _mxla, _mxlo = bb
+    return (_mnlo, _mnla, _mxlo, _mxla)
 DATE_FIELDS = ("EFF_DT", "EXP_DT", "SALE_DT", "Created", "Modified")
 
 
@@ -153,6 +170,9 @@ def main():
     ap.add_argument("--state", default="WY", help="GEO_STATE code (default WY)")
     ap.add_argument("--bbox", default=None,
                     help="named box: " + ", ".join(BOXES) + "; or lon,lat,lon,lat")
+    ap.add_argument("--county", default=None,
+                    help="county name; its envelope comes from us_geo and is "
+                         "combined with --state")
     ap.add_argument("--where", default=None,
                     help="extra SQL, e.g. \"CSE_DISP='Authorized'\"")
     ap.add_argument("--out", default=None, help="output .geojson path")
@@ -166,7 +186,12 @@ def main():
     if a.where:
         where += " AND (%s)" % a.where
     bbox = None
-    if a.bbox:
+    if a.county:
+        bbox = county_box(a.state.upper(), a.county)
+        if not bbox:
+            print("us_geo has no county %r in %s" % (a.county, a.state.upper()))
+            return 2
+    elif a.bbox:
         if a.bbox.lower() in BOXES:
             bbox = BOXES[a.bbox.lower()]
         else:
@@ -194,9 +219,10 @@ def main():
         print("\nCOUNT ONLY -- re-run with --apply to download.")
         return 0
 
+    _tag = ("_" + a.county.lower().replace(" ", "_")) if a.county else (
+        "_" + a.bbox.lower() if a.bbox and a.bbox.lower() in BOXES else "")
     out = a.out or os.path.join(
-        OUT_DIR, "blm_leases_%s%s.geojson"
-        % (a.state.upper(), "_" + a.bbox.lower() if a.bbox and a.bbox.lower() in BOXES else ""))
+        OUT_DIR, "blm_leases_%s%s.geojson" % (a.state.upper(), _tag))
     out = os.path.abspath(out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
