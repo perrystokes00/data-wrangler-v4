@@ -754,7 +754,22 @@ LEASE_COLOUR_BY = {
     "owner":     ("operator_name", "Unknown owner"),
     "producing": ("producing_ind", "Unknown status"),
     "status":    ("lease_status",  "Unknown status"),
+    "vintage":   ("effective_date", "Unknown vintage"),
 }
+
+# VINTAGE IS SEQUENTIAL, SO IT GETS A RAMP AND NOT THE HASH. lease_colour()
+# picks a hue by CRC, which is right for identity (owner, status) and wrong
+# for a quantity: a decade is ordered, and a rainbow over an ordered thing
+# destroys the only structure it has. One hue, light to dark, and DARK IS
+# OLDER -- the 1920s federal leases read as the heavy ones.
+#
+# The ramp starts mid-light rather than near-white because these are fills at
+# 0.32 opacity over a pale basemap; the first two steps of a full ramp would
+# be invisible, which is a legend entry that cannot be found on the map.
+_VINTAGE_RAMP = [
+    "#0b2a52", "#12406f", "#1a568b", "#246ca6", "#3382bc",
+    "#4c97cc", "#68abd8", "#87bfe2", "#a6d1ec", "#c4e1f4", "#dcecf9",
+]
 
 
 def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
@@ -768,13 +783,22 @@ def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
         return 0
     _c = lambda n: n if n in have else "NULL"          # noqa: E731
     _col, _unknown = LEASE_COLOUR_BY.get(by) or LEASE_COLOUR_BY["owner"]
+    # Fall back rather than fail when the column is not there: a map that
+    # draws in one colour beats a layer that returns 0 and reads as broken.
+    if by == "vintage" and "effective_date" in have:
+        _own_sql = ("CASE WHEN effective_date IS NULL THEN NULL ELSE "
+                    "CAST((YEAR(effective_date)/10)*10 AS varchar(4)) + 's' END")
+    else:
+        _own_sql = _c(_col)
+        if by == "vintage":
+            by = "owner"
     try:
         with engine.connect() as con:
             rows = con.execute(text(f"""
                 SELECT TOP {int(limit)}
                        {_c('tract_name')}   AS nm,
                        {_c('lease_number')} AS ln,
-                       {_c(_col)}           AS own,
+                       {_own_sql}           AS own,
                        {_c('area_km2')}     AS km2,
                        geog.STAsText()      AS wkt
                   FROM dataview.dv_land_tract
@@ -792,9 +816,23 @@ def add_lease_layer(m, engine, show=True, limit=5000, by="owner"):
         by_owner.setdefault((r.own or _unknown).strip(), []).append(r)
 
     drawn = 0
-    for owner in sorted(by_owner, key=lambda o: -len(by_owner[o])):
+    # BY SIZE for identity, BY TIME for vintage. Sorting decades by how many
+    # leases they hold would scatter the ramp through the layer control and
+    # throw away the ordering the ramp exists to show.
+    if by == "vintage":
+        _dec = sorted(k for k in by_owner if k != _unknown)
+        _step = (lambda i: _VINTAGE_RAMP[
+            round(i * (len(_VINTAGE_RAMP) - 1) / max(len(_dec) - 1, 1))])
+        _cmap = {k: _step(i) for i, k in enumerate(_dec)}
+        _cmap[_unknown] = "#9aa0a6"          # neutral, outside the ramp
+        _order = _dec + ([_unknown] if _unknown in by_owner else [])
+        _colour_of = lambda o: _cmap.get(o, "#9aa0a6")   # noqa: E731
+    else:
+        _order = sorted(by_owner, key=lambda o: -len(by_owner[o]))
+        _colour_of = lease_colour
+    for owner in _order:
         group = by_owner[owner]
-        colour = lease_colour(owner)
+        colour = _colour_of(owner)
         feats = []
         for r in group:
             geom = _wkt_geometry(r.wkt)

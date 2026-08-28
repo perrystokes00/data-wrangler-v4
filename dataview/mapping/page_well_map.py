@@ -13949,12 +13949,20 @@ def run(engine=None):
             # ~200px column (_rv2 of a five-way split), and three horizontal
             # options wrapped mid-word -- "produc / ing". A selectbox is one
             # line at any width.
+            # ORDER PUTS THE USABLE ONE FIRST. Measured on 4,618 leases:
+            # producing_ind fills 4,565 rows across 3 values, effective_date
+            # 4,584 across 11 decades -- while operator_name fills 34 and
+            # lease_status has exactly ONE distinct value, because the loader
+            # keeps only Authorized. Two of the four colour nothing.
             st.selectbox(
-                "🟦 Lease colour", ["owner", "producing", "status"],
+                "🟦 Lease colour",
+                ["producing", "vintage", "owner", "status"],
                 key="wm_lease_color_by",
-                help="Owner comes from operator_name, which BLM leases do not "
-                     "carry — they all fall into one group. Producing and "
-                     "status come from the BLM case record and are populated.")
+                help="Producing (3 groups) and Vintage (effective decade, "
+                     "dark = older) are populated on BLM leases and are the "
+                     "two worth using. Owner is operator_name, which BLM does "
+                     "not publish — 34 of 4,618 rows. Status is a single "
+                     "value once non-authorized leases are filtered out.")
             _ppdm_symbols = st.checkbox(
                 "🛢 PPDM well symbols", key="wm_ppdm_symbols",
                 help="Draw wells as standard PPDM/API symbols (shape = status) "
