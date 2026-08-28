@@ -437,6 +437,44 @@ def _install_timers():
     if _n_wrapped:
         _say("[map] timing enabled on %d function(s); DW_MAP_TIMERS=0 to "
               "switch off" % _n_wrapped)
+def _install_rerun_trace():
+    """Make every st.rerun() say which LINE called it.
+
+    TWO UNEXPLAINED RERUN LOOPS IN ONE DAY, and neither could be located from
+    the log: a render that ends in st.rerun() before the first mark prints its
+    header and nothing else, and there are seventeen st.rerun() calls between
+    the header and that first mark. The header tells you the page is spinning
+    and not one thing about why.
+
+    A line number turns "618 zero-mark renders" into "618 reruns from line
+    N", which is the whole diagnosis. sys._getframe is used rather than
+    inspect.stack() because it is O(1) -- this fires on every rerun, and in a
+    loop that is thousands of times.
+
+    `sys` is imported INSIDE the wrapper on purpose: it is not a module-level
+    import in this file, and _say already documents why reaching for a bare
+    name that only fails when the line runs is the trap CLAUDE.md opens with.
+
+    Idempotent, and off with DW_MAP_TIMERS=0 like every other diagnostic here.
+    """
+    if not _MAP_TIMERS:
+        return
+    if getattr(st.rerun, "_dw_traced", False):
+        return
+    _orig = st.rerun
+
+    def _traced(*a, **k):
+        import sys as _sys
+        try:
+            _say("[map] st.rerun() from line %d"
+                 % _sys._getframe(1).f_lineno)
+        except Exception:
+            # A DIAGNOSTIC MUST NOT BE THE THING THAT BREAKS THE PAGE.
+            pass
+        return _orig(*a, **k)
+
+    _traced._dw_traced = True
+    st.rerun = _traced
 
 
 # ── SAVED PLACES ───────────────────────────────────────────────────────────
@@ -15754,3 +15792,4 @@ def run(engine=None):
 # Wrap the query and layer functions. MUST BE LAST: it walks globals(),
 # so every _qry_/_add_ has to be defined before it runs.
 _install_timers()
+_install_rerun_trace()
