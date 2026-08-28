@@ -9190,6 +9190,42 @@ def run(engine=None):
                 _phase_msg.info(text)
             _phase_bar.progress(min(max(pct, 0), 99))
 
+    # ── ⛔ Abort: a brake on the heavy layers, not a reset ─────────
+    # WHY A BUTTON CAN WORK HERE AT ALL. Streamlit checks for a pending
+    # RERUN/STOP request every time the script enqueues a ForwardMsg, so
+    # every st.* call is an implicit yield point -- see
+    # ScriptRunner._maybe_handle_execution_control_request. Clicking a widget
+    # WHILE a render is grinding therefore raises RerunException at the next
+    # st.* call and tears the slow render down. A custom button is not a
+    # placebo here; it uses the very mechanism the toolbar's Stop uses.
+    #
+    # WHY NOT JUST USE THAT Stop. Stop interrupts and changes nothing, so the
+    # next click rebuilds the identical slow map. This draws FIRST on every
+    # render, so the browser has it while everything below is still being
+    # built, and it sets a hold that makes the rerun cheap.
+    #
+    # WHY A HOLD AND NOT _clear_wells_state(). Escaping a slow render must
+    # not cost the operator the selection they were waiting on -- a hexagon
+    # set can take a dozen clicks to build. The hold suppresses the two
+    # expensive layers AND the wells query; every selection, the tray and the
+    # camera survive it, and ▶ Resume puts them back. Destroying state to
+    # escape a render is the wrong-is-worse-than-missing trade in miniature.
+    #
+    # WHAT IT CANNOT DO. It lands at the next st.* call, so a single blocking
+    # call is not interruptible: st_folium handing 28K markers to Leaflet, or
+    # one long query, runs to completion and the abort takes hold on the run
+    # after. Measured: the 593s render was browser-side Leaflet, not Python.
+    # The draw cap (_WELLS_DRAW_CAP) is what bounds that; this bounds the
+    # repeat.
+    # ── ⛔ Render hold: the flag, read all the way down this function ─
+    # The BUTTON that sets it lives in ⚙ Page controls beside Reset page --
+    # tucked away for the same reason Reset is: a control that blanks the map
+    # must not be one you can hit by accident. The BANNER stays out here at
+    # top level, though, and carries its own ▶ Resume. Hiding the
+    # explanation inside a collapsed expander is what would make a held map
+    # read as a broken one.
+    _render_held = bool(st.session_state.get("_wm_render_hold"))
+
     # ── Reset page button (escape hatch) ───────────────────────────────
     # Tucked into a thin expander at the top so it's findable but won't
     # be clicked accidentally. Click it when the page is in a weird state
@@ -9234,7 +9270,31 @@ def run(engine=None):
                 _tc2.caption("No single query or layer crossed %.2fs."
                              % _MAP_TIMER_FLOOR)
 
-        _rc1, _rc2 = st.columns([1, 4])
+        _rc1, _rcA, _rc2 = st.columns([1, 1, 3])
+        with _rcA:
+            # KEYS END "_btn" so _is_action_key() excludes them from the
+            # sub-page persist loops. A button's value cannot be set, and
+            # self-assigning one raises on a LATER run, on whatever page
+            # draws next -- the crash lands nowhere near its cause.
+            if _render_held:
+                if st.button("▶ Resume", key="wm_render_resume_btn",
+                             use_container_width=True,
+                             help="Draw the well and hexagon layers again."):
+                    st.session_state.pop("_wm_render_hold", None)
+                    st.rerun()
+            elif st.button("⛔ Abort", key="wm_render_abort_btn",
+                           use_container_width=True,
+                           help=("Stop a render that is taking too long. It "
+                                 "lands at the next drawing step, then holds "
+                                 "the well and hexagon layers off so the page "
+                                 "comes back. Nothing is lost -- Resume "
+                                 "draws them again.")):
+                # No st.rerun(): this expander draws near the TOP of the
+                # render, so continuing costs one pass instead of two and
+                # everything below reads _render_held on this very run.
+                st.session_state["_wm_render_hold"] = True
+                _render_held = True
+                _say("abort: holding the wells and hexagon layers")
         with _rc1:
             if st.button("🔄 Reset page",
                          key="wm_reset_page",
@@ -9289,6 +9349,17 @@ def run(engine=None):
                 "database. For a full restart, stop and re-run Streamlit "
                 "from the terminal."
             )
+
+    if _render_held:
+        _hb1, _hb2 = st.columns([5, 1])
+        _hb1.warning(
+            "⛔ Render held — wells and hexagons are not being drawn. "
+            "Your selection, tray and view are all kept.")
+        if _hb2.button("▶ Resume", key="wm_render_resume2_btn",
+                       use_container_width=True,
+                       help="Draw the well and hexagon layers again."):
+            st.session_state.pop("_wm_render_hold", None)
+            st.rerun()
 
     # Lazy-load strategy: skip the expensive _qry_wells call on first load.
     # Grid mode is the default and doesn't need the full wells list — the
@@ -9698,6 +9769,11 @@ def run(engine=None):
 
     _need_wells = (
         _has_real_selection
+        # ⛔ Abort holds the QUERY too, not just the draw. Holding only
+        # the layers would leave the slowest part of a broad render --
+        # pulling tens of thousands of wells -- running on every rerun
+        # while the map showed nothing: the worst of both.
+        and not _render_held
         and not st.session_state.get("wells_suppressed", False)
         and (
             _uwi_filter_active   # explicit UWI lookup — allowed at any scope
@@ -12156,7 +12232,8 @@ def run(engine=None):
         # directly (both blocks below are separate `if`s, so both layers
         # can draw at once). map_mode is kept only for the non-render logic
         # that still reads it (centroid, broad-scope guard, controls).
-        _show_h3_layer = st.session_state.get("h3_layer_on", True)
+        _show_h3_layer = (not _render_held
+                          and st.session_state.get("h3_layer_on", True))
         # Render the Wells block whenever the toggle is on OR a drill selection
         # is active (viewport_uwis / GOM). A drawn box sets viewport_uwis in the
         # handler that runs AFTER the toggles, then defers the toggle-on to the
@@ -12169,9 +12246,13 @@ def run(engine=None):
             st.session_state.get("viewport_uwis")
             or st.session_state.get("viewport_gom_wells")
         )
+        # The hold sits OUTSIDE the or, deliberately: an active drill
+        # selection draws the wells whatever the toggle says, which is
+        # precisely why switching the toggle off does not stop a grind.
         _show_wells_layer = (
-            st.session_state.get("wells_layer_on", False)
-            or _has_drill_selection
+            not _render_held
+            and (st.session_state.get("wells_layer_on", False)
+                 or _has_drill_selection)
         )
         _skip_folium = False
         # STAMP BEFORE BUILDING, NOT AFTER. The build takes ~25 seconds, so
@@ -13929,6 +14010,21 @@ def run(engine=None):
                     "won't rebuild the map. **Hover** to identify anything; "
                     "the **box** and **circle** tools still select. "
                     "Turn off *Freeze map* to click one open.")
+
+        # SAY IT WHERE THE MISSING THING IS. The hold already draws a banner
+        # at the TOP of the page, and that was not enough: "wells and H3 are
+        # on but nothing is drawing" was reported with that banner already on
+        # screen. The empty map is where the confusion happens, and an
+        # explanation the reader has to scroll up to find is one they do not
+        # find. Same lesson as ✗ Clear wells and 🔒 Freeze map, both of
+        # which announce themselves immediately above the map for this reason.
+        if _render_held:
+            st.info(
+                "⛔ **Render held** — the well and hexagon layers are "
+                "switched off on purpose, which is why the map is empty "
+                "while their toggles still read on. Nothing was lost. Press "
+                "**▶ Resume** (on the banner above, or in ⚙ Page controls) "
+                "to draw them again.")
 
         if _skip_folium:
             map_data = None
