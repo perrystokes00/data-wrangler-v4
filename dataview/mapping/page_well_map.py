@@ -14399,6 +14399,12 @@ def run(engine=None):
 
                         _active_sources = active_area.get("sources", [])
                         if not _active_sources:
+                            # THE LAST SILENT ENDING. This warned on
+                            # screen and said nothing to the log, so a
+                            # box that stopped here was indistinguishable
+                            # from one that never arrived.
+                            _say("[map] box: no area selected -- the "
+                                 "rectangle drill needs one, nothing done")
                             st.warning(
                                 "⬛ Pick an area first (Area dropdown above "
                                 "the map) before drawing a rectangle."
