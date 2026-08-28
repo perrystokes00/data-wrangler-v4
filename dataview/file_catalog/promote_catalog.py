@@ -674,6 +674,58 @@ def _pk_columns(cur, schema, table):
     return [r[0] for r in cur.fetchall()]
 
 
+def _child_fk_guards(cur, dv_table):
+    """NOT EXISTS clauses keeping a parent row alive while a child still points
+    at it. Aliased to `d`, the parent in _promote_detail's DELETE.
+
+    WHY THIS IS NOT JUST A BIGGER PURGE. _purge_children_by_inventory removes
+    children BY THE CHILD'S OWN INVENTORY_ID -- the rows this batch is about to
+    re-promote. But a child can come from a DIFFERENT FILE than its parent:
+    welltest_*.pdf produces dv_well_dst_period rows whose parent dv_well_dst
+    row came from the scout ticket. The purge scopes by the child's file, the
+    parent DELETE scopes by the parent's file, and 96 period rows fell in the
+    gap -- so promote failed with
+
+        The DELETE statement conflicted with the REFERENCE constraint
+        "fk_dv_well_dst_period_uwi_dst_id"
+
+    and 136 DST rows stayed staged on EVERY run.
+
+    Widening the purge to delete by FK instead would clear the blockage and
+    LOSE those periods for good: their own mirror has already drained, so
+    nothing would put them back. Deleting a row no one asked to delete, to
+    replace a row whose primary key is not changing, is the wrong trade.
+
+    So the parent is left alone instead. The insert's PK anti-join then skips
+    it, which is first-one-in-wins -- the rule promote already follows.
+    """
+    out = []
+    cur.execute(
+        "SELECT OBJECT_NAME(fk.parent_object_id) AS child, "
+        "       cc.name AS child_col, pc.name AS parent_col "
+        "  FROM sys.foreign_keys fk "
+        "  JOIN sys.foreign_key_columns fkc "
+        "    ON fkc.constraint_object_id = fk.object_id "
+        "  JOIN sys.columns cc ON cc.object_id = fk.parent_object_id "
+        "   AND cc.column_id = fkc.parent_column_id "
+        "  JOIN sys.columns pc ON pc.object_id = fk.referenced_object_id "
+        "   AND pc.column_id = fkc.referenced_column_id "
+        " WHERE fk.referenced_object_id = OBJECT_ID(?) "
+        "   AND fk.parent_object_id <> fk.referenced_object_id "
+        " ORDER BY fk.object_id, fkc.constraint_column_id",
+        f"{DV_SCHEMA}.{dv_table}")
+    pairs = {}
+    for child, ccol, pcol in cur.fetchall():
+        pairs.setdefault(child, []).append((ccol, pcol))
+    for child, cols in pairs.items():
+        # COMPOUND KEYS INCLUDED. fk_dv_well_dst_period_uwi_dst_id is
+        # (uwi, dst_id); matching on uwi alone would keep far too many rows.
+        on = " AND ".join(f"c.[{cc}] = d.[{pc}]" for cc, pc in cols)
+        out.append(f"NOT EXISTS (SELECT 1 FROM {DV_SCHEMA}.[{child}] c "
+                   f"WHERE {on})")
+    return out
+
+
 def _promote_detail(cur, dv, cat, shared, uwi_filter, params, apply):
     has_inv = any(s.upper() == "INVENTORY_ID" for s in shared)
     base_where = (f"m.PROMOTED = 0 "
@@ -732,9 +784,17 @@ def _promote_detail(cur, dv, cat, shared, uwi_filter, params, apply):
         # so a parent replace (dv_well_core) doesn't conflict with a child FK
         # (dv_well_core_sample) still pointing at the old rows.
         _purge_children_by_inventory(cur, dv, inv_sql, params)
+        # ...then refuse to delete any parent a child STILL points at. The
+        # purge above only removed children belonging to this batch's files;
+        # a child promoted from a different file survives it, and deleting
+        # its parent raises 547 and takes the whole mirror down. See
+        # _child_fk_guards for why the answer is to keep the parent rather
+        # than to widen the purge.
+        _guards = _child_fk_guards(cur, dv)
+        _guard_sql = ("".join(" AND " + g for g in _guards)) if _guards else ""
         cur.execute(
             f"DELETE d FROM {DV_SCHEMA}.{dv} d "
-            f"WHERE d.INVENTORY_ID IN ({inv_sql})", *params)
+            f"WHERE d.INVENTORY_ID IN ({inv_sql}){_guard_sql}", *params)
         replaced = cur.rowcount or 0
 
     cols = ", ".join(f"[{c}]" for c in shared)
