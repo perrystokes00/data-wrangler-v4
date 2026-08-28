@@ -13685,12 +13685,16 @@ def run(engine=None):
             # lessee -- so colouring by it puts all 288 in one grey pile while
             # producing status and case status are fully populated on exactly
             # that data. Hence a choice rather than a constant.
-            st.radio(
-                "🟦 Colour leases by", ["owner", "producing", "status"],
-                key="wm_lease_color_by", horizontal=True,
+            # A SELECTBOX, NOT A HORIZONTAL RADIO. This expander lives in a
+            # ~200px column (_rv2 of a five-way split), and three horizontal
+            # options wrapped mid-word -- "produc / ing". A selectbox is one
+            # line at any width.
+            st.selectbox(
+                "🟦 Lease colour", ["owner", "producing", "status"],
+                key="wm_lease_color_by",
                 help="Owner comes from operator_name, which BLM leases do not "
-                     "carry. Producing and status come from the BLM case "
-                     "record and are populated there.")
+                     "carry — they all fall into one group. Producing and "
+                     "status come from the BLM case record and are populated.")
             _ppdm_symbols = st.checkbox(
                 "🛢 PPDM well symbols", key="wm_ppdm_symbols",
                 help="Draw wells as standard PPDM/API symbols (shape = status) "
