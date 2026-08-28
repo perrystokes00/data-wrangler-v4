@@ -7567,7 +7567,19 @@ def _well_lease_map(_engine, _v: int = 1) -> dict:
                          geography::Point(w.surface_latitude,
                                           w.surface_longitude, 4326)) = 1
                  WHERE w.surface_latitude IS NOT NULL
-                   AND lt.geog IS NOT NULL""")).fetchall():
+                   AND lt.geog IS NOT NULL
+                   -- CURRENT LEASES ONLY. "First tract wins" below is safe
+                   -- while tracts do not overlap, which was true of the 34
+                   -- synthetic ones and is emphatically false of real BLM
+                   -- data: Natrona County's leases sum to 9.2M acres in a
+                   -- 3.4M-acre county because a century of expired ones
+                   -- stacks on the same ground. Without this clause a well
+                   -- reports whichever closed 1962 lease sorts first.
+                   -- lease_status IS NULL keeps the synthetic tracts, which
+                   -- predate the column.
+                   AND (lt.lease_status IS NULL
+                        OR lt.lease_status = 'Authorized')
+                   AND ISNULL(lt.active_ind, 'Y') = 'Y'""")).fetchall():
                 # First tract wins if the tiling ever overlaps -- the same
                 # choice the TOP 1 subquery makes, so both modes agree.
                 out.setdefault(str(r[0]), (r[1], r[2], r[3]))
