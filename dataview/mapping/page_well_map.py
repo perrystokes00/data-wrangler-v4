@@ -2790,6 +2790,51 @@ def _qry_wells_in_bbox(
     except Exception as exc:
         st.error(f"Bbox query failed: {exc}")
         return [], 0
+@st.cache_data(ttl=300, show_spinner=False)
+def _qry_cell_uwis_in_bbox(_engine, min_lat: float, max_lat: float,
+                           min_lon: float, max_lon: float,
+                           cellcol: str, where_extra: str = "",
+                           limit: int = 200000) -> dict:
+    """{cell: [uwi]} for every well in a bbox, bucketed by its own H3 cell.
+
+    ONE QUERY FOR THE WHOLE BOX. The box-selects-cells path used to call
+    _qry_wells_in_bbox once PER CELL, and each of those runs a COUNT and then
+    a SELECT. That was invisible at R4, where a county-sized box is a few
+    dozen cells; at R7 the same box is 3,410 cells and therefore ~6,820 round
+    trips, which reads as a hung map -- reported as "I drew a box but nothing
+    happened", twice.
+
+    Bucketing in Python is right here because the wells are wanted anyway: the
+    cell is stored ON the well (h3_r4..h3_r7), so one indexed bbox read gives
+    every cell in the box and its members together.
+
+    CELLCOL IS WHITELISTED, not interpolated blind -- it reaches SQL as an
+    identifier and the resolutions are a closed set.
+    """
+    if cellcol not in ("h3_r4", "h3_r5", "h3_r6", "h3_r7"):
+        return {}
+    sql = f"""
+        SELECT TOP (:limit) RTRIM(w.uwi) AS uwi, w.{cellcol} AS cell
+        FROM dataview.dv_well w
+        WHERE w.surface_latitude  BETWEEN :min_lat AND :max_lat
+          AND w.surface_longitude BETWEEN :min_lon AND :max_lon
+          AND w.{cellcol} IS NOT NULL
+          {where_extra}
+    """
+    out: dict = {}
+    try:
+        with _engine.connect().execution_options(timeout=60) as con:
+            for r in con.execute(text(sql), {
+                    "min_lat": float(min_lat), "max_lat": float(max_lat),
+                    "min_lon": float(min_lon), "max_lon": float(max_lon),
+                    "limit": int(limit)}):
+                out.setdefault(str(r.cell), []).append(r.uwi)
+    except Exception as exc:
+        # NOT swallowed silently: a discarded diagnostic makes the next
+        # failure undiagnosable (CLAUDE.md).
+        _say("[map] cell-bucket query failed: %s" % str(exc)[:160])
+        return {}
+    return out
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -14249,27 +14294,31 @@ def run(engine=None):
                                     "_h3_cell_uwis", {}))
                                 _cellcol = f"h3_r{_box_res}"
                                 _added = 0
-                                for _cc in _picked:
-                                    if _cc in _store:
+                                # ONE QUERY FOR THE BOX, not one per cell.
+                                # This looped over _picked calling
+                                # _qry_wells_in_bbox, which runs a COUNT and
+                                # a SELECT each -- fine at R4 (a few dozen
+                                # cells), ~6,820 round trips at R7 where the
+                                # same box is 3,410 cells. That is a hung
+                                # map, and it was reported as one twice.
+                                _buckets = _qry_cell_uwis_in_bbox(
+                                    engine, _min_lat, _max_lat,
+                                    _min_lon, _max_lon, _cellcol,
+                                    where_extra=st.session_state.get(
+                                        "_active_where_extra", ""))
+                                # EMPTY CELLS ARE NOT SELECTED. Storing a
+                                # cell with no wells drew an outline round
+                                # empty ground and inflated the cell count
+                                # in the message; of 3,410 cells in a box
+                                # only the populated ones mean anything.
+                                _want = set(str(c) for c in _picked)
+                                for _cc, _us in _buckets.items():
+                                    if _cc in _store or _cc not in _want or not _us:
                                         continue
-                                    _safe = "".join(ch for ch in str(_cc)
-                                                    if ch in "0123456789abcdefABCDEF")
-                                    if len(_safe) != 15:
-                                        continue
-                                    _cb = _h3_cell_bbox(_cc)
-                                    try:
-                                        _cw, _ = _qry_wells_in_bbox(
-                                            engine, _cb[0], _cb[1], _cb[2], _cb[3],
-                                            limit=5000,
-                                            where_extra=st.session_state.get(
-                                                "_active_where_extra", "")
-                                            + f" AND w.{_cellcol} = '{_safe}'")
-                                    except Exception as _bce:
-                                        _say("[map] box-cell drill %s: %s"
-                                             % (_cc, str(_bce)[:120]))
-                                        continue
-                                    _store[_cc] = [_r["uwi"] for _r in _cw]
+                                    _store[_cc] = _us
                                     _added += 1
+                                _say("[map] box: %d of %d cell(s) hold wells"
+                                     % (_added, len(_picked)))
                                 if _added:
                                     st.session_state["_h3_cell_uwis"] = _store
                                     st.session_state["selected_h3_cells"] = list(_store)
