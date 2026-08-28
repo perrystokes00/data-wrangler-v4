@@ -11907,7 +11907,28 @@ def run(engine=None):
             if _new_mode != _current_mode:
                 st.session_state["map_mode"] = _new_mode
                 st.session_state["map_mode_radio"] = _new_mode
-                st.rerun()
+                # ONE RERUN PER TARGET MODE, NEVER A SECOND. This rerun is
+                # legitimate -- a drill handoff can change the toggles
+                # mid-render -- but it assumed the next render would agree.
+                # When something upstream keeps re-deriving the old mode the
+                # two never converge and the page reruns forever: 357 renders,
+                # 351 of them ending here before the first mark, with the
+                # header frozen at mode=none wells=True. Reported as "now it
+                # is looping".
+                #
+                # The guard is on the TARGET, not a counter: a genuine change
+                # to a different mode still gets its one rerun, and the same
+                # unresolved mismatch cannot ask twice.
+                if st.session_state.get("_mode_fix_for") != _new_mode:
+                    st.session_state["_mode_fix_for"] = _new_mode
+                    _say("[map] mode %r -> %r, rerunning once"
+                         % (_current_mode, _new_mode))
+                    st.rerun()
+                _say("[map] mode still %r != %r after a rerun -- carrying on "
+                     "rather than looping" % (_current_mode, _new_mode))
+            else:
+                # Settled: let a future genuine transition rerun again.
+                st.session_state.pop("_mode_fix_for", None)
             st.session_state["map_mode"] = _new_mode
         with _mode_help:
             if _broad_scope and not _uwi_filter_active:
