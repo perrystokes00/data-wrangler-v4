@@ -14341,8 +14341,8 @@ def run(engine=None):
         # symbols, the clip toggle. Clearing the drawn box is an action,
         # the same kind of thing as ✗ Clear wells and 🎯 Reset view, and
         # it belongs next to them where those are looked for.
-        _rv1, _rvc, _rvb, _rvf, _rvh, _rv2 = st.columns(
-            [1.0, 1.1, 1.0, 1.2, 1.2, 1.2])
+        _rv1, _rvc, _rvb, _rvf, _rvh = st.columns(
+            [1.0, 1.1, 1.0, 1.2, 1.2])
         # HOLD THE MAP UNTIL THE SELECTIONS ARE MADE. Every option on this
         # page reruns the script, and the script rebuilds the map -- so
         # picking an area, then a query, then a layer costs three rebuilds to
@@ -14429,57 +14429,65 @@ def run(engine=None):
             st.session_state["_wm_prev_area_id"] = "none"
             st.rerun()
 
-        with _rv2.expander("🏷 Map display", expanded=False):
-            _show_legend = st.checkbox(
-                "🏷 Map legends", key="wm_show_legend",
-                help="Floating keys on the map: well status bottom-right, "
-                     "leases bottom-left. Both fold to their title bar — the "
-                     "fold is remembered in the browser, so collapsing one "
-                     "costs no redraw.")
-            # COLOUR THE LEASES BY SOMETHING THEY HAVE. Owner is the natural
-            # choice and is NULL on every federal lease -- BLM publishes no
-            # lessee -- so colouring by it puts all 288 in one grey pile while
-            # producing status and case status are fully populated on exactly
-            # that data. Hence a choice rather than a constant.
-            # A SELECTBOX, NOT A HORIZONTAL RADIO. This expander lives in a
-            # ~200px column (_rv2 of a five-way split), and three horizontal
-            # options wrapped mid-word -- "produc / ing". A selectbox is one
-            # line at any width.
-            # ORDER PUTS THE USABLE ONES FIRST. Measured on the 4,584 BLM
-            # leases now loaded: producing_ind fills 4,565 rows across 3
-            # values and effective_date 4,584 across 11 decades. The other
-            # two colour NOTHING: lease_status has exactly one distinct value
-            # because the loader keeps only Authorized, and operator_name is
-            # empty on every row -- BLM publishes no lessee, and the 34
-            # synthetic tracts that were the only rows carrying one were
-            # deleted 28 Aug. Kept in the list because either becomes real
-            # the moment a non-BLM lease source is loaded.
-            st.selectbox(
-                "🟦 Lease colour",
-                ["producing", "vintage", "size", "owner", "status"],
-                key="wm_lease_color_by",
-                help="Producing (3 groups), Vintage (effective decade, "
-                     "dark = older) and Size (acreage band, dark = bigger) "
-                     "all work on BLM leases. Owner and Status colour "
-                     "nothing on BLM data — BLM publishes no lessee, and "
-                     "the loader keeps only Authorized leases, so both "
-                     "columns are one value or empty.")
-            # ── SHOW ONLY WHAT IS IN THE BOX ───────────────────
-            # Selecting cells OUTLINES them and leaves everything else drawn,
-            # which is right for building a selection and wrong for showing
-            # one. This clips the hexes, the wells and the leases to the
-            # drawn extent instead. Captured by _capture_map_view, so a saved
-            # place comes back clipped the way it was saved.
-            st.checkbox(
-                "🔲 Clip to selection", key="wm_clip_to_box",
-                help="Draw only what falls inside the box or circle you "
-                     "drew — hexagons by their centre, wells and leases by "
-                     "position. Needs a drawn extent; with none it says so "
-                     "rather than quietly doing nothing.")
-            _ppdm_symbols = st.checkbox(
-                "🛢 PPDM well symbols", key="wm_ppdm_symbols",
-                help="Draw wells as standard PPDM/API symbols (shape = status) "
-                     "instead of plain coloured dots")
+        # ── FULL WIDTH, LAID OUT SIDE BY SIDE ────────────────────
+        # This was the sixth column of the action row -- about 200px -- and
+        # everything in it was squeezed. The selectbox note below records a
+        # horizontal radio being abandoned for exactly that reason. Out of
+        # the row it gets the whole width and the four controls sit in a row
+        # of their own.
+        #
+        # BELOW the buttons rather than beside them: those are ACTIONS and
+        # these are SETTINGS, so a row each keeps that division visible
+        # instead of leaving it to which column something landed in.
+        with st.expander("🏷 Map display", expanded=False):
+            _md1, _md2, _md3, _md4 = st.columns(4)
+            with _md1:
+                _show_legend = st.checkbox(
+                    "🏷 Map legends", key="wm_show_legend",
+                    help="Floating keys on the map: well status bottom-right, "
+                         "leases bottom-left. Both fold to their title bar "
+                         "— the fold is remembered in the browser, so "
+                         "collapsing one costs no redraw.")
+            with _md2:
+                # STILL A SELECTBOX, FOR A DIFFERENT REASON NOW. The old one
+                # was that this lived in a ~200px column and three horizontal
+                # options wrapped mid-word ("produc / ing"). The column is a
+                # quarter of the map width now, which is wider -- but there
+                # are FIVE options, and five radio buttons do not fit in it
+                # either. Same control, honest reason.
+                #
+                # ORDER PUTS THE USABLE ONES FIRST. Measured on the 10,924
+                # BLM leases loaded: producing_ind fills 3 values and
+                # effective_date 11 decades. Owner is synthetic (see
+                # tools/assign_synthetic_lease_owners.py) and lease_status
+                # has one distinct value, because the loader keeps only
+                # Authorized.
+                st.selectbox(
+                    "🟦 Lease colour",
+                    ["producing", "vintage", "size", "owner", "status"],
+                    key="wm_lease_color_by",
+                    help="Producing (3 groups), Vintage (effective decade, "
+                         "dark = older) and Size (acreage band, dark = "
+                         "bigger) all work. Owner is synthetic. Status is a "
+                         "single value once non-authorized leases are "
+                         "filtered out.")
+            with _md3:
+                # SHOW ONLY WHAT IS IN THE BOX. Selecting cells outlines them
+                # and leaves everything else drawn, which is right for
+                # building a selection and wrong for showing one. Captured by
+                # _capture_map_view, so a saved place comes back clipped the
+                # way it was saved.
+                st.checkbox(
+                    "🔲 Clip to selection", key="wm_clip_to_box",
+                    help="Draw only what falls inside the box or circle you "
+                         "drew — hexagons by their centre, wells and leases "
+                         "by position. Drawing a box switches this on by "
+                         "itself; ✗ Clear box turns it off again.")
+            with _md4:
+                _ppdm_symbols = st.checkbox(
+                    "🛢 PPDM well symbols", key="wm_ppdm_symbols",
+                    help="Draw wells as standard PPDM/API symbols (shape = "
+                         "status) instead of plain coloured dots")
             # Click-to-centre is NOT here. It is a button ON the map -- see
             # dv_click_centre. A map control buried in a collapsed expander
             # BELOW the map is a control nobody finds, which is exactly how
