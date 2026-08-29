@@ -15632,7 +15632,26 @@ def run(engine=None):
                         except Exception as _e:
                             st.warning(f"H3 drill failed: {_e}")
 
+        # A CELL CANNOT BE CLICKED WHEN NO CELL IS DRAWN. _cell_steps comes
+        # from the ACTIVE SCHEMAS, not from what is on the map, and
+        # grid_visible defaults True -- so with H3 density switched OFF this
+        # branch was still live, and ANY click on the map floor-divided its
+        # coordinates into an invisible grid cell, toggled it into the
+        # selection buffer and called st.rerun().
+        #
+        # That is the "I click a lease, the screen greys twice and the lease
+        # information disappears" report, reproduced 29 Aug with h3=False and
+        # freeze=True: render #4, then st.rerun() from this line, then render
+        # #5 with a fresh map and no popup on it. Freeze does not save you
+        # here -- last_object_clicked still came back -- and neither did the
+        # _click_popup guard below, which assumed "markers have popups, cells
+        # don't". Leases have popups; this click simply returned no popup
+        # TEXT, so the guard read it as a bare coordinate click.
+        #
+        # Requiring the layer to be on is the honest gate, and it is the same
+        # switch that decides whether the hexagons are drawn at all.
         if (_cells_mode and _coord_click and _cell_steps
+                and st.session_state.get("h3_layer_on")
                 and st.session_state.get("grid_visible", True)
                 and not _click_popup
                 and not _handled_as_cell):
