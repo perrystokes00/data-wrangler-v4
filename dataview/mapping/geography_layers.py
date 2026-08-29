@@ -1042,10 +1042,10 @@ def add_lease_layer(m, engine, show=True, limit=25000, by="owner",
             # Matches the served-file path. Two paths drawing one layer
             # differently is how a fallback becomes a different map.
             style_function=lambda _f, _c=colour: {
-                "color": _c, "weight": 1.6, "opacity": 0.95,
-                "fillColor": _c, "fillOpacity": 0.32},
+                "color": "#1a1a1a", "weight": 0.9, "opacity": 0.55,
+                "fillColor": _c, "fillOpacity": 0.38},
             highlight_function=lambda _f, _c=colour: {
-                "weight": 3, "fillOpacity": 0.5},
+                "weight": 2.6, "opacity": 0.95, "fillOpacity": 0.58},
             # HOVER IDENTIFIES, CLICK REPORTS. Two questions, and one control
             # cannot answer both: a tooltip long enough to hold the record
             # follows the pointer and hides what is under it. The popup is
@@ -1181,7 +1181,7 @@ LEASE_GEOJSON_NAME = "dv_leases.geojson"
 # signature exists to decide whether to rebuild; keyed on the data alone, a
 # code change that adds a property serves the old file forever and the new
 # feature is silently missing. v2 added _la/_lo for clip-to-selection.
-LEASE_GEOJSON_FORMAT = 4      # v4: validated palette, coloured strokes
+LEASE_GEOJSON_FORMAT = 5      # v5: 0.9px hairline, fill 0.38
 
 
 def lease_data_signature(engine) -> str:
@@ -1349,18 +1349,23 @@ function(feature, layer) {
         if (layer._path) { layer._path.style.pointerEvents = "none"; }
         return;
     }
-    // BACK TO A COLOURED STROKE. The black outline at 2.2 was too heavy at
-    // 10,924 tracts -- at state scale the edges become the picture and the
-    // fills stop reading. It solved a real problem at four counties and
-    // created a worse one at twenty-three.
+    // A HAIRLINE, NOT AN OUTLINE. Three attempts, and the middle one is the
+    // answer: stroking each tract in its OWN hue merged neighbouring tracts
+    // of one owner into a blob and lost the parcel lines; black at 2.2 fixed
+    // that at four counties and became the picture itself at twenty-three,
+    // where 10,924 edges drown 10,924 fills.
     //
-    // The relief the palette check wants for the low-contrast fills is still
-    // there without it: every group is labelled in the legend and is its own
-    // named FeatureGroup, which is the secondary encoding that check asks
-    // for. Fill back to 0.32 as well -- 0.45 was raised only because the
-    // black edge was carrying the boundary.
-    var base = {color: c, weight: 1.6, opacity: 0.95,
-                fillColor: c, fillOpacity: 0.32};
+    // 0.9px of dark at 55% separates adjacent tracts without competing with
+    // them. It stays a hairline at every zoom because Leaflet strokes are in
+    // screen pixels, not map units -- which is exactly why 2.2 was fine over
+    // one county and overwhelming over a state: the tracts shrank and the
+    // lines did not.
+    //
+    // Fill at 0.38, between the 0.32 a coloured stroke needed and the 0.45 a
+    // heavy black one allowed: the edge no longer carries identity, so the
+    // fill can, but it still has to read under a line rather than beside it.
+    var base = {color: '#1a1a1a', weight: 0.9, opacity: 0.55,
+                fillColor: c, fillOpacity: 0.38};
     // AND ON THE FEATURE, not only the layer. folium emits its own
     // setStyle(f => f.properties.style) AFTER addData, so a style set only
     // on the layer here is overwritten with undefined a moment later --
@@ -1369,7 +1374,7 @@ function(feature, layer) {
     feature.properties.style = base;
     layer.setStyle(base);
     layer.on('mouseover', function(){
-        layer.setStyle({weight: 3, fillOpacity: 0.5}); });
+        layer.setStyle({weight: 2.6, opacity: 0.95, fillOpacity: 0.58}); });
     layer.on('mouseout', function(){ layer.setStyle(base); });
     layer.bindTooltip('<b>' + p.nm + '</b><br>' + p['_l___BY__'] +
                       (p.ac ? '<br>' + p.ac : ''), {sticky: true});
