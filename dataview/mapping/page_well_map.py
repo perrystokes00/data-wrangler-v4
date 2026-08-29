@@ -2557,6 +2557,47 @@ def _qry_well_grid(_engine, step: float = 0.035) -> pd.DataFrame:
     except Exception as exc:
         st.error(f"Well grid query failed: {exc}")
         return pd.DataFrame()
+@st.cache_data(ttl=600, show_spinner=False)
+def _qry_data_extent(_engine) -> list | None:
+    """[[min_lat, min_lon], [max_lat, max_lon]] of the loaded wells, padded.
+
+    OPEN WHERE THE DATA IS. The map framed the lower 48 on arrival, which was
+    the right call when it was chosen -- the alternative then was a centroid
+    zoom onto an EMPTY Teapot, and a tight view of nothing reads as broken.
+    With 28,173 wells loaded it is the opposite problem: the whole corpus is a
+    speck in Wyoming and the operator has to hunt for it.
+
+    An EXTENT, not a centroid, which is what makes this safe: framing a bbox
+    cannot zoom absurdly tight the way centring on a mean can, and if the data
+    really is spread across the country the answer is the country anyway.
+
+    Cheap now, and it was not before: MIN/MAX over surface_latitude/longitude
+    is a seek on IX_dv_well_lat_lon -- 0.047s measured. Cached for 10 minutes
+    on top of that, because the extent only moves when wells are loaded.
+
+    Returns None when there is nothing to frame, so the caller keeps its
+    lower-48 fallback rather than fitting a degenerate box.
+    """
+    try:
+        with _engine.connect() as con:
+            r = con.execute(text("""
+                SELECT MIN(surface_latitude), MAX(surface_latitude),
+                       MIN(surface_longitude), MAX(surface_longitude), COUNT(*)
+                  FROM dataview.dv_well
+                 WHERE surface_latitude IS NOT NULL
+                   AND surface_longitude IS NOT NULL""")).one()
+    except Exception as exc:
+        _say("[map] data extent query failed: %s" % str(exc)[:120])
+        return None
+    if not r or not r[4] or r[0] is None:
+        return None
+    mnla, mxla, mnlo, mxlo = (float(r[0]), float(r[1]),
+                              float(r[2]), float(r[3]))
+    # A single well, or a field, would otherwise be a zero-width box. The
+    # floor is what stops fit_bounds picking its maximum zoom on one point.
+    pad_la = max(0.05, (mxla - mnla) * 0.08)
+    pad_lo = max(0.05, (mxlo - mnlo) * 0.08)
+    return [[mnla - pad_la, mnlo - pad_lo], [mxla + pad_la, mxlo + pad_lo]]
 
 
 # -----------------------------------------------------------------------------
@@ -12238,8 +12279,22 @@ def run(engine=None):
                 # a different extent on every screen. Fitting the lower-48
                 # box makes the framing the same everywhere, which is what
                 # "the lower 48" actually asks for.
+                # THE DATA FIRST, THE COUNTRY AS A FALLBACK.
                 lat0, lon0, zoom0 = 39.5, -98.35, 4
-                _viewport_bounds = [[24.5, -125.0], [49.4, -66.9]]
+                _viewport_bounds = _qry_data_extent(engine)
+                if _viewport_bounds is None:
+                    # Nothing loaded to frame: the lower-48 box, which is
+                    # still the right answer for an empty database.
+                    _viewport_bounds = [[24.5, -125.0], [49.4, -66.9]]
+                else:
+                    lat0 = (_viewport_bounds[0][0] + _viewport_bounds[1][0]) / 2
+                    lon0 = (_viewport_bounds[0][1] + _viewport_bounds[1][1]) / 2
+                    zoom0 = 7
+                    _say("[map] opening on the data extent %.3f,%.3f .. "
+                         "%.3f,%.3f" % (_viewport_bounds[0][0],
+                                        _viewport_bounds[0][1],
+                                        _viewport_bounds[1][0],
+                                        _viewport_bounds[1][1]))
             elif not dff.empty:
                 # Wells loaded — center on their centroid
                 lat0  = dff["lat"].mean()
