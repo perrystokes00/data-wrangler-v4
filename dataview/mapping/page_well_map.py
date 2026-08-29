@@ -12640,7 +12640,21 @@ def run(engine=None):
         # whole master, while a circle drill (which is not) bounded it
         # correctly. Same layer, opposite behaviour, depending on how the user
         # arrived. Captured here, read by the layers ~470 lines below.
-        _layer_bounds = st.session_state.get("_drawn_bounds")
+        # ...AND FALL BACK TO THE STANDING BOX, because _drawn_bounds is
+        # ONE-SHOT. Capturing it before the pop fixes the render the box
+        # ARRIVES on; every render after that, it is gone, and the layer went
+        # back to querying the whole master. So "draw a box to see every well
+        # in it" worked for exactly one render and then undid itself --
+        # measured 29 Aug with the box plainly in the log
+        #
+        #   [map] clip ON -> 42.6178,-107.4727 .. 44.1507,-104.8377
+        #   [map] geo layer geo_refwells  drew 48218  (capped sample, no bounds)
+        #
+        # -- the constraint known and announced on the same render the layer
+        # ignored it. _clip_box is the durable one: set by the rectangle
+        # handler and by nothing else, cleared only by ✗ Clear box. That is
+        # what "anything added is constrained by the box" has to read.
+        _layer_bounds = st.session_state.get("_drawn_bounds") or _clip_bounds_now()
         if _is_oneshot_fit_this_render:
             st.session_state.pop("_drawn_bounds", None)
             st.session_state.pop("_drawn_bounds_oneshot", None)
