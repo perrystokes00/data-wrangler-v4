@@ -9450,6 +9450,8 @@ def run(engine=None):
     # happens before the widget is created and is therefore legal.
     if st.session_state.pop("_clip_request", False):
         st.session_state["wm_clip_to_box"] = True
+    if st.session_state.pop("_clip_off_request", False):
+        st.session_state["wm_clip_to_box"] = False
 
     _status = st.empty()
 
@@ -14448,6 +14450,38 @@ def run(engine=None):
             # one. This clips the hexes, the wells and the leases to the
             # drawn extent instead. Captured by _capture_map_view, so a saved
             # place comes back clipped the way it was saved.
+            # ── CLEARING THE BOX NEEDED ITS OWN CONTROL ─────────────
+            # The draw toolbar's trash icon CANNOT do it. It empties
+            # all_drawings, but st_folium reports all_drawings empty on every
+            # render where nobody drew -- the comment at the drawings handler
+            # says so, which is why _last_drawings is only written when the
+            # list is non-empty. An empty list cannot tell "you deleted the
+            # box" from "you did not draw this render", so the box cannot be
+            # cleared from that signal without clearing it constantly.
+            #
+            # Until now the only things that dropped _clip_box were ✗ Clear
+            # wells and 🔄 Reset page, which both take the selection, the tray
+            # and the view with them. Clearing the CONSTRAINT should not cost
+            # the work it was constraining.
+            #
+            # KEY ENDS "_clear", which _is_action_key() already excludes from
+            # the persist loops.
+            if st.button("✗ Clear box", key="wm_clip_clear",
+                         use_container_width=True,
+                         disabled=not st.session_state.get("_clip_box"),
+                         help=("Drop the drawn box and stop clipping. Wells, "
+                               "tray and view are kept — use ✗ Clear wells "
+                               "for those."
+                               if st.session_state.get("_clip_box") else
+                               "No box drawn.")):
+                # A REQUEST for the toggle, because the checkbox below has
+                # not been built yet on THIS run but will be -- and assigning
+                # a widget its own key after it exists raises on a later run.
+                st.session_state.pop("_clip_box", None)
+                st.session_state.pop("_place_shapes", None)
+                st.session_state["_clip_off_request"] = True
+                _say("[map] clear box: constraint dropped")
+                st.rerun()
             st.checkbox(
                 "🔲 Clip to selection", key="wm_clip_to_box",
                 help="Draw only what falls inside the box or circle you "
