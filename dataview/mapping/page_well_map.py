@@ -9742,8 +9742,17 @@ def run(engine=None):
     # fires. Reusing the name meant the buffer was only defined when someone
     # registered a shapefile, and every other render raised "cannot access
     # local variable '_msg' where it is not associated with a value".
-    if st.session_state.pop("_wm_scroll_top_pending", False):
-        _scroll_main_to_top()
+    # CONSUMED HERE, RUN AT THE BOTTOM. st.components.v1.html is an IFRAME,
+    # not a script tag -- Streamlit gives it a real element container, so
+    # emitting it at the top of the page put a box ABOVE the map on exactly
+    # the render that scrolls, which is page entry. That is "it starts to
+    # draw then gets pushed down", and only on the first launch, because the
+    # flag is one-shot.
+    #
+    # The script does not care where it lives: it reaches the parent
+    # document and scrolls it. Rendered after everything else, it cannot
+    # move anything.
+    _want_scroll_top = st.session_state.pop("_wm_scroll_top_pending", False)
 
     _mapmsg = _MsgBelowMap()
 
@@ -14737,6 +14746,8 @@ def run(engine=None):
         # be _mapmsg.empty() -- clearing a placeholder that sat ABOVE the map
         # and had already pushed it down for the whole render.
         _mapmsg.flush(st.container())
+        if _want_scroll_top:
+            _scroll_main_to_top()
         # _watch_seis_choice() USED TO BE CALLED HERE and is now registered at
         # the top of run(). See the note there: 36 statements between the two
         # points can end the render early, and each one left the browser
