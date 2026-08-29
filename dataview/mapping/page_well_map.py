@@ -14564,10 +14564,18 @@ def run(engine=None):
         # of cheap. This sits immediately above the map so it is read before
         # the first click, not after it.
         if st.session_state.get("wm_freeze_map", True):
-            st.info("🔒 **Map frozen** — clicks won't open wells or lines, and "
-                    "won't rebuild the map. **Hover** to identify anything; "
-                    "the **box** and **circle** tools still select. "
-                    "Turn off *Freeze map* to click one open.")
+            # A CAPTION, NOT A BANNER, NOW THAT THIS IS THE DEFAULT.
+            # The four-line st.info was right when Freeze was a rare opt-in:
+            # a mode that silently swallows clicks is worse than the redraw
+            # it replaces, so it had to announce itself. Making Freeze the
+            # default turned that into a paragraph describing NORMAL
+            # operation on every render -- reported as "why do I keep getting
+            # this message". An exception is worth a banner; the steady state
+            # is worth a line. The full text still lives in the toggle help,
+            # which is where someone asking "what does Freeze do" will look.
+            st.caption(
+                "🔒 Frozen — hover identifies; box and circle still "
+                "select. Untick **Freeze map** to click a well open.")
 
         # SAY IT WHERE THE MISSING THING IS. The hold already draws a banner
         # at the TOP of the page, and that was not enough: "wells and H3 are
