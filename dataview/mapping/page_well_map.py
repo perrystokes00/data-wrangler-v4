@@ -1049,16 +1049,19 @@ def _seis_pref_mtime() -> float:
     except OSError:
         return 0.0
 def _layout_probe():
-    """TEMPORARY. Print what is at the top of the page, ON the page.
+    """TEMPORARY. The page records its own top on every launch, and keeps it.
 
-    Six rounds of padding theory failed because the measurement was always
-    taken in a browser that was not Perry's. DevTools would settle it and
-    could not be made to run. So the page measures ITSELF and shows the
-    answer at the bottom, where reading it costs nothing.
+    The first two readings came back perfectly clean -- padTop 64, container
+    top 0, nothing moving between 0.4s and 3s -- because a reading only
+    happens when you scroll down to it, and by then the page has settled.
+    "It starts to draw then gets pushed down, and if I start it again it is
+    ok" is precisely the shape a settled reading cannot see.
 
-    TWO snapshots, 0.4s and 3s, because the reported symptom is "it starts to
-    draw then gets pushed down" -- a single reading cannot show a change. What
-    matters is which row's height GREW between them.
+    So this SAMPLES for 15 seconds (every 250ms) and writes a summary to
+    localStorage. The history survives the rerun, the page switch and the
+    restart, so the launch that misbehaved is still readable on the next one.
+    min/max of the first block's top is the number that matters: if the page
+    is ever pushed down, max is far above min, whatever it settles at.
 
     Delete this and its one call site once the cause is found.
     """
@@ -1071,77 +1074,113 @@ def _layout_probe():
         td,th{padding:2px 6px;border-bottom:1px solid #30363d;text-align:left}
         th{color:#8b949e}
         .n{text-align:right;font-variant-numeric:tabular-nums}
+        .bad{color:#f85149;font-weight:700}
+        .ok{color:#3fb950}
         h4{margin:8px 0 4px;color:#58a6ff;font:600 12px ui-monospace,monospace}
-        .hi{color:#f0883e}
         </style>
-        <div id="out">measuring...</div>
+        <div id="out">sampling for 15s...</div>
         <script>
         (function(){
-          var D = window.parent.document;
+          var D = window.parent.document, KEY = 'dwLayoutProbe';
           function box(){
             return D.querySelector('[data-testid="stMainBlockContainer"]')
                 || D.querySelector('[data-testid="stAppViewBlockContainer"]')
                 || D.querySelector('section.main .block-container')
                 || D.querySelector('.block-container');
           }
-          function snap(){
+          function read(){
             var c = box();
-            if(!c){ return {err:'no block container found'}; }
-            var cs = window.parent.getComputedStyle(c);
-            var main = D.querySelector('[data-testid="stMain"]')
-                    || D.querySelector('section.main');
-            // The whole page turned out to be ONE child -- a border wrapper --
-            // so listing the container's children listed one row. Descend
-            // through single-child wrappers until there is a real list.
+            if(!c){ return null; }
             var n = c;
             while (n && n.children.length === 1) { n = n.children[0]; }
-            var kids = Array.prototype.slice.call(n.children, 0, 14);
-            var rows = [];
-            for (var i=0;i<kids.length;i++){
-              var e = kids[i], r = e.getBoundingClientRect();
-              var t = (e.innerText||'').split(String.fromCharCode(10))
-                        .join(' ').slice(0,44);
-              rows.push({i:i, id:(e.getAttribute('data-testid')||e.tagName),
-                         h:Math.round(r.height), top:Math.round(r.top), txt:t});
-            }
-            // Where the MAP actually is: the tallest iframe on the page.
-            var mapTop = 'none', best = 0, ifr = D.querySelectorAll('iframe');
+            var first = n.children[0];
+            var main = D.querySelector('[data-testid="stMain"]')
+                    || D.querySelector('section.main');
+            var mapTop = -1, best = 0, ifr = D.querySelectorAll('iframe');
             for (var j=0;j<ifr.length;j++){
               var rr = ifr[j].getBoundingClientRect();
               if (rr.height > best){ best = rr.height;
                                      mapTop = Math.round(rr.top); }
             }
-            return {pad:cs.paddingTop,
-                    cTop:Math.round(c.getBoundingClientRect().top),
-                    scr:(main?Math.round(main.scrollTop):-1),
-                    map:mapTop,
-                    docH:Math.round(c.scrollHeight), rows:rows};
+            return {
+              pad: parseInt(window.parent.getComputedStyle(c).paddingTop, 10),
+              cTop: Math.round(c.getBoundingClientRect().top),
+              fTop: first ? Math.round(first.getBoundingClientRect().top) : -1,
+              fTag: first ? (first.getAttribute('data-testid')||first.tagName)
+                          : '-',
+              scr: main ? Math.round(main.scrollTop) : -1,
+              map: mapTop,
+              nKids: n.children.length
+            };
           }
-          function fmt(title, s){
-            if(!s){ return ''; }
-            if(s.err){ return '<h4>'+title+'</h4><div class=hi>'+s.err+'</div>'; }
-            var h = '<h4>'+title+' &mdash; padTop '+s.pad+' | container top '
-                  + s.cTop+' | stMain.scrollTop '+s.scr+' | MAP top '+s.map
-                  + ' | page '+s.docH
-                  + 'px</h4><table><tr><th>#</th><th>element</th>'
-                  + '<th class=n>height</th><th class=n>top</th><th>text</th></tr>';
-            for (var i=0;i<s.rows.length;i++){
-              var r = s.rows[i];
-              h += '<tr><td>'+r.i+'</td><td>'+r.id+'</td><td class=n>'+r.h
-                 + '</td><td class=n>'+r.top+'</td><td>'+r.txt+'</td></tr>';
+          function load(){
+            try { return JSON.parse(localStorage.getItem(KEY) || '[]'); }
+            catch(e){ return []; }
+          }
+          function save(a){
+            try { localStorage.setItem(KEY, JSON.stringify(a.slice(-8))); }
+            catch(e){}
+          }
+          function rng(v){
+            return (v.length ? Math.min.apply(null, v) + '-'
+                             + Math.max.apply(null, v) : '?');
+          }
+          function render(hist, live){
+            var h = '<h4>LAYOUT HISTORY &mdash; last ' + hist.length
+                  + ' launch(es), newest first. '
+                  + 'A first-block top that is ever far above its minimum '
+                  + 'is the push-down.</h4>'
+                  + '<table><tr><th>when</th><th>samples</th>'
+                  + '<th class=n>padTop</th><th class=n>container top</th>'
+                  + '<th class=n>FIRST BLOCK top (min-max)</th>'
+                  + '<th class=n>scrollTop max</th>'
+                  + '<th class=n>map top</th><th>first block</th></tr>';
+            var rows = hist.slice().reverse();
+            for (var i=0;i<rows.length;i++){
+              var r = rows[i];
+              var spread = r.fMax - r.fMin;
+              h += '<tr><td>'+r.when+'</td><td class=n>'+r.n+'</td>'
+                 + '<td class=n>'+r.pad+'</td><td class=n>'+r.cMin+'-'+r.cMax+'</td>'
+                 + '<td class="n '+(spread>20?'bad':'ok')+'">'
+                 + r.fMin+'-'+r.fMax+(spread>20?'  PUSHED +'+spread:'')+'</td>'
+                 + '<td class=n>'+r.sMax+'</td><td class=n>'+r.mMin+'</td>'
+                 + '<td>'+r.fTag+'</td></tr>';
             }
-            return h+'</table>';
+            h += '</table>';
+            if (live){ h += '<h4>this launch, still sampling &mdash; '
+                          + live + '</h4>'; }
+            document.getElementById('out').innerHTML = h;
           }
-          var a = null, out = document.getElementById('out');
-          setTimeout(function(){ a = snap();
-            out.innerHTML = fmt('EARLY (0.4s)', a); }, 400);
-          setTimeout(function(){
-            out.innerHTML = fmt('EARLY (0.4s)', a) + fmt('SETTLED (3s)', snap());
-          }, 3000);
+          var hist = load(), f = [], c = [], s = [], m = [], rec = null, k = 0;
+          var d = new Date();
+          var when = ('0'+d.getHours()).slice(-2) + ':'
+                   + ('0'+d.getMinutes()).slice(-2) + ':'
+                   + ('0'+d.getSeconds()).slice(-2);
+          render(hist, 'starting');
+          var iv = setInterval(function(){
+            k++;
+            var r = read();
+            if (r){
+              rec = r; f.push(r.fTop); c.push(r.cTop);
+              s.push(r.scr); m.push(r.map);
+              var e = {when: when, n: f.length, pad: r.pad,
+                       cMin: Math.min.apply(null, c), cMax: Math.max.apply(null, c),
+                       fMin: Math.min.apply(null, f), fMax: Math.max.apply(null, f),
+                       sMax: Math.max.apply(null, s),
+                       mMin: Math.min.apply(null, m), fTag: r.fTag};
+              var all = hist.concat([e]);
+              save(all);
+              render(all, 'sample ' + f.length + ': first block top ' + r.fTop
+                        + ', map top ' + r.map + ', ' + r.nKids + ' blocks');
+            } else {
+              render(hist, 'sample ' + k + ': no container yet');
+            }
+            if (k >= 60){ clearInterval(iv); }
+          }, 250);
         })();
         </script>
         """,
-        height=620, scrolling=True,
+        height=460, scrolling=True,
     )
 
 
