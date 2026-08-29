@@ -204,7 +204,11 @@ def _inject_theme(t: dict):
 
        The shell runs before any page dispatch, so the rule is in force
        from the first paint and on every rerun, whatever page is open. */
-    [data-testid="stMainBlockContainer"] {{ padding-top: 64px !important; }}
+    /* 64px top, not the stock 6rem/96px -- see above. The bottom is stock
+       10rem (160px), which is dead space under the last control on every
+       page; 48px still keeps it off the viewport edge. */
+    [data-testid="stMainBlockContainer"] {{ padding-top: 64px !important;
+                                            padding-bottom: 48px !important; }}
 
     /* An injected <style> is a real child of the flex column and that
        column has a 16px gap, so each CSS-only element costs 16px while
