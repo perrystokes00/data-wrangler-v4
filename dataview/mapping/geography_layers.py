@@ -852,6 +852,39 @@ def lease_colour(owner):
                              % len(_FALLBACK_COLOURS)]
 
 
+def lease_colour_map(names):
+    """Colours for a WHOLE set of owners at once: {name: colour}.
+
+    WHY NOT JUST CALL lease_colour() PER NAME. It picks by crc32 % 8, and a
+    hash into eight buckets collides long before eight names -- by the
+    birthday bound the odds are better than even at five, and two owners
+    sharing a colour makes a legend that cannot be read against the map. The
+    hash is only there to be STABLE across runs, and sorted order is stable
+    too, so nothing is given up by assigning from the set.
+
+    Known owners keep their hand-picked colour. The rest take the fallback
+    palette in sorted order, skipping any colour a known owner already holds,
+    so a collision needs MORE owners than there are colours -- and past that
+    it degrades to the old behaviour rather than failing.
+
+    Deterministic: same set in, same map out, on any machine, before and
+    after a reload. That is what makes a screenshot reproducible.
+    """
+    out, used = {}, set()
+    unknown = []
+    for n in names:
+        key = (n or "").strip().lower()
+        if key in LEASE_OWNER_COLOURS:
+            out[n] = LEASE_OWNER_COLOURS[key]
+            used.add(out[n])
+        else:
+            unknown.append(n)
+    free = [c for c in _FALLBACK_COLOURS if c not in used] or _FALLBACK_COLOURS
+    for i, n in enumerate(sorted(unknown, key=lambda x: (x or "").lower())):
+        out[n] = free[i % len(free)]
+    return out
+
+
 # What the lease colours can mean. THE DEFAULT IS OWNER AND OFTEN CANNOT BE:
 # BLM publishes no lessee, so operator_name is NULL on every federal lease and
 # colouring by it puts all 288 in one grey pile. The other two are populated on
@@ -1334,7 +1367,9 @@ def write_lease_geojson(engine, out_dir, limit=200000):
             cmap[unk] = "#9aa0a6"
             order = ordered + ([unk] if unk in counts[k] else [])
         else:
-            cmap = {x: lease_colour(x) for x in counts[k]}
+            # THE WHOLE SET AT ONCE, not one name at a time: per-name it is
+            # crc32 % 8, which collides at five owners more often than not.
+            cmap = lease_colour_map(counts[k])
             order = sorted(counts[k], key=lambda x: -counts[k][x])
         cmaps[k] = cmap
         legend[k] = [(x, cmap[x], counts[k][x]) for x in order]
