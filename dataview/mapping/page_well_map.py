@@ -8100,15 +8100,6 @@ def _well_lease_map(_engine, _v: int = 1) -> dict:
 _H3_DEFAULT_ON = False
 _WELLS_DEFAULT_ON = False
 
-# HOLD FOR MAP DEFAULTS ON, unlike Freeze. The two read as a pair on screen and
-# are not one: Freeze changes what a CLICK does, so leaving it on would break
-# the thing people expect a map to do, and it stays off. Hold only defers the
-# REDRAW after an option change, and every one of those redraws is a rebuild
-# the operator did not ask for -- three of them to set an area, a query and a
-# layer. Nothing is hidden and nothing is lost: the options apply as normal,
-# Apply draws once, and map interactions are never held at all.
-_HOLD_MAP_DEFAULT_ON = True
-
 
 def _default_map_mode() -> str:
     """The mode the layer toggles will derive on a fresh session.
@@ -9291,22 +9282,7 @@ def run(engine=None):
     # seeding it would freeze the seismic basket on whatever was showing first.
     for _wk, _wv in (("wm_near_dist", 500), ("wm_show_legend", True),
                      ("wm_ppdm_symbols", False), ("wm_shp_fill", True),
-                     ("wm_basemap", _BASEMAPS_SHOWN[0]),
-                     # HOLD IS ON BY DEFAULT. Every option on this page reruns
-                     # the script and the script rebuilds the map, so picking
-                     # an area, then a query, then a layer costs three full
-                     # rebuilds to see one result -- and the map serialize is
-                     # the expensive half of a render. Held, the options still
-                     # rerun (they are cheap) and the map is drawn once, on
-                     # Apply. Map interactions are never held, so drawing a
-                     # box, drilling and picking a line all still respond
-                     # immediately; only the options above are deferred.
-                     #
-                     # Seeded HERE rather than passed as value=, because this
-                     # runs before the header below reads it and long before
-                     # the toggle is drawn -- and a key that already exists is
-                     # what Streamlit requires instead of value=.
-                     ("wm_hold_map", _HOLD_MAP_DEFAULT_ON)):
+                     ("wm_basemap", _BASEMAPS_SHOWN[0])):
         st.session_state.setdefault(_wk, _wv)
 
     # Clock starts here, after the two guards that return without drawing.
