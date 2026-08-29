@@ -272,20 +272,52 @@ def points_layer(m, points, name, *, color="#222", fill="#555",
     return len(feats)
 
 
+# The popup label that tells the map's click handler what it just got. It is
+# the SENTINEL, not decoration: page_well_map identifies a dv_well click by
+# finding a 14-digit UWI in the popup text, and the master's headers carry
+# uwi14 too, so without a label to tell them apart a master header was sent to
+# the scout builder for a well that is not in dv_well. Declared here and read
+# there, so renaming the layer cannot silently break the check.
+FEDWELL_POPUP_LABEL = "Federated well"
+
+# What a LOADED well's popup answers. dv_well has 53 columns; these are the
+# ones that identify a well at a glance, and every one is a column the table
+# actually has (checked against sys.columns before this list was written).
+_LOADED_POPUP = ("uwi", "operator_name", "field_name", "county",
+                 "well_type", "well_status", "spud_date")
+_LOADED_ALIASES = ["Loaded well", "UWI", "Operator", "Field", "County",
+                   "Type", "Status", "Spud"]
+
+
 def add_well_points(m, engine, show: bool = True, limit: int = 50000) -> int:
     """dv_well.geog as plain CircleMarkers — the native-geography view of the
     well set, independent of the lat/lon columns the main markers use.
-    geography .Lat/.Long avoids WKT parsing entirely."""
+    geography .Lat/.Long avoids WKT parsing entirely.
+
+    IT HAS A POPUP NOW, and the old objection no longer holds. points_layer's
+    docstring says "a tooltip, never a popup", because the click handler told
+    a well marker from a density cell by "markers have popups, cells don't".
+    That test was replaced 29 Aug -- the cell branch now requires the H3 layer
+    to actually be ON -- so a popup here no longer steals a cell click. And
+    unlike the master's headers these ARE dv_well rows, so a click reaching
+    the scout builder is the correct outcome rather than a dead end.
+    """
     have = _table_columns(engine, "dv_well")
     if not have or "geog" not in have:
         return 0
     nm = "well_name" if "well_name" in have else ("uwi" if "uwi" in have
                                                   else "NULL")
+    # ONLY THE COLUMNS THIS DATABASE HAS. dv_well is a PPDM derivative and
+    # deployments differ; naming one that is absent fails the whole layer
+    # rather than the one field, which is how a map loses its wells over a
+    # column nobody needed.
+    cols = [c for c in _LOADED_POPUP if c in have]
+    sel = "".join(", %s" % c for c in cols)
     try:
         with engine.connect() as con:
             rows = con.execute(text(f"""
                 SELECT TOP {int(limit)} {nm} AS nm,
-                       geog.Lat AS lat, geog.Long AS lon
+                       geog.Lat AS lat, geog.Long AS lon{sel}
                 FROM dataview.dv_well
                 WHERE geog IS NOT NULL
             """)).fetchall()
@@ -294,9 +326,12 @@ def add_well_points(m, engine, show: bool = True, limit: int = 50000) -> int:
         return 0
     if not rows:
         return 0
+    aliases = ["Loaded well"] + [_LOADED_ALIASES[_LOADED_POPUP.index(c) + 1]
+                                 for c in cols]
     return points_layer(
-        m, ((la, lo, nm_v) for nm_v, la, lo in rows),
-        name=f"⚫ Well points (geog) ({len(rows):,})", show=show)
+        m, ((r[1], r[2], r[0]) + tuple(r[3:]) for r in rows),
+        name=f"⚫ Loaded wells (geog) ({len(rows):,})", show=show,
+        extra=cols, popup_fields=["nm"] + cols, popup_aliases=aliases)
 
 
 REFERENCE_MASTER = "WELL_REF.well_ref.well_master_gold"
@@ -447,7 +482,7 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
             print(f"[geography_layers] reference detail query failed: {exc}")
 
     in_scope = None if sampled else len(rows)
-    label = (f"🔵 Reference wells ({len(rows):,}"
+    label = (f"🔵 Federated wells ({len(rows):,}"
              + (" sample)" if sampled else ")"))
     # The popup is what makes a reference well answerable rather than merely
     # visible -- "which well is this" is the whole reason to draw points at all
@@ -473,7 +508,7 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
             # that may not be in dv_well at all. The label is the sentinel the
             # handler checks, so the popup says what it is to the reader AND
             # to the code.
-            popup_aliases=["Reference well", "UWI", "Operator", "County",
+            popup_aliases=[FEDWELL_POPUP_LABEL, "UWI", "Operator", "County",
                            "State", "Type", "Status", "TD", "Spud"])
     else:
         # SMALLER ON THE SAMPLED PATH, deliberately. This one has no popup to

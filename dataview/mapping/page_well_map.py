@@ -11798,9 +11798,9 @@ def run(engine=None):
             ("geo_seismic",    "🟪 Seismic"),
             ("geo_horizons",   "〰️ Horizons"),
             ("geo_wellsym",    "● Well symbols"),
-            ("geo_wellpts",    "⚫ Well points"),
+            ("geo_wellpts",    "⚫ Loaded wells"),
             ("geo_wellpath",   "🌀 Well paths"),
-            ("geo_refwells",   "🔵 Reference wells"),
+            ("geo_refwells",   "🔵 Federated wells"),
             # THE RENDERERS WERE ALREADY HERE. _add_production_bubbles and
             # _add_production_heatmap survived the July cull of the seven
             # data-layer checkboxes -- the comment above active_db = set()
@@ -15872,8 +15872,10 @@ def run(engine=None):
             # it has no logs, no tops, no production, and nothing downstream
             # can answer for it. Seed it into dv_well first (the map panel
             # does exactly that) and then it is a well like any other.
-            if "Reference well" in _clicked_str:
-                _say("[map] reference-well click ignored -- not a dv_well")
+            from dataview.mapping.geography_layers import (
+                FEDWELL_POPUP_LABEL as _FEDLBL)
+            if _FEDLBL in _clicked_str:
+                _say("[map] federated-well click ignored -- not a dv_well")
                 clicked = None
                 _clicked_str = ""
 
