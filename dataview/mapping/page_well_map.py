@@ -1048,6 +1048,46 @@ def _seis_pref_mtime() -> float:
         return float(_USER_PREFS_PATH.stat().st_mtime)
     except OSError:
         return 0.0
+def _scroll_main_to_top():
+    """Put the main scroll container back at the top.
+
+    STREAMLIT PRESERVES SCROLL POSITION ACROSS A RERUN, and navigating to a
+    page IS a rerun -- so opening the map from a page you had scrolled down
+    lands you part-way down a 17,000px page. Reported as "I still have to
+    start twice or drag the page up", and it is not layout: the padding and
+    the map's own offset measure correctly at 64px the whole time. The
+    viewport is simply somewhere else.
+
+    components.html runs inside an iframe, so this reaches for the PARENT
+    document's scroller. stMain is the element that actually scrolls here
+    (overflow-y:auto, ~17,000px of content); the others are belt and braces
+    for other Streamlit versions.
+
+    Called three times because the page is still growing as layers draw, and
+    a scroll set before the content exists is undone by the content arriving.
+    """
+    st.components.v1.html(
+        """
+        <script>
+        (function(){
+          function toTop(){
+            const d = window.parent.document;
+            const els = [
+              d.querySelector('section.main'),
+              d.querySelector('[data-testid="stMain"]'),
+              d.querySelector('[data-testid="stAppViewContainer"]'),
+              d.scrollingElement, d.documentElement, d.body
+            ];
+            for (const el of els){ if(el){ try{ el.scrollTo(0,0); }
+                                   catch(e){ el.scrollTop = 0; } } }
+            try{ window.parent.scrollTo(0,0); }catch(e){}
+          }
+          toTop(); setTimeout(toTop,50); setTimeout(toTop,200);
+        })();
+        </script>
+        """,
+        height=0,
+    )
 
 
 @st.fragment(run_every=2)
@@ -9348,28 +9388,7 @@ def run(engine=None):
         # in-page rerun (clicking a "?" popover, Build, etc.). components.html
         # runs in an iframe, so we scroll the PARENT document's scroll element.
         if st.session_state.pop("_export_scroll_pending", False):
-            st.components.v1.html(
-                """
-                <script>
-                (function(){
-                  function toTop(){
-                    const d = window.parent.document;
-                    const els = [
-                      d.querySelector('section.main'),
-                      d.querySelector('[data-testid="stMain"]'),
-                      d.querySelector('[data-testid="stAppViewContainer"]'),
-                      d.scrollingElement, d.documentElement, d.body
-                    ];
-                    for (const el of els){ if(el){ try{ el.scrollTo(0,0); }
-                                           catch(e){ el.scrollTop = 0; } } }
-                    try{ window.parent.scrollTo(0,0); }catch(e){}
-                  }
-                  toTop(); setTimeout(toTop,50); setTimeout(toTop,200);
-                })();
-                </script>
-                """,
-                height=0,
-            )
+            _scroll_main_to_top()
         # Persist map state across the export round-trip. Streamlit garbage-
         # collects widget-backed session keys when their widget isn't rendered
         # in a run, and the export page renders in place of the map (early
@@ -9473,6 +9492,11 @@ def run(engine=None):
         st.session_state.pop("wm_adv_comp_op", None)
         st.session_state.pop("_zoom_target_label", None)
         st.session_state.pop("ai_filter_spec", None)
+        # ENTERING THE MAP MEANS STARTING AT THE TOP OF IT. See
+        # _scroll_main_to_top: a page switch is a rerun and Streamlit keeps
+        # the old scroll position, so arriving from a scrolled page opens
+        # the map part-way down. One-shot, consumed on the next line.
+        st.session_state["_wm_scroll_top_pending"] = True
         st.session_state["_wm_page_entered"] = True
 
     # ── CONSUME THE CLIP REQUEST BEFORE ITS WIDGET DRAWS ──────────
@@ -9718,6 +9742,9 @@ def run(engine=None):
     # fires. Reusing the name meant the buffer was only defined when someone
     # registered a shapefile, and every other render raised "cannot access
     # local variable '_msg' where it is not associated with a value".
+    if st.session_state.pop("_wm_scroll_top_pending", False):
+        _scroll_main_to_top()
+
     _mapmsg = _MsgBelowMap()
 
     _zoom_target_label = st.session_state.get("wm_zoom_target", "")
