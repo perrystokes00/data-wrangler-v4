@@ -1316,6 +1316,13 @@ elif S.app_mode == "well_map":
         else:
             st.error("page_well_map has no run() or render() function")
     except Exception as e:
+        # THE TRACEBACK GOES TO THE LOG, not just the message to the screen.
+        # "Well Map error: cannot access local variable" names the failure and
+        # not one thing about WHERE -- and page_well_map is 15,000 lines. A
+        # discarded diagnostic makes the next failure undiagnosable, which is
+        # the first rule in CLAUDE.md and was being broken right here.
+        import traceback
+        traceback.print_exc()
         st.error(f"Well Map error: {e}")
 
 # ── DOCUMENTS ─────────────────────────────────────────────────────────
