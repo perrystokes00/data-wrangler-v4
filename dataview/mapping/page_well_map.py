@@ -12318,13 +12318,6 @@ def run(engine=None):
         # Did THIS render actually move the camera? Set at the fit site below
         # and read by the view-persist JS. See the guard there.
         _did_fit = False
-        # ...and was that fit merely the OPENING one? The remembered view is
-        # allowed to override the extent the page opens on, and nothing else:
-        # a place pick, a drill, a drawn box or Go must all still command the
-        # camera. The first fit of a session is the opening fit by
-        # construction -- _last_fit_sig is empty only before it -- so this is
-        # read from the same single site rather than becoming a second list.
-        _opening_fit = False
 
         # Path 1: _drawn_bounds — authoritative for circle/cell drills.
         # The handlers that set it already padded if appropriate.
@@ -12614,7 +12607,6 @@ def run(engine=None):
             _fit_sig = repr([[round(float(v), 6) for v in _p]
                              for _p in _viewport_bounds])
             if st.session_state.get("_last_fit_sig") != _fit_sig:
-                _opening_fit = not st.session_state.get("_last_fit_sig")
                 st.session_state["_last_fit_sig"] = _fit_sig
                 m.fit_bounds(_viewport_bounds)
                 _did_fit = True
@@ -13825,24 +13817,13 @@ def run(engine=None):
             {% macro script(this, kwargs) %}
             (function() {
                 var SKIP_FLAG  = """ + ("true" if _has_active_fit else "false") + u""";
-                var OPENING    = """ + ("true" if _opening_fit else "false") + u""";
                 var RESET_FLAG = """ + ("true" if _reset_saved_view else "false") + u""";
                 var STORAGE_KEY = 'dv_map_view';
 
-                // TWO STORES, ON PURPOSE.
-                //   sessionStorage -- this tab's live view. Cleared when the
-                //     tab closes, which is right: two tabs on two basins
-                //     must not fight over one camera.
-                //   localStorage   -- the LAST view, kept across a tab close
-                //     and an app restart, so the map opens where you left it
-                //     instead of at the lower 48 every morning.
-                // Written together, read session-first: within a tab nothing
-                // changes at all, and only a fresh tab falls back to the
-                // remembered one.
+                // If user just hit Clear, wipe the saved view BEFORE any
+                // restore logic runs.
                 if (RESET_FLAG) {
                     try { sessionStorage.removeItem(STORAGE_KEY); }
-                    catch (e) { /* silent */ }
-                    try { localStorage.removeItem(STORAGE_KEY); }
                     catch (e) { /* silent */ }
                 }
 
@@ -13875,24 +13856,9 @@ def run(engine=None):
                     // actively fitting to a drilled selection. In that case
                     // the saved view would override the fit_bounds and the
                     // map wouldn't zoom to the new selection.
-                    //
-                    // ...EXCEPT THE OPENING FIT, which the remembered view is
-                    // allowed to override. Opening at the lower 48 when the
-                    // last thing you looked at was one Wyoming township is a
-                    // default arguing with a decision already made. A drill,
-                    // a place pick, Go or a drawn box all still win: those
-                    // set SKIP_FLAG with OPENING false.
-                    if (!SKIP_FLAG || OPENING) {
+                    if (!SKIP_FLAG) {
                         try {
-                            var raw = null;
-                            try { raw = sessionStorage.getItem(STORAGE_KEY); }
-                            catch (e) { /* storage disabled */ }
-                            if (!raw) {
-                                // Fresh tab: fall back to the last view this
-                                // browser saw, from a previous run.
-                                try { raw = localStorage.getItem(STORAGE_KEY); }
-                                catch (e) { /* storage disabled */ }
-                            }
+                            var raw = sessionStorage.getItem(STORAGE_KEY);
                             if (raw) {
                                 var v = JSON.parse(raw);
                                 if (v && typeof v.lat === 'number'
@@ -13922,22 +13888,11 @@ def run(engine=None):
                             try {
                                 var c = mapInst.getCenter();
                                 var z = mapInst.getZoom();
-                                var payload = JSON.stringify({
+                                sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
                                     lat:  c.lat,
                                     lng:  c.lng,
                                     zoom: z
-                                });
-                                // Both stores, every save. Writing only the
-                                // durable one on unload would be the obvious
-                                // economy and is unreliable: a closed laptop
-                                // lid, a killed tab and a crashed renderer
-                                // all skip unload handlers, and the view you
-                                // most want back is the one from the session
-                                // that ended badly.
-                                try { sessionStorage.setItem(STORAGE_KEY, payload); }
-                                catch (e) { /* silent */ }
-                                try { localStorage.setItem(STORAGE_KEY, payload); }
-                                catch (e) { /* silent */ }
+                                }));
                             } catch (e) { /* silent */ }
                         }, 200);
                     }
@@ -13980,31 +13935,11 @@ def run(engine=None):
                         }
                     } catch (e) { /* badge is non-critical — silent */ }
 
-                    // If Python did a fit_bounds (drilled selection, place
-                    // pick, Go), save the resulting view -- so the reruns
-                    // that follow, which do NOT fit, restore the fitted view
-                    // instead of dragging the map back to the last one.
-                    //
-                    // MEASURED: one delayed save is not enough. Picking Eagle
-                    // Ford fitted at render #2 and renders #3 and #4 followed
-                    // with no fit at all; the stored view was still the old
-                    // one, so the restore pulled the map back and the place
-                    // pick appeared to do nothing. Save IMMEDIATELY -- the
-                    // map already carries the fitted bounds by the time this
-                    // installs -- and again after, in case install won the
-                    // race against Leaflet's own init.
+                    // If Python did a fit_bounds (drilled selection), save
+                    // the resulting view too — so subsequent unrelated
+                    // reruns keep the drilled view as the saved state.
                     if (SKIP_FLAG) {
-                        try {
-                            var c0 = mapInst.getCenter();
-                            var p0 = JSON.stringify({lat: c0.lat, lng: c0.lng,
-                                                     zoom: mapInst.getZoom()});
-                            try { sessionStorage.setItem(STORAGE_KEY, p0); }
-                            catch (e) {}
-                            try { localStorage.setItem(STORAGE_KEY, p0); }
-                            catch (e) {}
-                        } catch (e) { /* silent */ }
-                        setTimeout(saveView, 300);
-                        setTimeout(saveView, 1200);
+                        setTimeout(saveView, 500);
                     }
                 }
                 install();
