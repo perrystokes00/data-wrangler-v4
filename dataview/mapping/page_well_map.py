@@ -9259,9 +9259,29 @@ def run(engine=None):
     #
     # Scoped to the main block, so the sidebar and the header keep their own
     # spacing. 1.5rem still separates the first element from the toolbar.
+    # ── and the gaps left by CSS-only elements ───────────────────
+    # An injected <style> is a real child of the flex column, and that column
+    # has a 16px gap -- so every CSS-only element costs 16px of vertical
+    # space while rendering nothing. Three sit above the map (a font import,
+    # the theme variables, and this rule itself), which is 32px of gap.
+    #
+    # MEASURED ON THE LIVE PAGE, not reasoned about: hiding them moved the
+    # map from 56px to 24px, exactly the 32px predicted, with six containers
+    # matched across the page.
+    #
+    # HIDING THE CONTAINER DOES NOT DISABLE THE STYLE. A <style> element is
+    # never rendered; its rules apply regardless of an ancestor's display.
+    # Verified on the live page -- the padding above still resolves to 24px
+    # while the container holding that very rule is display:none.
+    #
+    # :only-child is the safety. It matches a markdown block that is NOTHING
+    # BUT a style tag; anything with visible content alongside is untouched.
     st.markdown(
         "<style>[data-testid='stMainBlockContainer']"
-        "{padding-top:1.5rem !important;}</style>",
+        "{padding-top:1.5rem !important;}"
+        "[data-testid='stElementContainer']:has("
+        "[data-testid='stMarkdownContainer'] > style:only-child)"
+        "{display:none !important;}</style>",
         unsafe_allow_html=True)
 
     # ── Active database resolution ─────────────────────────────────────
