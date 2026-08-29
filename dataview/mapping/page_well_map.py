@@ -9494,7 +9494,6 @@ def run(engine=None):
     if st.session_state.pop("_clip_off_request", False):
         st.session_state["wm_clip_to_box"] = False
 
-    _status = st.empty()
 
     # ── Phased progress indicator at the top of the page ───────────────
     # A single shared progress bar + message that any slow operation can
@@ -9503,8 +9502,9 @@ def run(engine=None):
     # clears both widgets. The widgets are placed at the top so the user
     # always sees them during long loads — they don't have to look down
     # at the map area to know something is happening.
-    _phase_msg = st.empty()
-    _phase_bar = st.empty()
+    # Positioned inside the map column -- see the note at their creation.
+    _phase_msg = None
+    _phase_bar = None
 
     def _phase(pct: int, text: str = ""):
         """Update or clear the top-of-page progress indicator.
@@ -9524,6 +9524,15 @@ def run(engine=None):
         # NEXT line. A timing log that invites the wrong conclusion is worse
         # than none.
         _mark("-> " + (text or ("phase %d" % pct)))
+        # THE PLACEHOLDERS ARE CREATED LOWER DOWN, inside the map column, so
+        # that progress appears near the map instead of at the top of the
+        # page. No caller reaches here before that -- the first is the H3
+        # density query -- but a guard costs nothing and the alternative is
+        # an AttributeError on whichever future caller is added above it.
+        # The TIMING mark above still runs either way, so a call made early
+        # is still measured even if it cannot be shown.
+        if _phase_msg is None or _phase_bar is None:
+            return
         if pct >= 100:
             _phase_msg.empty()
             _phase_bar.empty()
@@ -10201,7 +10210,13 @@ def run(engine=None):
         _wells_srcs = _wells_area.get("sources", [])
         _use_gom_wells = ("gom" in _wells_srcs and "main" not in _wells_srcs)
 
-        _prog_msg = _status.empty()
+        # ITS OWN PLACEHOLDER, created HERE. _status existed only to host
+        # this one transient line, and lived at the top of the page purely
+        # because that is where it was declared -- so the message appeared
+        # far above where anyone was looking, and cost a permanent gap slot
+        # up there for the whole render. _prog_bar below was already inline;
+        # this just matches it.
+        _prog_msg = st.empty()
         _prog_bar = st.progress(0)
         _prog_msg.info("⏳ Loading wells from DataView via BCP — typically ~30 sec for full main, ~2 sec for GoM…")
         try:
@@ -11693,6 +11708,21 @@ def run(engine=None):
         # much more work than it needs to be.
         active_db = set()
     with mapcol:
+        # ── PROGRESS WHERE THE WORK IS ─────────────────────────
+        # These were declared at the very top of the page, which is where a
+        # placeholder RENDERS -- so the one thing that reports on a 10-second
+        # render sat above everything, out of view of anyone actually working
+        # near the map. Side by side in one row, they also cost one gap slot
+        # in the flex column instead of two.
+        #
+        # THIS IS AS LOW AS THEY CAN GO. _phase() is first called at the H3
+        # density query, well before the controls row and the map, and a
+        # placeholder cannot receive a write issued before it exists.
+        # Creating them nearer the map would silently drop the progress for
+        # the slowest step on the page, which is the one worth reporting.
+        _pcol_msg, _pcol_bar = st.columns([3, 2])
+        _phase_msg = _pcol_msg.empty()
+        _phase_bar = _pcol_bar.empty()
         # ── restore a saved view, BEFORE the widgets below exist ─────────
         # Go stores the request and asks for a full rerun; this is the top of
         # that rerun and the last safe moment to set these keys. See
