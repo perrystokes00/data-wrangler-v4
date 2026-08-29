@@ -1039,14 +1039,13 @@ def add_lease_layer(m, engine, show=True, limit=25000, by="owner",
         folium.GeoJson(
             {"type": "FeatureCollection", "features": feats},
             pane="dvleases",
-            # Same black outline as the served-file path. Two paths drawing
-            # the same layer differently is how a fallback becomes a
-            # different map.
+            # Matches the served-file path. Two paths drawing one layer
+            # differently is how a fallback becomes a different map.
             style_function=lambda _f, _c=colour: {
-                "color": "#111111", "weight": 2.2, "opacity": 0.95,
-                "fillColor": _c, "fillOpacity": 0.45},
+                "color": _c, "weight": 1.6, "opacity": 0.95,
+                "fillColor": _c, "fillOpacity": 0.32},
             highlight_function=lambda _f, _c=colour: {
-                "weight": 3.6, "fillOpacity": 0.62},
+                "weight": 3, "fillOpacity": 0.5},
             # HOVER IDENTIFIES, CLICK REPORTS. Two questions, and one control
             # cannot answer both: a tooltip long enough to hold the record
             # follows the pointer and hides what is under it. The popup is
@@ -1182,7 +1181,7 @@ LEASE_GEOJSON_NAME = "dv_leases.geojson"
 # signature exists to decide whether to rebuild; keyed on the data alone, a
 # code change that adds a property serves the old file forever and the new
 # feature is silently missing. v2 added _la/_lo for clip-to-selection.
-LEASE_GEOJSON_FORMAT = 3      # v3: black outlines, validated palette
+LEASE_GEOJSON_FORMAT = 4      # v4: validated palette, coloured strokes
 
 
 def lease_data_signature(engine) -> str:
@@ -1350,14 +1349,18 @@ function(feature, layer) {
         if (layer._path) { layer._path.style.pointerEvents = "none"; }
         return;
     }
-    // BLACK OUTLINE, COLOUR IN THE FILL. Stroking each tract in its own
-    // hue made a lease boundary and a lease identity the same signal, so
-    // adjacent tracts of one owner merged into a blob and the parcel lines
-    // -- the thing a landman actually reads -- disappeared. Black separates
-    // every tract from its neighbour whatever the fill, and doubles as the
-    // relief the palette check asks for where a fill is under 3:1.
-    var base = {color: '#111111', weight: 2.2, opacity: 0.95,
-                fillColor: c, fillOpacity: 0.45};
+    // BACK TO A COLOURED STROKE. The black outline at 2.2 was too heavy at
+    // 10,924 tracts -- at state scale the edges become the picture and the
+    // fills stop reading. It solved a real problem at four counties and
+    // created a worse one at twenty-three.
+    //
+    // The relief the palette check wants for the low-contrast fills is still
+    // there without it: every group is labelled in the legend and is its own
+    // named FeatureGroup, which is the secondary encoding that check asks
+    // for. Fill back to 0.32 as well -- 0.45 was raised only because the
+    // black edge was carrying the boundary.
+    var base = {color: c, weight: 1.6, opacity: 0.95,
+                fillColor: c, fillOpacity: 0.32};
     // AND ON THE FEATURE, not only the layer. folium emits its own
     // setStyle(f => f.properties.style) AFTER addData, so a style set only
     // on the layer here is overwritten with undefined a moment later --
@@ -1366,7 +1369,7 @@ function(feature, layer) {
     feature.properties.style = base;
     layer.setStyle(base);
     layer.on('mouseover', function(){
-        layer.setStyle({weight: 3.6, fillOpacity: 0.62}); });
+        layer.setStyle({weight: 3, fillOpacity: 0.5}); });
     layer.on('mouseout', function(){ layer.setStyle(base); });
     layer.bindTooltip('<b>' + p.nm + '</b><br>' + p['_l___BY__'] +
                       (p.ac ? '<br>' + p.ac : ''), {sticky: true});
