@@ -9257,6 +9257,11 @@ def run(engine=None):
     # the screen -- "there is something hiding up there", and it is nothing,
     # 96 pixels of it.
     #
+    # 44px = the 24px this reclaimed to, plus 20 asked for back. Written in
+    # PIXELS rather than rem because it is now a measured offset, not a
+    # typographic one: the whole point was that the map sits a known distance
+    # from the toolbar, and rem moves with the root font size.
+    #
     # Scoped to the main block, so the sidebar and the header keep their own
     # spacing. 1.5rem still separates the first element from the toolbar.
     # ── and the gaps left by CSS-only elements ───────────────────
@@ -9278,7 +9283,7 @@ def run(engine=None):
     # BUT a style tag; anything with visible content alongside is untouched.
     st.markdown(
         "<style>[data-testid='stMainBlockContainer']"
-        "{padding-top:1.5rem !important;}"
+        "{padding-top:44px !important;}"
         "[data-testid='stElementContainer']:has("
         "[data-testid='stMarkdownContainer'] > style:only-child)"
         "{display:none !important;}</style>",
