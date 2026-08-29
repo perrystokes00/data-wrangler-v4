@@ -53,19 +53,6 @@ def _help_badge(text, top="2px", right="6px"):
         f"data-help=\"{_safe}\">?</span>"
         f"</div>",
         unsafe_allow_html=True)
-
-    # ── EVERY MAP MESSAGE RENDERS BELOW THE MAP ──────────────────
-    # Created HERE rather than in the map column: it is a plain buffer, not
-    # a placeholder, so it has no position of its own and every caller above
-    # the map can reach it. flush() decides where the text lands, and that
-    # is under st_folium.
-    #
-    # The ones that flash are the point. A caption written on one render and
-    # absent on the next appears, shoves the map down, and vanishes -- which
-    # is why this read as "something fires and pushes it back down" and then
-    # "it disappears immediately".
-    _msg = _MsgBelowMap()
-
 # BCP server config for the BCP-bypass loaders (_qry_wells_bcp /
 # _qry_gom_wells_bcp). Matches the SQL Server instance / database used
 # by the rest of the page. If you change the SQLAlchemy CONN_STR for
@@ -9753,6 +9740,18 @@ def run(engine=None):
     # filter then cascades with Query/Status/Region in the mask chain
     # later.
     #
+    # ── EVERY MAP MESSAGE RENDERS BELOW THE MAP ──────────────────
+    # A plain buffer, not a placeholder, so it has no position of its own:
+    # every caller above the map can reach it and flush() decides where the
+    # text lands, which is under st_folium.
+    #
+    # NAMED _mapmsg, NOT _msg. run() already binds _msg -- the message from
+    # _register_spatial_layer, inside a button branch that normally never
+    # fires. Reusing the name meant the buffer was only defined when someone
+    # registered a shapefile, and every other render raised "cannot access
+    # local variable '_msg' where it is not associated with a value".
+    _mapmsg = _MsgBelowMap()
+
     _zoom_target_label = st.session_state.get("wm_zoom_target", "")
     _zoom_target_has_filter = (
         _zoom_target_label
@@ -11837,7 +11836,7 @@ def run(engine=None):
                         _drawable = [r for r in _res if r.get("drawable")]
                         _wrote = _wp.write_paths(engine, _res,
                                                  log=lambda *_a: None)
-                    _msg.success(
+                    _mapmsg.success(
                         f"Computed {len(_res):,} survey(s): stored {_wrote:,}, "
                         f"skipped {len(_res) - len(_drawable):,} too vertical to "
                         f"show (closure under {_wp.MIN_CLOSURE_M:.0f} m)"
@@ -11845,7 +11844,7 @@ def run(engine=None):
                            if _probs else "") + ".")
                     st.rerun()
                 except Exception as _ce:
-                    _msg.error(f"Compute failed: {type(_ce).__name__}: {_ce}")
+                    _mapmsg.error(f"Compute failed: {type(_ce).__name__}: {_ce}")
 
         # Safe filter — if nothing selected fall back to show all.
         # When wells_df is empty (lazy-load not yet fired), dff is also empty
@@ -12008,7 +12007,7 @@ def run(engine=None):
             _src_col_exists = "source" in wells_df.columns
             _src_vals = sorted(wells_df["source"].dropna().unique().tolist()) \
                         if _src_col_exists else []
-            _msg.caption(
+            _mapmsg.caption(
                 f"🔬 Source filter debug: "
                 f"col_exists={_src_col_exists} · "
                 f"values_in_df={_src_vals} · "
@@ -12018,14 +12017,14 @@ def run(engine=None):
                 f"has_lat={dff['lat'].notna().sum() if not dff.empty else 0}"
             )
         if wells_df.empty:
-            _msg.caption(
+            _mapmsg.caption(
                 "🗺️ No well list loaded — pick a filter or draw an area to "
                 "load wells, or use 🔶 H3 for a density overview"
                 + (f" · {len(active_db)} DB layer(s)" if active_db else "")
                 + (f" · {len(active_shp)} shapefile(s)" if active_shp else "")
             )
         else:
-            _msg.caption(
+            _mapmsg.caption(
                 f"**{len(dff)}** of **{len(wells_df)}** wells"
                 + (f" · {len(active_db)} DB layer(s)" if active_db else "")
                 + (f" · {len(active_shp)} shapefile(s)" if active_shp else "")
@@ -12063,11 +12062,11 @@ def run(engine=None):
                     st.session_state["tray_well_data"] = _shadow
                     st.session_state["_auto_tray_uwis"] = _new_uwis
                     if _res_n > _TRAY_AUTO_ADD_CAP:
-                        _msg.caption(
+                        _mapmsg.caption(
                             f"📤 First {_TRAY_AUTO_ADD_CAP:,} of {_res_n:,} wells "
                             f"in Results — open Results for scout tickets / export.")
                     else:
-                        _msg.caption(
+                        _mapmsg.caption(
                             f"📤 {_res_n:,} well(s) in Results — open Results "
                             f"for scout tickets / export.")
 
@@ -12172,7 +12171,7 @@ def run(engine=None):
             st.session_state["map_mode"] = _new_mode
         with _mode_help:
             if _broad_scope and not _uwi_filter_active:
-                _msg.caption(
+                _mapmsg.caption(
                     # REPORTS, RATHER THAN ANNOUNCING A DECISION ALREADY MADE.
                     # The old wording ("only H3 is available") described a
                     # switch this code had just flipped for you. Wells now
@@ -12187,13 +12186,13 @@ def run(engine=None):
                            "wells_layer_on") else "")
                 )
             elif _new_mode == "h3":
-                _msg.caption(
+                _mapmsg.caption(
                     "🔶 **H3 mode** — hex density grid from federation views. "
                     "Pick resolution below (R4 continent · R5 state · R6 county · R7 play). "
                     "Click hexes to select, **Commit** to drill."
                 )
             elif _new_mode == "wells":
-                _msg.caption(
+                _mapmsg.caption(
                     "📍 **Wells mode** — individual well markers + rectangle "
                     "viewport. Switch to 🔶 H3 for a fast density overview."
                 )
@@ -12243,7 +12242,7 @@ def run(engine=None):
                     st.session_state.pop("_last_h3_click", None)
                     st.rerun()
             with _h3_c2:
-                _msg.caption(
+                _mapmsg.caption(
                     f"🔶 Rendering R{int(st.session_state.get('h3_resolution', 4))}"
                     f" hexes. Click a hex to drill its wells, or "
                     f"draw a box/circle to load wells (H3 hands off to Wells)."
@@ -12460,7 +12459,7 @@ def run(engine=None):
 
         # Build map — show progress so user knows it's working
 
-        _msg.info(f"🗺 Building map for {len(dff):,} wells…")
+        _mapmsg.info(f"🗺 Building map for {len(dff):,} wells…")
 
         # NO prefer_canvas. THE COMMENT THAT WAS HERE WAS RIGHT AND I
         # OVERRODE IT. It said Leaflet.markercluster needs SVG children to
@@ -12732,7 +12731,7 @@ def run(engine=None):
                 # A CONTROL THAT CANNOT ACT MUST SAY SO. Silence here reads
                 # as a broken toggle rather than a missing box.
                 _say("[map] clip ON but no box drawn -- nothing to clip to")
-                _msg.info(
+                _mapmsg.info(
                     "🔲 **Clip to selection** is on and waiting for a "
                     "box — draw one with the rectangle tool and everything "
                     "drawn after it is constrained to that box.")
@@ -12854,7 +12853,7 @@ def run(engine=None):
                 and _h3_has_sources
             )
             if _show_h3:
-                _msg.info(f"🔶 Loading H3 R{_h3_res} density…")
+                _mapmsg.info(f"🔶 Loading H3 R{_h3_res} density…")
                 try:
                     # SAY WHICH SOURCE, because the difference between
                     # them is 40x and it was invisible.
@@ -12932,12 +12931,12 @@ def run(engine=None):
                         _total_wells = int(_h3_df["well_count"].sum())
                         _sel_note = (f" · {len(_sel_h3)} selected"
                                      if _sel_h3 else "")
-                        _msg.info(
+                        _mapmsg.info(
                             f"🔶 H3 R{_h3_res}: {_hex_count:,} hexes · "
                             f"{_total_wells:,} wells aggregated{_sel_note}"
                         )
                     else:
-                        _msg.warning(
+                        _mapmsg.warning(
                             f"🔶 H3 R{_h3_res}: no data. Density views "
                             f"may not exist — run "
                             f"create_v_well_density_h3.sql first."
@@ -12953,7 +12952,7 @@ def run(engine=None):
                     import traceback as _tb
                     _say("[map] H3 render skipped: %s\n%s"
                           % (_e, _tb.format_exc()))
-                    _msg.warning(f"H3 render skipped: {_e}  (traceback in the log)")
+                    _mapmsg.warning(f"H3 render skipped: {_e}  (traceback in the log)")
                     # If H3 fails, drop the layer (safe — no heavy load); the
                     # user can re-enable it or turn on Wells for the full list.
                     #
@@ -12972,9 +12971,9 @@ def run(engine=None):
                     st.session_state["_pending_h3_off"] = True
             else:
                 if not _h3_has_sources:
-                    _msg.info("🔶 Pick a schema in the dropdown above to see H3 density.")
+                    _mapmsg.info("🔶 Pick a schema in the dropdown above to see H3 density.")
                 else:
-                    _msg.info("🔶 H3 hidden — toggle 'Show grid' to bring it back")
+                    _mapmsg.info("🔶 H3 hidden — toggle 'Show grid' to bring it back")
 
             # Drilled wells overlay (yellow markers on top of the density
             # layer). Skipped when the Wells block is active — it renders the
@@ -12993,11 +12992,11 @@ def run(engine=None):
                                 m, _vp_df, _viewport_uwis
                             )
                             if _vp_count:
-                                _msg.info(
+                                _mapmsg.info(
                                     f"🔶 H3 + {_vp_count:,} drilled wells"
                                 )
                 except Exception as _e:
-                    _msg.warning(f"Drilled wells render skipped: {_e}")
+                    _mapmsg.warning(f"Drilled wells render skipped: {_e}")
                     st.session_state["viewport_uwis"] = []
         if _show_wells_layer:
             _viewport_uwis = st.session_state.get("viewport_uwis", [])
@@ -13067,7 +13066,7 @@ def run(engine=None):
                             m, _vp_df, _viewport_uwis,
                             ppdm=bool(st.session_state.get("wm_ppdm_symbols")))
                         if _vp_count:
-                            _msg.info(f"📍 Drilled: {_vp_count:,} wells shown")
+                            _mapmsg.info(f"📍 Drilled: {_vp_count:,} wells shown")
                             # Legend for the drilled wells (the base-layer legend
                             # above doesn't run when a drill is active).
                             if st.session_state.get("wm_show_legend", True):
@@ -13075,43 +13074,43 @@ def run(engine=None):
                                     m, _vp_df,
                                     ppdm=bool(st.session_state.get("wm_ppdm_symbols")))
                     else:
-                        _msg.warning(
+                        _mapmsg.warning(
                             "📍 Drill returned wells but their coordinates "
                             "weren't found — try the drill again."
                         )
                 except Exception as _e:
-                    _msg.warning(f"Viewport render skipped: {_e}")
+                    _mapmsg.warning(f"Viewport render skipped: {_e}")
                     st.session_state["viewport_uwis"] = []
 
         _mark("build: wells layer")
         if "db_trajectories" in active_db:
-            _msg.info("📐 Loading trajectories…")
+            _mapmsg.info("📐 Loading trajectories…")
             _add_trajectories(m, _qry_trajectories(engine))
         if "db_sticks" in active_db:
-            _msg.info("➖ Drawing surface→TD sticks…")
+            _mapmsg.info("➖ Drawing surface→TD sticks…")
             _n_sticks = _add_survey_sticks(m, _qry_survey_sticks(engine))
             if _n_sticks:
-                _msg.info(f"➖ Drew {_n_sticks:,} surface→TD sticks…")
+                _mapmsg.info(f"➖ Drew {_n_sticks:,} surface→TD sticks…")
         if "db_formation_tops" in active_db:
-            _msg.info("📏 Loading formation tops…")
+            _mapmsg.info("📏 Loading formation tops…")
             _add_formation_tops(m, _qry_formation_tops(engine))
         if "db_dst" in active_db:
-            _msg.info("🧪 Loading DST intervals…")
+            _mapmsg.info("🧪 Loading DST intervals…")
             _add_dst(m, _qry_dst(engine))
         if "db_production" in active_db:
-            _msg.info("📈 Loading production…")
+            _mapmsg.info("📈 Loading production…")
             _add_production_bubbles(m, _qry_production(engine))
         if "db_production_heat" in active_db:
-            _msg.info("🔥 Building production heatmap…")
+            _mapmsg.info("🔥 Building production heatmap…")
             _wt = st.session_state.get("wm_db_prod_heat_wt", "BOE")
             _n_heat = _add_production_heatmap(m, _qry_production(engine), weight=_wt)
             if _n_heat:
-                _msg.info(f"🔥 Production heatmap: {_n_heat:,} producing wells…")
+                _mapmsg.info(f"🔥 Production heatmap: {_n_heat:,} producing wells…")
         if "db_documents" in active_db:
-            _msg.info("📄 Loading documented wells…")
+            _mapmsg.info("📄 Loading documented wells…")
             _n_docs = _add_documents_layer(m, _qry_well_documents(engine))
             if _n_docs:
-                _msg.info(f"📄 Plotted {_n_docs:,} documented well(s)")
+                _mapmsg.info(f"📄 Plotted {_n_docs:,} documented well(s)")
         if "db_fields" in active_db:
             _add_fields(m, _qry_fields(engine))
         if "db_basins" in active_db:
@@ -13135,7 +13134,7 @@ def run(engine=None):
                     if "survey_name" in _df3.columns:
                         _df3 = _df3[_df3["survey_name"].astype(str).isin(_keep)]
                 if not _df3.empty:
-                    _msg.info("🟦 Loading 3D seismic surveys…")
+                    _mapmsg.info("🟦 Loading 3D seismic surveys…")
                     _add_seismic_3d(m, _df3)
 
         _mark("build: seismic 3d")
@@ -13433,12 +13432,12 @@ def run(engine=None):
                         from dataview.mapping.well_path import add_well_paths
                         _np = add_well_paths(
                             m, engine, name="🌀 Well paths (survey)")
-                        _msg.info(f"🌀 Drew {_np:,} wellbore path(s)…"
+                        _mapmsg.info(f"🌀 Drew {_np:,} wellbore path(s)…"
                                   if _np else
                                   "🌀 No stored paths — run well_path_sql "
                                   "apply to compute them.")
                     except Exception as _pe:
-                        _msg.warning(f"Well paths skipped: {_pe}")
+                        _mapmsg.warning(f"Well paths skipped: {_pe}")
                 if "geo_wellpts" in active_db:
                     add_well_points(m, engine, show=True)
                 if "geo_refwells" in active_db:
@@ -13461,7 +13460,7 @@ def run(engine=None):
                         _say("[map] geo layer geo_refwells    drew %s%s"
                              % (_rn, "" if _rscope is not None
                                 else "  (capped sample, no bounds)"))
-                        _msg.info(
+                        _mapmsg.info(
                             f"🔵 Drew {_rn:,} reference well(s)"
                             + ("" if _rscope is not None else
                                " — a spread sample across the whole view. "
@@ -13475,9 +13474,9 @@ def run(engine=None):
                     # nothing. Python also DELETES the name when the except
                     # block ends, so it is unbound even after this runs.
                     except Exception as _refexc:
-                        _msg.warning(f"Reference wells skipped: {_refexc}")
+                        _mapmsg.warning(f"Reference wells skipped: {_refexc}")
             except Exception as _ge:
-                _msg.warning(f"Geography layers skipped: {_ge}")
+                _mapmsg.warning(f"Geography layers skipped: {_ge}")
 
         _mark("build: geography layers")
         # Phase 4: render individual GOM well markers after a Commit drill.
@@ -13489,7 +13488,7 @@ def run(engine=None):
         _gom_drilled = st.session_state.get("viewport_gom_wells", [])
         if _gom_drilled:
             _phase(70, f"🛢 Rendering {len(_gom_drilled):,} drilled GOM wells…")
-            _msg.info(f"🛢 Rendering {len(_gom_drilled):,} drilled GOM wells…")
+            _mapmsg.info(f"🛢 Rendering {len(_gom_drilled):,} drilled GOM wells…")
             _add_gom_wells_markers(m, _gom_drilled)
             # NOTE: do NOT _phase(100) here — bar persists to st_folium
 
@@ -13499,22 +13498,22 @@ def run(engine=None):
             # the same status filter as the markers. Sidetracks have
             # their own well_id and render as their own polylines.
             if "db_gom_trajectories" in active_db:
-                _msg.info("🌀 Drawing GOM wellbore trajectories…")
+                _mapmsg.info("🌀 Drawing GOM wellbore trajectories…")
                 _n_traj = _add_gom_trajectories(m, _gom_drilled, engine)
                 if _n_traj:
-                    _msg.info(f"🌀 Drew {_n_traj:,} GOM trajectories…")
+                    _mapmsg.info(f"🌀 Drew {_n_traj:,} GOM trajectories…")
 
             # Surface→TD sticks for the same drilled GOM set. Uses the
             # directional_survey_point table (surface → deepest point).
             if "db_sticks" in active_db:
-                _msg.info("➖ Drawing GOM surface→TD sticks…")
+                _mapmsg.info("➖ Drawing GOM surface→TD sticks…")
                 _n_gsticks = _add_gom_survey_sticks(m, _gom_drilled, engine)
                 if _n_gsticks:
-                    _msg.info(f"➖ Drew {_n_gsticks:,} GOM surface→TD sticks…")
+                    _mapmsg.info(f"➖ Drew {_n_gsticks:,} GOM surface→TD sticks…")
 
         _mark("build: gom drilled")
         for lay in active_shp:
-            _msg.info(f"🗂 Loading {lay.get('layer_name','layer')}…")
+            _mapmsg.info(f"🗂 Loading {lay.get('layer_name','layer')}…")
             _add_shapefile_layer(m, engine, lay)
 
         # COLLAPSED. Pinned open, the control grew with the map: eight layers
@@ -14364,7 +14363,7 @@ def run(engine=None):
         """, unsafe_allow_html=True)
 
         _mark("build: map CSS")
-        _msg.info("🌐 Rendering map in browser…")
+        _mapmsg.info("🌐 Rendering map in browser…")
         # Try use_container_width if available (streamlit-folium >= 0.18),
         # else fall back to width=None which lets st_folium auto-size.
         # We subscribe ONLY to events we actually consume — fewer events means
@@ -14684,7 +14683,7 @@ def run(engine=None):
         # honest answer -- that table is empty on this database -- is one the
         # reader can act on: load it, or stop clicking it.
         if _geo_empty:
-            _msg.caption("· ".join([
+            _mapmsg.caption("· ".join([
                 "ℹ️ Nothing to draw for: **%s**" % "**, **".join(_geo_empty),
                 "those tables have no rows with geometry in this database."]))
 
@@ -14702,7 +14701,7 @@ def run(engine=None):
             # this message". An exception is worth a banner; the steady state
             # is worth a line. The full text still lives in the toggle help,
             # which is where someone asking "what does Freeze do" will look.
-            _msg.caption(
+            _mapmsg.caption(
                 "🔒 Frozen — hover identifies; box and circle still "
                 "select. Untick **Freeze map** to click a well open.")
 
@@ -14714,7 +14713,7 @@ def run(engine=None):
         # find. Same lesson as ✗ Clear wells and 🔒 Freeze map, both of
         # which announce themselves immediately above the map for this reason.
         if _render_held:
-            _msg.info(
+            _mapmsg.info(
                 "⛔ **Render held** — the well and hexagon layers are "
                 "switched off on purpose, which is why the map is empty "
                 "while their toggles still read on. Nothing was lost. Press "
@@ -14740,9 +14739,9 @@ def run(engine=None):
                 )
         _phase(100)
         # UNDER THE MAP, which is what the messages are about. This used to
-        # be _msg.empty() -- clearing a placeholder that sat ABOVE the map
+        # be _mapmsg.empty() -- clearing a placeholder that sat ABOVE the map
         # and had already pushed it down for the whole render.
-        _msg.flush(st.container())
+        _mapmsg.flush(st.container())
         # _watch_seis_choice() USED TO BE CALLED HERE and is now registered at
         # the top of run(). See the note there: 36 statements between the two
         # points can end the render early, and each one left the browser
