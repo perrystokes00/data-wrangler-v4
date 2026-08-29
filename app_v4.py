@@ -194,6 +194,28 @@ def _inject_theme(t: dict):
     [data-testid="stSidebar"] * {{ color: {text} !important; }}
     [data-testid="stHeader"]  {{ background: {bg} !important; }}
     [data-testid="stToolbar"] {{ background: {bg} !important; }}
+    /* ── TOP PADDING, SET HERE AND NOT IN A PAGE ──────────────────────
+       Streamlit gives stMainBlockContainer 6rem (96px) of top padding.
+       The map page used to override it ~90 lines into its own run(), so
+       every render showed 96px until the script reached that line -- a
+       first launch is seconds of it, a warm revisit is imperceptible.
+       Reported exactly that way: "pushed down on first launch, fine if I
+       start Mapping again".
+
+       The shell runs before any page dispatch, so the rule is in force
+       from the first paint and on every rerun, whatever page is open. */
+    [data-testid="stMainBlockContainer"] {{ padding-top: 64px !important; }}
+
+    /* An injected <style> is a real child of the flex column and that
+       column has a 16px gap, so each CSS-only element costs 16px while
+       rendering nothing. :only-child matches a markdown block that is
+       NOTHING BUT a style tag; anything with visible content is left
+       alone. Hiding the container does not disable the rules -- a <style>
+       is never rendered and applies regardless of an ancestor display. */
+    [data-testid="stElementContainer"]:has(
+        [data-testid="stMarkdownContainer"] > style:only-child) {{
+        display: none !important;
+    }}
     [data-testid="stDecoration"] {{ background: {bg} !important; }}
     button[kind="primary"] {{
         background: {pri_dk} !important;

@@ -9249,44 +9249,12 @@ def run(engine=None):
     # immediately, which is the first render's case.
     _watch_seis_choice()
 
-    # ── reclaim Streamlit's top padding ─────────────────────────────────
-    # MEASURED, NOT GUESSED: stMainBlockContainer carries 96px of padding
-    # before a single element renders, so the map began at 128px. Add a
-    # laptop's browser chrome and a 500px map and the bottom of it falls off
-    # the screen -- "there is something hiding up there", and it is nothing,
-    # 96 pixels of it.
-    #
-    # 64px = the 24px this reclaimed to, plus 40 asked for back. Written in
-    # PIXELS rather than rem because it is now a measured offset, not a
-    # typographic one: the whole point was that the map sits a known distance
-    # from the toolbar, and rem moves with the root font size.
-    #
-    # Scoped to the main block, so the sidebar and the header keep their own
-    # spacing. 1.5rem still separates the first element from the toolbar.
-    # ── and the gaps left by CSS-only elements ───────────────────
-    # An injected <style> is a real child of the flex column, and that column
-    # has a 16px gap -- so every CSS-only element costs 16px of vertical
-    # space while rendering nothing. Three sit above the map (a font import,
-    # the theme variables, and this rule itself), which is 32px of gap.
-    #
-    # MEASURED ON THE LIVE PAGE, not reasoned about: hiding them moved the
-    # map from 56px to 24px, exactly the 32px predicted, with six containers
-    # matched across the page.
-    #
-    # HIDING THE CONTAINER DOES NOT DISABLE THE STYLE. A <style> element is
-    # never rendered; its rules apply regardless of an ancestor's display.
-    # Verified on the live page -- the padding above still resolves to 24px
-    # while the container holding that very rule is display:none.
-    #
-    # :only-child is the safety. It matches a markdown block that is NOTHING
-    # BUT a style tag; anything with visible content alongside is untouched.
-    st.markdown(
-        "<style>[data-testid='stMainBlockContainer']"
-        "{padding-top:64px !important;}"
-        "[data-testid='stElementContainer']:has("
-        "[data-testid='stMarkdownContainer'] > style:only-child)"
-        "{display:none !important;}</style>",
-        unsafe_allow_html=True)
+    # The top padding and the CSS-only-element collapse now live in
+    # app_v4.py's stylesheet, which is injected before any page dispatch.
+    # Setting them here meant they only took effect ~90 lines into this
+    # function, so the page rendered at Streamlit's 96px until the script
+    # got that far -- visible as a push-down on a slow first launch and
+    # invisible on a warm one.
 
     # ── Active database resolution ─────────────────────────────────────
     # The map reads from ONE database, used by both the SQLAlchemy engine
