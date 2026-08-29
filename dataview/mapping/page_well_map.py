@@ -14365,15 +14365,31 @@ def run(engine=None):
         st.markdown("""
             <style>
             iframe { display:block !important; margin:0 !important; padding:0 !important; }
-            /* Hard-cap st_folium iframe wrapper to its requested height */
-            iframe[title="streamlit_folium.st_folium"],
-            iframe[srcdoc] {
+            /* Hard-cap st_folium iframe wrapper to its requested height.
+
+               NOT iframe[srcdoc]. Measured in the browser 29 Aug: the folium
+               iframe carries NO srcdoc -- it is a stCustomComponentV1 with a
+               src and title="streamlit_folium.st_folium" -- so that selector
+               never once matched the map it was written for. What it DID
+               match is every components.html helper, which are srcdoc
+               iframes: BOTH scroll-to-top scripts, each declared height=0,
+               forced to 500px. One of them renders at the top of the page on
+               an app_mode change, and that is the entire "the map page is
+               pushed down, but only on the first launch" -- 500px of blank
+               iframe above ⚙ Page controls, gone on the next rerun because
+               app_mode no longer changes. It was also silently capping the
+               820px seismic fragment to 500.
+
+               Six rounds of padding work went past this. The padding was
+               always 64px and always correct; the blank band was an element.
+               A selector that is broader than the thing it names is a bug
+               waiting for a second element to match it. */
+            iframe[title="streamlit_folium.st_folium"] {
                 height: 500px !important;
                 max-height: 500px !important;
                 vertical-align: bottom !important;
             }
-            div:has(> iframe[title="streamlit_folium.st_folium"]),
-            div:has(> iframe[srcdoc]) {
+            div:has(> iframe[title="streamlit_folium.st_folium"]) {
                 height: 500px !important;
                 max-height: 500px !important;
                 margin: 0 !important;
