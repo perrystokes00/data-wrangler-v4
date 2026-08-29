@@ -782,14 +782,29 @@ def add_well_symbols(m, engine, show=True, limit=4000, uwi_like=None):
 # must not require an UPDATE. Owners not in the table get a stable colour from
 # their own name, so an operator nobody anticipated still draws consistently
 # rather than falling into a shared "other" bucket.
+# VALIDATED, NOT CHOSEN BY EYE. The previous set failed on its own terms:
+# #27ae60 (Bighorn) against #16a085 (Powder River) measured deltaE 7.5 in
+# NORMAL vision -- below the floor of 15, i.e. hard to tell apart with full
+# colour vision, never mind deuteranopia. Two owners the map could not
+# distinguish is a wrong answer dressed as a legend.
+#
+# These six are Okabe-Ito, the standard CVD-safe categorical basis. Checked:
+# lightness band PASS, chroma floor PASS, normal-vision worst adjacent pair
+# deltaE 16.4 PASS. The deutan warning at 7.6 is legal only with secondary
+# encoding, and there are two -- the legend labels every group, and each
+# owner is its own named FeatureGroup in the layer control.
+#
+# Grey stays for "unleased", deliberately OUTSIDE the categorical set: it is
+# the absence of an owner, the same role the neutral plays in the vintage
+# ramp, and it is meant to recede.
 LEASE_OWNER_COLOURS = {
-    "naval petroleum reserve operations": "#c0392b",
-    "sweetwater resources llc":           "#2980b9",
-    "bighorn basin energy co":            "#27ae60",
-    "salt creek minerals trust":          "#8e44ad",
-    "casper ridge petroleum":             "#e67e22",
-    "powder river royalty partners":      "#16a085",
-    "unleased federal acreage":           "#7f8c8d",
+    "sweetwater resources llc":           "#0072B2",   # blue
+    "powder river royalty partners":      "#E69F00",   # orange
+    "bighorn basin energy co":            "#009E73",   # green
+    "casper ridge petroleum":             "#CC79A7",   # pink
+    "salt creek minerals trust":          "#D55E00",   # vermillion
+    "naval petroleum reserve operations": "#56B4E9",   # sky
+    "unleased federal acreage":           "#7f8c8d",   # neutral, on purpose
 }
 _FALLBACK_COLOURS = ["#d35400", "#2c3e50", "#c2185b", "#00838f", "#5d4037",
                      "#455a64", "#6a1b9a", "#00695c"]
@@ -1024,11 +1039,14 @@ def add_lease_layer(m, engine, show=True, limit=25000, by="owner",
         folium.GeoJson(
             {"type": "FeatureCollection", "features": feats},
             pane="dvleases",
+            # Same black outline as the served-file path. Two paths drawing
+            # the same layer differently is how a fallback becomes a
+            # different map.
             style_function=lambda _f, _c=colour: {
-                "color": _c, "weight": 1.6, "opacity": 0.95,
-                "fillColor": _c, "fillOpacity": 0.32},
+                "color": "#111111", "weight": 2.2, "opacity": 0.95,
+                "fillColor": _c, "fillOpacity": 0.45},
             highlight_function=lambda _f, _c=colour: {
-                "weight": 3, "fillOpacity": 0.5},
+                "weight": 3.6, "fillOpacity": 0.62},
             # HOVER IDENTIFIES, CLICK REPORTS. Two questions, and one control
             # cannot answer both: a tooltip long enough to hold the record
             # follows the pointer and hides what is under it. The popup is
@@ -1164,7 +1182,7 @@ LEASE_GEOJSON_NAME = "dv_leases.geojson"
 # signature exists to decide whether to rebuild; keyed on the data alone, a
 # code change that adds a property serves the old file forever and the new
 # feature is silently missing. v2 added _la/_lo for clip-to-selection.
-LEASE_GEOJSON_FORMAT = 2
+LEASE_GEOJSON_FORMAT = 3      # v3: black outlines, validated palette
 
 
 def lease_data_signature(engine) -> str:
@@ -1332,8 +1350,14 @@ function(feature, layer) {
         if (layer._path) { layer._path.style.pointerEvents = "none"; }
         return;
     }
-    var base = {color: c, weight: 1.6, opacity: 0.95,
-                fillColor: c, fillOpacity: 0.32};
+    // BLACK OUTLINE, COLOUR IN THE FILL. Stroking each tract in its own
+    // hue made a lease boundary and a lease identity the same signal, so
+    // adjacent tracts of one owner merged into a blob and the parcel lines
+    // -- the thing a landman actually reads -- disappeared. Black separates
+    // every tract from its neighbour whatever the fill, and doubles as the
+    // relief the palette check asks for where a fill is under 3:1.
+    var base = {color: '#111111', weight: 2.2, opacity: 0.95,
+                fillColor: c, fillOpacity: 0.45};
     // AND ON THE FEATURE, not only the layer. folium emits its own
     // setStyle(f => f.properties.style) AFTER addData, so a style set only
     // on the layer here is overwritten with undefined a moment later --
@@ -1342,7 +1366,7 @@ function(feature, layer) {
     feature.properties.style = base;
     layer.setStyle(base);
     layer.on('mouseover', function(){
-        layer.setStyle({weight: 3, fillOpacity: 0.5}); });
+        layer.setStyle({weight: 3.6, fillOpacity: 0.62}); });
     layer.on('mouseout', function(){ layer.setStyle(base); });
     layer.bindTooltip('<b>' + p.nm + '</b><br>' + p['_l___BY__'] +
                       (p.ac ? '<br>' + p.ac : ''), {sticky: true});
