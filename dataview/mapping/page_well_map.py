@@ -12733,7 +12733,18 @@ def run(engine=None):
             elif "gom" in _h3_sources:
                 _h3_schema = "dataview_gom"
             else:
-                _h3_schema = None
+                # THE FALLBACK MUST MATCH WHAT THE PICKER SAYS. This was
+                # None -- SUM EVERY ARM -- so an unrecognised source list
+                # silently counted the 3.9M-well national reference while
+                # the control still read "Loaded wells". A control that says
+                # one thing while the query does another, and the cost is
+                # not subtle: 276,679 cells in 4.43s against 1,405 in 0.11s,
+                # a 40x difference, with 99.3% of the work coming from wells
+                # nobody asked to see. Reported as "why is the gold master
+                # even involved, I did not ask for it" -- and they had not.
+                #
+                # "Everything" is still one click away and still says so.
+                _h3_schema = "dataview"
 
             # Resolution is whatever the H3 Resolution slider is set to.
             _h3_res = int(st.session_state.get("h3_resolution", 4))
@@ -12745,6 +12756,11 @@ def run(engine=None):
             if _show_h3:
                 _msg.info(f"🔶 Loading H3 R{_h3_res} density…")
                 try:
+                    # SAY WHICH SOURCE, because the difference between
+                    # them is 40x and it was invisible.
+                    _say("[map] H3 R%d density source=%s"
+                         % (_h3_res, _h3_schema or "ALL ARMS (4M reference "
+                            "included)"))
                     _phase(15, f"🔶 Querying density view R{_h3_res}…")
                     _h3_df = _qry_h3_grid(engine, resolution=_h3_res,
                                           schema_filter=_h3_schema)
