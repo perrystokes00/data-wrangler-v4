@@ -257,7 +257,10 @@ def points_layer(m, points, name, *, color="#222", fill="#555",
     folium.GeoJson(
         {"type": "FeatureCollection", "features": feats},
         name=name, show=show,
-        marker=folium.CircleMarker(radius=radius, color=color, weight=1,
+        # THE STROKE IS PART OF THE HIT AREA in SVG, so a slightly heavier
+        # ring widens the target without growing the dot much: weight 2 adds
+        # a pixel each side of a radius that is already screen-fixed.
+        marker=folium.CircleMarker(radius=radius, color=color, weight=2,
                                    fill=True, fill_color=fill,
                                    fill_opacity=opacity),
         tooltip=folium.GeoJsonTooltip(fields=["nm"], labels=False),
@@ -455,7 +458,12 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
         n_drawn = points_layer(
             m, ((la, lo, nm, uwi, op, cty, prov, ty, stat, td, spud)
                 for nm, la, lo, uwi, op, cty, prov, ty, stat, td, spud in rows),
-            name=label, color="#1d4ed8", fill="#60a5fa", radius=2, show=show,
+            # BIG ENOUGH TO HIT. radius=2 is a 4px target and the popup was
+            # the whole point of this path -- "make the tooltip easier to
+            # select for a popup". A CircleMarker radius is already in SCREEN
+            # pixels, so it is fixed at every zoom; it was simply too small.
+            # 5 gives a 10px target, which is the usual minimum for a pointer.
+            name=label, color="#1d4ed8", fill="#60a5fa", radius=5, show=show,
             opacity=0.7, extra=_f, popup_fields=["nm"] + _f,
             # "Reference well", NOT "Well", and it is load-bearing rather
             # than cosmetic. The map click handler identifies a loaded well by
@@ -468,9 +476,13 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
             popup_aliases=["Reference well", "UWI", "Operator", "County",
                            "State", "Type", "Status", "TD", "Spud"])
     else:
+        # SMALLER ON THE SAMPLED PATH, deliberately. This one has no popup to
+        # hit -- it is the three-column probe -- and 48,000 dots at radius 5
+        # is a smear, not a map. The path that can be clicked is the one that
+        # is worth making clickable.
         n_drawn = points_layer(m, ((la, lo, nm) for nm, la, lo in rows),
                                name=label, color="#1d4ed8", fill="#60a5fa",
-                               radius=2, show=show, opacity=0.7)
+                               radius=2.5, show=show, opacity=0.7)
     # in_scope is None when capped: "we do not know, and finding out costs
     # more than the answer is worth". Never 0, which would read as "none here".
     return n_drawn, in_scope
