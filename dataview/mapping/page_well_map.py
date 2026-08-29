@@ -1048,6 +1048,89 @@ def _seis_pref_mtime() -> float:
         return float(_USER_PREFS_PATH.stat().st_mtime)
     except OSError:
         return 0.0
+def _layout_probe():
+    """TEMPORARY. Print what is at the top of the page, ON the page.
+
+    Six rounds of padding theory failed because the measurement was always
+    taken in a browser that was not Perry's. DevTools would settle it and
+    could not be made to run. So the page measures ITSELF and shows the
+    answer at the bottom, where reading it costs nothing.
+
+    TWO snapshots, 0.4s and 3s, because the reported symptom is "it starts to
+    draw then gets pushed down" -- a single reading cannot show a change. What
+    matters is which row's height GREW between them.
+
+    Delete this and its one call site once the cause is found.
+    """
+    st.components.v1.html(
+        """
+        <style>
+        body{margin:0;font:11px/1.45 ui-monospace,Consolas,monospace;
+             color:#e6edf3;background:#0e1117}
+        table{border-collapse:collapse;width:100%}
+        td,th{padding:2px 6px;border-bottom:1px solid #30363d;text-align:left}
+        th{color:#8b949e}
+        .n{text-align:right;font-variant-numeric:tabular-nums}
+        h4{margin:8px 0 4px;color:#58a6ff;font:600 12px ui-monospace,monospace}
+        .hi{color:#f0883e}
+        </style>
+        <div id="out">measuring...</div>
+        <script>
+        (function(){
+          var D = window.parent.document;
+          function box(){
+            return D.querySelector('[data-testid="stMainBlockContainer"]')
+                || D.querySelector('[data-testid="stAppViewBlockContainer"]')
+                || D.querySelector('section.main .block-container')
+                || D.querySelector('.block-container');
+          }
+          function snap(){
+            var c = box();
+            if(!c){ return {err:'no block container found'}; }
+            var cs = window.parent.getComputedStyle(c);
+            var main = D.querySelector('[data-testid="stMain"]')
+                    || D.querySelector('section.main');
+            var kids = Array.prototype.slice.call(c.children, 0, 12);
+            var rows = [];
+            for (var i=0;i<kids.length;i++){
+              var e = kids[i], r = e.getBoundingClientRect();
+              var t = (e.innerText||'').split(String.fromCharCode(10))
+                        .join(' ').slice(0,44);
+              rows.push({i:i, id:(e.getAttribute('data-testid')||e.tagName),
+                         h:Math.round(r.height), top:Math.round(r.top), txt:t});
+            }
+            return {pad:cs.paddingTop,
+                    cTop:Math.round(c.getBoundingClientRect().top),
+                    scr:(main?Math.round(main.scrollTop):-1),
+                    docH:Math.round(c.scrollHeight), rows:rows};
+          }
+          function fmt(title, s){
+            if(!s){ return ''; }
+            if(s.err){ return '<h4>'+title+'</h4><div class=hi>'+s.err+'</div>'; }
+            var h = '<h4>'+title+' &mdash; padTop '+s.pad+' | container top '
+                  + s.cTop+' | stMain.scrollTop '+s.scr+' | page '+s.docH
+                  + 'px</h4><table><tr><th>#</th><th>element</th>'
+                  + '<th class=n>height</th><th class=n>top</th><th>text</th></tr>';
+            for (var i=0;i<s.rows.length;i++){
+              var r = s.rows[i];
+              h += '<tr><td>'+r.i+'</td><td>'+r.id+'</td><td class=n>'+r.h
+                 + '</td><td class=n>'+r.top+'</td><td>'+r.txt+'</td></tr>';
+            }
+            return h+'</table>';
+          }
+          var a = null, out = document.getElementById('out');
+          setTimeout(function(){ a = snap();
+            out.innerHTML = fmt('EARLY (0.4s)', a); }, 400);
+          setTimeout(function(){
+            out.innerHTML = fmt('EARLY (0.4s)', a) + fmt('SETTLED (3s)', snap());
+          }, 3000);
+        })();
+        </script>
+        """,
+        height=620, scrolling=True,
+    )
+
+
 def _scroll_main_to_top():
     """Put the main scroll container back at the top.
 
@@ -16085,6 +16168,10 @@ def run(engine=None):
                 st.session_state["_summary_uwis"] = []
                 st.rerun()
             st.markdown("---")
+
+    # TEMPORARY layout probe -- see _layout_probe(). Dead last on the
+    # page, so it cannot affect the thing it is measuring.
+    _layout_probe()
 
 
 # Wrap the query and layer functions. MUST BE LAST: it walks globals(),
