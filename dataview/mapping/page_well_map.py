@@ -9257,21 +9257,12 @@ def run(engine=None):
     # the screen -- "there is something hiding up there", and it is nothing,
     # 96 pixels of it.
     #
-    # ZERO, AND THE HEADER IS HIDDEN -- the two go together and neither works
-    # alone. Streamlit's header is position:fixed, 60px tall, opaque, and
-    # z-index 999990, so it sits OVER the content area rather than above it.
-    # That is what the 6rem was buying: 60px of header plus breathing room.
-    # Measured -- at any padding under 60px the top of the page renders
-    # BEHIND the toolbar, which reads as content simply missing rather than
-    # as an overlap, so it is not a trade you would notice going wrong.
+    # 64px = the 24px this reclaimed to, plus 40 asked for back. Written in
+    # PIXELS rather than rem because it is now a measured offset, not a
+    # typographic one: the whole point was that the map sits a known distance
+    # from the toolbar, and rem moves with the root font size.
     #
-    # WHAT THIS COSTS. The toolbar carries the hamburger menu, the Running
-    # indicator and the STOP button -- and Stop is the only in-browser way to
-    # interrupt a long render. The terminal still has start.bat stop, and the
-    # timings still reach dev.out.log, so nothing is unrecoverable; but a
-    # render that hangs now has no visible brake. Deliberate, and asked for.
-    #
-    # Scoped to the main block, so the sidebar keeps its own
+    # Scoped to the main block, so the sidebar and the header keep their own
     # spacing. 1.5rem still separates the first element from the toolbar.
     # ── and the gaps left by CSS-only elements ───────────────────
     # An injected <style> is a real child of the flex column, and that column
@@ -9292,11 +9283,10 @@ def run(engine=None):
     # BUT a style tag; anything with visible content alongside is untouched.
     st.markdown(
         "<style>[data-testid='stMainBlockContainer']"
-        "{padding-top:0 !important;}"
+        "{padding-top:64px !important;}"
         "[data-testid='stElementContainer']:has("
         "[data-testid='stMarkdownContainer'] > style:only-child)"
-        "{display:none !important;}"
-        "[data-testid='stHeader']{display:none !important;}</style>",
+        "{display:none !important;}</style>",
         unsafe_allow_html=True)
 
     # ── Active database resolution ─────────────────────────────────────
