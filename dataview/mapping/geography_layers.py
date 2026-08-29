@@ -870,7 +870,7 @@ _SIZE_SQL = ("CASE WHEN area_km2 IS NULL THEN NULL"
              " ELSE '6. 1280+ ac' END")
 
 
-def add_lease_layer(m, engine, show=True, limit=5000, by="owner",
+def add_lease_layer(m, engine, show=True, limit=25000, by="owner",
                     legend=True):
     """dv_land_tract coloured by owner (or producing status), grouped for the
     layer control.
@@ -919,6 +919,26 @@ def add_lease_layer(m, engine, show=True, limit=5000, by="owner",
         return 0
     if not rows:
         return 0
+
+    # A TOP THAT CLIPS LOOKS EXACTLY LIKE A COMPLETE MAP. The layer returns a
+    # count and reports success either way, so a silent truncation is a
+    # confident wrong answer -- the failure this codebase names first. Ask the
+    # table how many there ARE and say so when they disagree. Cheap: a COUNT
+    # on the same predicate, no geometry touched, and only when the returned
+    # count actually reached the limit.
+    if len(rows) >= int(limit):
+        try:
+            with engine.connect() as con:
+                _total = con.execute(text(
+                    "SELECT COUNT(*) FROM dataview.dv_land_tract "
+                    "WHERE geog IS NOT NULL AND ISNULL(active_ind,'Y')='Y'"
+                )).scalar() or 0
+        except Exception:
+            _total = 0
+        if _total > len(rows):
+            print("[geography_layers] LEASE LAYER CLIPPED: drew %d of %d "
+                  "(limit=%d) -- the map is NOT showing every lease."
+                  % (len(rows), _total, int(limit)))
 
     by_owner = {}
     for r in rows:
