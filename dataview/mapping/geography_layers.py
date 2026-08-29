@@ -457,8 +457,16 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
                 for nm, la, lo, uwi, op, cty, prov, ty, stat, td, spud in rows),
             name=label, color="#1d4ed8", fill="#60a5fa", radius=2, show=show,
             opacity=0.7, extra=_f, popup_fields=["nm"] + _f,
-            popup_aliases=["Well", "UWI", "Operator", "County", "State",
-                           "Type", "Status", "TD", "Spud"])
+            # "Reference well", NOT "Well", and it is load-bearing rather
+            # than cosmetic. The map click handler identifies a loaded well by
+            # digging a 14-digit UWI out of the popup TEXT -- and uwi14 is
+            # exactly what these carry, so a reference-well click was being
+            # read as a dv_well click and sent to the scout builder for a well
+            # that may not be in dv_well at all. The label is the sentinel the
+            # handler checks, so the popup says what it is to the reader AND
+            # to the code.
+            popup_aliases=["Reference well", "UWI", "Operator", "County",
+                           "State", "Type", "Status", "TD", "Spud"])
     else:
         n_drawn = points_layer(m, ((la, lo, nm) for nm, la, lo in rows),
                                name=label, color="#1d4ed8", fill="#60a5fa",

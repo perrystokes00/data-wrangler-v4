@@ -15520,6 +15520,18 @@ def run(engine=None):
         clicked = map_data.get("last_object_clicked_popup") if map_data else None
         if clicked and not _handled_as_cell:
             _clicked_str = str(clicked)
+            # A REFERENCE WELL IS NOT A LOADED WELL. This identifies a
+            # dv_well click by finding a 14-digit UWI in the popup text, and
+            # the reference-well popup carries uwi14 -- so clicking one was
+            # read as a dv_well click and sent on to the scout builder for a
+            # well that is very likely not in dv_well. It is a MASTER HEADER:
+            # it has no logs, no tops, no production, and nothing downstream
+            # can answer for it. Seed it into dv_well first (the map panel
+            # does exactly that) and then it is a well like any other.
+            if "Reference well" in _clicked_str:
+                _say("[map] reference-well click ignored -- not a dv_well")
+                clicked = None
+                _clicked_str = ""
 
             # GOM wells: this version of streamlit-folium strips HTML
             # attributes from the popup and returns only visible text, so
