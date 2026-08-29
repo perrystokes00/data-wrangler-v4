@@ -14351,7 +14351,13 @@ def run(engine=None):
         # and leaves the camera. That distinction is drawn all through this
         # file; having only one of them on screen is what made the other
         # impossible to find.
-        _rv1, _rvc, _rvf, _rvh, _rv2 = st.columns([1.0, 1.1, 1.3, 1.3, 1.3])
+        # ✗ Clear box SITS WITH THE ACTIONS, not in 🏷 Map display.
+        # That expander holds display SETTINGS -- legends, lease colour,
+        # symbols, the clip toggle. Clearing the drawn box is an action,
+        # the same kind of thing as ✗ Clear wells and 🎯 Reset view, and
+        # it belongs next to them where those are looked for.
+        _rv1, _rvc, _rvb, _rvf, _rvh, _rv2 = st.columns(
+            [1.0, 1.1, 1.0, 1.2, 1.2, 1.2])
         # HOLD THE MAP UNTIL THE SELECTIONS ARE MADE. Every option on this
         # page reruns the script, and the script rebuilds the map -- so
         # picking an area, then a query, then a layer costs three rebuilds to
@@ -14386,6 +14392,33 @@ def run(engine=None):
                              "Nothing to clear — no wells are selected or "
                              "displayed.")):
             _clear_wells_state()
+            st.rerun()
+        # THE TRASH ICON IN THE DRAW TOOLBAR CANNOT DO THIS. It empties
+        # all_drawings, but st_folium reports all_drawings empty on every
+        # render where nobody drew -- the drawings handler says so, which is
+        # why _last_drawings is only written when the list is non-empty. An
+        # empty list cannot tell "you deleted the box" from "you did not draw
+        # this render", so the constraint cannot be released from that signal.
+        #
+        # And ✗ Clear wells is too big a hammer: clearing the CONSTRAINT
+        # should not cost the selection it was constraining.
+        #
+        # KEY ENDS "_clear", which _is_action_key() already excludes.
+        if _rvb.button("✗ Clear box", key="wm_clip_clear",
+                       use_container_width=True,
+                       disabled=not st.session_state.get("_clip_box"),
+                       help=("Drop the drawn box and stop clipping. Wells, "
+                             "tray and view are kept — ✗ Clear wells is for "
+                             "those."
+                             if st.session_state.get("_clip_box") else
+                             "Nothing to clear — no box has been drawn.")):
+            # A REQUEST for the toggle: the Clip checkbox is built later on
+            # this same run, and assigning a widget its own key after it
+            # exists raises on a LATER run -- scar #6.
+            st.session_state.pop("_clip_box", None)
+            st.session_state.pop("_place_shapes", None)
+            st.session_state["_clip_off_request"] = True
+            _say("[map] clear box: constraint dropped")
             st.rerun()
         if _rv1.button("🎯 Reset view", key="wells_reset_view",
                        use_container_width=True,
@@ -14450,38 +14483,6 @@ def run(engine=None):
             # one. This clips the hexes, the wells and the leases to the
             # drawn extent instead. Captured by _capture_map_view, so a saved
             # place comes back clipped the way it was saved.
-            # ── CLEARING THE BOX NEEDED ITS OWN CONTROL ─────────────
-            # The draw toolbar's trash icon CANNOT do it. It empties
-            # all_drawings, but st_folium reports all_drawings empty on every
-            # render where nobody drew -- the comment at the drawings handler
-            # says so, which is why _last_drawings is only written when the
-            # list is non-empty. An empty list cannot tell "you deleted the
-            # box" from "you did not draw this render", so the box cannot be
-            # cleared from that signal without clearing it constantly.
-            #
-            # Until now the only things that dropped _clip_box were ✗ Clear
-            # wells and 🔄 Reset page, which both take the selection, the tray
-            # and the view with them. Clearing the CONSTRAINT should not cost
-            # the work it was constraining.
-            #
-            # KEY ENDS "_clear", which _is_action_key() already excludes from
-            # the persist loops.
-            if st.button("✗ Clear box", key="wm_clip_clear",
-                         use_container_width=True,
-                         disabled=not st.session_state.get("_clip_box"),
-                         help=("Drop the drawn box and stop clipping. Wells, "
-                               "tray and view are kept — use ✗ Clear wells "
-                               "for those."
-                               if st.session_state.get("_clip_box") else
-                               "No box drawn.")):
-                # A REQUEST for the toggle, because the checkbox below has
-                # not been built yet on THIS run but will be -- and assigning
-                # a widget its own key after it exists raises on a later run.
-                st.session_state.pop("_clip_box", None)
-                st.session_state.pop("_place_shapes", None)
-                st.session_state["_clip_off_request"] = True
-                _say("[map] clear box: constraint dropped")
-                st.rerun()
             st.checkbox(
                 "🔲 Clip to selection", key="wm_clip_to_box",
                 help="Draw only what falls inside the box or circle you "
