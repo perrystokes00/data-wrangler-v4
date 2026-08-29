@@ -10610,6 +10610,24 @@ def run(engine=None):
         (a["label"] if a["enabled"] else f"{a['label']} (no data)")
         for a in AREAS
     ]
+    # EVERY SESSION GETS ALL SCHEMAS, not just the first one in the process.
+    # The cold-start block above already writes this default, but it is gated
+    # on _PROCESS_FIRST_RUN_DONE -- a MODULE-LEVEL global, so it fires once
+    # per Streamlit PROCESS and never again. The first browser session after a
+    # restart got All schemas; every session after it fell through to the
+    # placeholder "— Select schema —", and the placeholder's id is not one of
+    # ("main", "all", "gom"), which is what makes the State and County pickers
+    # collapse to "Select a schema to constrain by geography". Reported as
+    # "my state and county selector has disappeared" after a relaunch.
+    #
+    # THE DISPLAY LABEL, NOT THE LITERAL. _area_labels_display appends
+    # " (no data)" to a disabled area, so the bare "🌎 All schemas" is not
+    # always one of the options -- and a session value that matches no option
+    # is how a selectbox raises rather than defaults.
+    if "wm_area_sel" not in st.session_state:
+        st.session_state["wm_area_sel"] = next(
+            (_lbl for _a, _lbl in zip(AREAS, _area_labels_display)
+             if _a.get("id") == "all"), _area_labels_display[0])
     _area_sel_current = st.session_state.get("wm_area_sel",
                                              _area_labels_display[0])
     try:
