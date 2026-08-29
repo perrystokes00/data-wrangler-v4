@@ -14423,22 +14423,25 @@ def run(engine=None):
             # ~200px column (_rv2 of a five-way split), and three horizontal
             # options wrapped mid-word -- "produc / ing". A selectbox is one
             # line at any width.
-            # ORDER PUTS THE USABLE ONE FIRST. Measured on 4,618 leases:
-            # producing_ind fills 4,565 rows across 3 values, effective_date
-            # 4,584 across 11 decades -- while operator_name fills 34 and
-            # lease_status has exactly ONE distinct value, because the loader
-            # keeps only Authorized. Two of the four colour nothing.
+            # ORDER PUTS THE USABLE ONES FIRST. Measured on the 4,584 BLM
+            # leases now loaded: producing_ind fills 4,565 rows across 3
+            # values and effective_date 4,584 across 11 decades. The other
+            # two colour NOTHING: lease_status has exactly one distinct value
+            # because the loader keeps only Authorized, and operator_name is
+            # empty on every row -- BLM publishes no lessee, and the 34
+            # synthetic tracts that were the only rows carrying one were
+            # deleted 28 Aug. Kept in the list because either becomes real
+            # the moment a non-BLM lease source is loaded.
             st.selectbox(
                 "🟦 Lease colour",
                 ["producing", "vintage", "size", "owner", "status"],
                 key="wm_lease_color_by",
                 help="Producing (3 groups), Vintage (effective decade, "
                      "dark = older) and Size (acreage band, dark = bigger) "
-                     "are populated on every BLM lease. Vintage (effective decade, "
-                     "dark = older) are populated on BLM leases and are the "
-                     "two worth using. Owner is operator_name, which BLM does "
-                     "not publish — 34 of 4,618 rows. Status is a single "
-                     "value once non-authorized leases are filtered out.")
+                     "all work on BLM leases. Owner and Status colour "
+                     "nothing on BLM data — BLM publishes no lessee, and "
+                     "the loader keeps only Authorized leases, so both "
+                     "columns are one value or empty.")
             # ── SHOW ONLY WHAT IS IN THE BOX ───────────────────
             # Selecting cells OUTLINES them and leaves everything else drawn,
             # which is right for building a selection and wrong for showing
