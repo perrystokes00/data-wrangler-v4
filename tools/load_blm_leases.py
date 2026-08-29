@@ -55,7 +55,7 @@ INSERT INTO dataview.dv_land_tract
 -- reoriented one records the size of the COMPLEMENT -- half a billion km2
 -- for a tract a few km across. Same guard, and the same ordering, as
 -- gen_synthetic_leases and the map's draw-a-boundary writer.
-SELECT :id, :nm, :ln, NULL, :st, 'USA',
+SELECT :id, :nm, :ln, :opr, :st, 'USA',
        g2.STArea()/1000000.0, g2, :act, :src,
        :eff, :exp, :status, :prod, :qlty,
        :src, GETUTCDATE()
@@ -119,10 +119,20 @@ def main():
     ap.add_argument("--file", help="GeoJSON from fetch_blm_leases.py")
     ap.add_argument("--history", action="store_true",
                     help="also load Closed/Pending leases (default: Authorized only)")
+    ap.add_argument("--source", default=SOURCE,
+                    help="provenance stamp AND half the dedupe key -- the "
+                         "other half is lease_number -- so a second source "
+                         "cannot collide with BLM's serials. Default %s."
+                         % SOURCE)
     ap.add_argument("--remove", action="store_true",
                     help="delete every %s tract" % SOURCE)
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args()
+    # ONE NAME FOR THE SOURCE, read once. --remove keyed on the CONSTANT
+    # while the insert keyed on the flag would delete BLM rows when asked to
+    # clear a state load -- the two halves of the dedupe key disagreeing,
+    # which is the failure this repo keeps writing down.
+    src = a.source
 
     from dataview.core.dw_utils import make_engine
     from sqlalchemy import text as _t
@@ -131,12 +141,12 @@ def main():
     if a.remove:
         with eng.begin() as cx:
             n = cx.execute(_t("SELECT COUNT(*) FROM dataview.dv_land_tract "
-                              "WHERE source=:s"), {"s": SOURCE}).scalar()
+                              "WHERE source=:s"), {"s": src}).scalar()
             if a.apply:
                 cx.execute(_t("DELETE FROM dataview.dv_land_tract WHERE source=:s"),
-                           {"s": SOURCE})
+                           {"s": src})
             print("%s %d %s tract(s). SYNTH_LEASE is untouched."
-                  % ("removed" if a.apply else "would remove", n, SOURCE))
+                  % ("removed" if a.apply else "would remove", n, src))
         return 0
 
     if not a.file:
@@ -195,8 +205,14 @@ def main():
                 "nm": (p.get("CSE_NAME") or "").strip() or None,
                 "ln": str(p.get("CSE_NR")).strip(),
                 "st": (p.get("GEO_STATE") or p.get("ADMIN_STATE") or "").strip() or None,
-                "act": "Y" if str(p.get("CSE_DISP") or "").lower() == "authorized" else "N",
-                "src": SOURCE,
+                "act": "Y" if str(p.get("CSE_DISP") or "").lower() in
+                       ("authorized", "producing", "prospecting") else "N",
+                "src": src,
+                # THE LESSEE, WHEN THE SOURCE HAS ONE. BLM publishes none, so
+                # this stays NULL for MLRS -- which is the truth, and is why
+                # the synthetic-owner tool exists at all. Wyoming's LARCS
+                # names the company, so a state load fills it for real.
+                "opr": (p.get("LESSEE") or "").strip()[:120] or None,
                 "eff": to_date(p.get("EFF_DT")),
                 "exp": to_date(p.get("EXP_DT")),
                 "status": (p.get("CSE_DISP") or "").strip() or None,
