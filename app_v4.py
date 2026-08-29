@@ -1140,6 +1140,19 @@ def _nav_card(col, icon, title, desc, mode):
 # changes (not on every interaction, which would yank the view on each click).
 if S.get("_last_app_mode") != S.app_mode:
     S["_last_app_mode"] = S.app_mode
+    # THE MAP NEEDS ITS OWN, LATER SCROLL. This one fires here, ~170 lines
+    # ABOVE the dispatch, so on the way into the map the page is still
+    # empty: scrollTo(0,0) succeeds against a short page and the browser
+    # then restores the old position once 15,000 lines of map have arrived.
+    # Measured 29 Aug -- the map opened at scrollTop 1759 of a 3,634px page,
+    # which is the whole of "the page is pushed down". page_well_map keeps
+    # retrying past that restore; this flag is what asks it to.
+    #
+    # Set on every ENTRY, not once per session: the map's own flag was
+    # seeded inside `if "_wm_page_entered" not in st.session_state`, so
+    # coming back to the map a second time never scrolled at all.
+    if S.app_mode == "well_map":
+        st.session_state["_wm_scroll_top_pending"] = True
     import streamlit.components.v1 as _components
     _components.html(
         """

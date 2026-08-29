@@ -1199,26 +1199,49 @@ def _scroll_main_to_top():
     (overflow-y:auto, ~17,000px of content); the others are belt and braces
     for other Streamlit versions.
 
-    Called three times because the page is still growing as layers draw, and
-    a scroll set before the content exists is undone by the content arriving.
+    RETRIED FOR THREE SECONDS, not 200ms. Three tries lost the race and the
+    measurement says by how much: the map opened at scrollTop 1759 of a
+    3,634px page, and stayed there. The map iframe, the lease GeoJSON and
+    the reference-well file all keep loading long after the last retry, and
+    the browser restores the old scroll position when the page regains its
+    height -- which is necessarily AFTER the content that gives it that
+    height. A retry schedule that ends before the page finishes growing can
+    only ever win by luck.
+
+    IT STOPS THE MOMENT YOU SCROLL. Retrying for three seconds against a
+    user who is deliberately scrolling down would be its own bug -- worse
+    than the one it fixes, because it fights back. wheel, touchmove, keydown
+    and a mousedown on the scrollbar all cancel the rest of the schedule.
     """
     st.components.v1.html(
         """
         <script>
         (function(){
+          var w = window.parent, d = w.document, done = false;
           function toTop(){
-            const d = window.parent.document;
-            const els = [
+            if (done) { return; }
+            var els = [
               d.querySelector('section.main'),
               d.querySelector('[data-testid="stMain"]'),
               d.querySelector('[data-testid="stAppViewContainer"]'),
               d.scrollingElement, d.documentElement, d.body
             ];
-            for (const el of els){ if(el){ try{ el.scrollTo(0,0); }
-                                   catch(e){ el.scrollTop = 0; } } }
-            try{ window.parent.scrollTo(0,0); }catch(e){}
+            for (var i=0;i<els.length;i++){
+              var el = els[i];
+              if (el){ try{ el.scrollTo(0,0); }catch(e){ el.scrollTop = 0; } }
+            }
+            try{ w.scrollTo(0,0); }catch(e){}
           }
-          toTop(); setTimeout(toTop,50); setTimeout(toTop,200);
+          function stop(){ done = true; }
+          try {
+            var o = {passive:true, capture:true};
+            d.addEventListener('wheel', stop, o);
+            d.addEventListener('touchmove', stop, o);
+            d.addEventListener('keydown', stop, o);
+            d.addEventListener('mousedown', stop, o);
+          } catch(e){}
+          var at = [0,50,150,350,700,1200,1800,2500,3200];
+          for (var k=0;k<at.length;k++){ setTimeout(toTop, at[k]); }
         })();
         </script>
         """,
