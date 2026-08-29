@@ -196,6 +196,18 @@ REM PowerShell 5.1 then READS it back as the ANSI codepage, so the same
 REM emoji came out as "M-pM-^_M-^TM-^6" -- correct in the file, mangled only
 REM in the window. chcp sets the console to UTF-8 so it can display them,
 REM -Encoding UTF8 tells Get-Content how to decode. Both are needed.
+REM
+REM BUT ONLY ON THE DUMP BRANCH. Adding -Encoding to the -Wait branch is
+REM what stopped it streaming: "I get Using ...python.exe but no streaming,
+REM only when I exit do I see streaming" -- output appearing all at once on
+REM exit is a buffer flushing. The dump branch reads a finite file and exits,
+REM so buffering there is invisible and the decode is worth having.
+REM
+REM The follow branch sets [Console]::OutputEncoding instead, which fixes the
+REM WRITE side without putting an encoding reader in front of the tail. Any
+REM emoji that still mangle in the live view are mangled in the WINDOW only:
+REM the file is correct UTF-8, and "start.bat log all" shows it properly.
+REM Streaming is the job; the emoji are decoration.
 chcp 65001 >nul 2>&1
 if not exist "%LOGOUT%" if not exist "%LOGERR%" (
     echo No log yet at %LOGDIR%.
@@ -216,7 +228,7 @@ if errorlevel 1 (
 )
 echo Following %LOGDIR%\dev.*.log  -  Ctrl+C to stop watching (server keeps running).
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "Get-Content -Encoding UTF8 -Path '%LOGOUT%','%LOGERR%' -Tail 40 -Wait -ErrorAction SilentlyContinue"
+    "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Content -Path '%LOGOUT%','%LOGERR%' -Tail 40 -Wait -ErrorAction SilentlyContinue"
 exit /b 0
 
 REM ---------------------------------------------------------------------------
