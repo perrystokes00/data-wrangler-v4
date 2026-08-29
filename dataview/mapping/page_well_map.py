@@ -14350,7 +14350,7 @@ def run(engine=None):
         # map serialize is what costs) and the map is simply not drawn until
         # Apply. Off restores the draw-on-every-change behaviour.
         _rvh.toggle(
-            "⏸ Hold for Map", key="wm_hold_map", value=True,
+            "⏸ Hold for Map", key="wm_hold_map",
             help="Don't redraw the map on every option change. Pick your "
                  "area, query and layers, then press Apply to draw once. "
                  "Map interactions — drawing a box, drilling, picking a "
@@ -14521,7 +14521,16 @@ def run(engine=None):
         # Apply button is a page that looks broken on arrival.
         _drawn_sig = st.session_state.get("_map_drawn_sig")
         _opts_changed = _drawn_sig is not None and _drawn_sig != _opt_sig
-        if st.session_state.get("wm_hold_map", True) and _opts_changed:
+        # DEFAULT OFF, AND THE READ MUST MATCH THE TOGGLE. Holding meant an
+        # option change drew nothing until Apply, which is right when a
+        # redraw costs 10s and wrong now that leases are a cached file and
+        # the density is filtered -- the map is quick enough that the extra
+        # click costs more than the redraw it saves.
+        #
+        # A read defaulting True against a toggle defaulting False is the
+        # density-fallback defect again: the control says one thing and the
+        # gate does another. Both are False now, and the header logs it.
+        if st.session_state.get("wm_hold_map", False) and _opts_changed:
             _skip_folium = True
             st.warning(
                 "⏸ **Map held** — options changed. Finish selecting, then "
