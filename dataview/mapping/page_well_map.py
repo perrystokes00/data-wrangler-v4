@@ -11736,6 +11736,19 @@ def run(engine=None):
         # much more work than it needs to be.
         active_db = set()
     with mapcol:
+        # ── THE MAP RENDERS FIRST, EVERYTHING ELSE UNDER IT ─────────
+        # "Delete everything above the map." Deleting it was not possible --
+        # eighteen of those are the controls that drive the map, including
+        # the layer chips and the whole action row. But a container RESERVES
+        # a position, so the map can be drawn into this slot at the end while
+        # every widget still executes, and is still READ, before the map is
+        # built. Nothing is lost and nothing sits above it.
+        #
+        # This is the only way round: a widget must be instantiated where it
+        # renders, so the controls cannot simply be moved below the map --
+        # their values are needed to decide what the map contains.
+        _map_slot = st.container()
+
         # ── restore a saved view, BEFORE the widgets below exist ─────────
         # Go stores the request and asks for a full rerun; this is the top of
         # that rerun and the last safe moment to set these keys. See
@@ -14724,23 +14737,24 @@ def run(engine=None):
                 "**▶ Resume** (on the banner above, or in ⚙ Page controls) "
                 "to draw them again.")
 
-        if _skip_folium:
-            map_data = None
-        else:
-            _phase(90, "🌐 Rendering map in browser…")
-            try:
-                map_data = st_folium(
-                m, height=500, use_container_width=True,
-                returned_objects=_ret,
-                key=_map_widget_key,
-            )
-            except TypeError:
-                # Older streamlit-folium
-                map_data = st_folium(
-                    m, width=None, height=500,
+        with _map_slot:
+            if _skip_folium:
+                map_data = None
+            else:
+                _phase(90, "🌐 Rendering map in browser…")
+                try:
+                    map_data = st_folium(
+                    m, height=500, use_container_width=True,
                     returned_objects=_ret,
                     key=_map_widget_key,
                 )
+                except TypeError:
+                    # Older streamlit-folium
+                    map_data = st_folium(
+                        m, width=None, height=500,
+                        returned_objects=_ret,
+                        key=_map_widget_key,
+                    )
         _phase(100)
         # UNDER THE MAP, which is what the messages are about. This used to
         # be _mapmsg.empty() -- clearing a placeholder that sat ABOVE the map
