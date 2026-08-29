@@ -1090,7 +1090,12 @@ def _layout_probe():
             var cs = window.parent.getComputedStyle(c);
             var main = D.querySelector('[data-testid="stMain"]')
                     || D.querySelector('section.main');
-            var kids = Array.prototype.slice.call(c.children, 0, 12);
+            // The whole page turned out to be ONE child -- a border wrapper --
+            // so listing the container's children listed one row. Descend
+            // through single-child wrappers until there is a real list.
+            var n = c;
+            while (n && n.children.length === 1) { n = n.children[0]; }
+            var kids = Array.prototype.slice.call(n.children, 0, 14);
             var rows = [];
             for (var i=0;i<kids.length;i++){
               var e = kids[i], r = e.getBoundingClientRect();
@@ -1099,16 +1104,25 @@ def _layout_probe():
               rows.push({i:i, id:(e.getAttribute('data-testid')||e.tagName),
                          h:Math.round(r.height), top:Math.round(r.top), txt:t});
             }
+            // Where the MAP actually is: the tallest iframe on the page.
+            var mapTop = 'none', best = 0, ifr = D.querySelectorAll('iframe');
+            for (var j=0;j<ifr.length;j++){
+              var rr = ifr[j].getBoundingClientRect();
+              if (rr.height > best){ best = rr.height;
+                                     mapTop = Math.round(rr.top); }
+            }
             return {pad:cs.paddingTop,
                     cTop:Math.round(c.getBoundingClientRect().top),
                     scr:(main?Math.round(main.scrollTop):-1),
+                    map:mapTop,
                     docH:Math.round(c.scrollHeight), rows:rows};
           }
           function fmt(title, s){
             if(!s){ return ''; }
             if(s.err){ return '<h4>'+title+'</h4><div class=hi>'+s.err+'</div>'; }
             var h = '<h4>'+title+' &mdash; padTop '+s.pad+' | container top '
-                  + s.cTop+' | stMain.scrollTop '+s.scr+' | page '+s.docH
+                  + s.cTop+' | stMain.scrollTop '+s.scr+' | MAP top '+s.map
+                  + ' | page '+s.docH
                   + 'px</h4><table><tr><th>#</th><th>element</th>'
                   + '<th class=n>height</th><th class=n>top</th><th>text</th></tr>';
             for (var i=0;i<s.rows.length;i++){
