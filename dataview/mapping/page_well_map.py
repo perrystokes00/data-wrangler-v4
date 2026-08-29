@@ -15219,6 +15219,28 @@ def run(engine=None):
                                 )
                             st.rerun()
 
+                        # ── THE BOX IS A RESULT EVEN WHEN THE DRILL IS NOT ──
+                        # Only the SUCCESSFUL drill reran. A rectangle that
+                        # found nothing, or that went over the 5,000 cap,
+                        # ended with a message and no redraw -- so _clip_box
+                        # and the clip request sat in session_state applying
+                        # to nothing, and the map on screen was the one built
+                        # BEFORE the box existed. That is "I drew a box and
+                        # nothing happened", and it is the common case: a box
+                        # over any well-populated ground is over the cap.
+                        # Measured 29 Aug -- a box near Casper holding 8,574
+                        # wells warned about the cap and left the page idle,
+                        # with the bounds correct in the log one line above.
+                        #
+                        # Drawing a box now MEANS something on its own: it
+                        # clips every layer. So it earns its redraw whatever
+                        # the drill did. Safe from looping because the
+                        # geometry hash went into processed_drawings before
+                        # any of these branches, so the next render skips it.
+                        _say("[map] box handled, no drill rerun -> "
+                             "rerunning so the clip applies")
+                        st.rerun()
+
                         # Rectangle path complete — skip the circle path below
                         continue
 
