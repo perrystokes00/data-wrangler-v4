@@ -275,12 +275,14 @@ exit /b 0
 REM ---------------------------------------------------------------------------
 :stop
 set "KILLED="
+set "FOUND="
 
 REM Preferred route: the PID we recorded at start.
 if exist "%PIDFILE%" (
     set "DWPID="
     set /p DWPID=<"%PIDFILE%"
     if defined DWPID (
+        set "FOUND=1"
         REM /T because streamlit spawns children; killing only the parent
         REM leaves the server holding the port - exactly the orphan case.
         taskkill /PID !DWPID! /T /F >nul 2>&1
@@ -295,6 +297,7 @@ if exist "%PIDFILE%" (
 REM Fallback: whatever is actually holding the port. Covers a server started
 REM some other way, or one whose pid file was lost.
 for /f "tokens=5" %%A in ('netstat -ano ^| findstr /r /c:":%PORT% .*LISTENING"') do (
+    set "FOUND=1"
     taskkill /PID %%A /T /F >nul 2>&1
     if not errorlevel 1 (
         echo Stopped PID %%A holding port %PORT%.
@@ -302,7 +305,35 @@ for /f "tokens=5" %%A in ('netstat -ano ^| findstr /r /c:":%PORT% .*LISTENING"')
     )
 )
 
-if not defined KILLED echo Nothing was running on port %PORT%.
+REM THE PORT IS THE TRUTH, NOT TASKKILL'S EXIT CODE. This used to print
+REM "Nothing was running on port %PORT%." whenever the kill FAILED, because
+REM the only flag it kept was set inside `if not errorlevel 1` - so a denied
+REM or partial kill, the one case worth shouting about, reported the same
+REM words as a clean idle box. You then restart, the port is still held,
+REM and the new server silently attaches to nothing.
+REM
+REM taskkill's code cannot answer this on its own either: it succeeds
+REM against a pid that had already exited while the real server still holds
+REM the port, and fails on a process owned by another user that then dies
+REM anyway. So ask the port, after giving the handle a moment to release.
+ping -n 2 127.0.0.1 >nul 2>&1
+netstat -ano | findstr /r /c:":%PORT% .*LISTENING" >nul 2>&1
+if not errorlevel 1 (
+    echo.
+    echo *** PORT %PORT% IS STILL HELD. The stop did NOT work. ***
+    for /f "tokens=5" %%A in ('netstat -ano ^| findstr /r /c:":%PORT% .*LISTENING"') do (
+        echo     still listening: PID %%A
+    )
+    echo     Close it by hand -- Task Manager, or: taskkill /PID [pid] /T /F
+    echo     Then run "%SELF% stop" again.
+    exit /b 1
+)
+
+if not defined FOUND (
+    echo Nothing was running on port %PORT%.
+) else (
+    if not defined KILLED echo Port %PORT% is free ^(the process had already gone^).
+)
 exit /b 0
 
 REM ---------------------------------------------------------------------------
