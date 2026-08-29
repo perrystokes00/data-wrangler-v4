@@ -9257,7 +9257,7 @@ def run(engine=None):
     # the screen -- "there is something hiding up there", and it is nothing,
     # 96 pixels of it.
     #
-    # 44px = the 24px this reclaimed to, plus 20 asked for back. Written in
+    # 64px = the 24px this reclaimed to, plus 40 asked for back. Written in
     # PIXELS rather than rem because it is now a measured offset, not a
     # typographic one: the whole point was that the map sits a known distance
     # from the toolbar, and rem moves with the root font size.
@@ -9283,7 +9283,7 @@ def run(engine=None):
     # BUT a style tag; anything with visible content alongside is untouched.
     st.markdown(
         "<style>[data-testid='stMainBlockContainer']"
-        "{padding-top:44px !important;}"
+        "{padding-top:64px !important;}"
         "[data-testid='stElementContainer']:has("
         "[data-testid='stMarkdownContainer'] > style:only-child)"
         "{display:none !important;}</style>",
