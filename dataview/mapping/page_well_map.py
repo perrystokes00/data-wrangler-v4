@@ -13037,13 +13037,22 @@ def run(engine=None):
         # A name that exists only on some paths is a NameError waiting for
         # the one render nobody tested.
         _geo_empty = []
-        # Every geography-layer chip must appear in this guard. A layer
-        # whose only trigger is missing here renders ONLY when some other
-        # layer happens to be on — which looks exactly like a broken layer.
-        if _geo_on or "geo_wellpts" in active_db \
-                or "geo_wellpath" in active_db \
-                or "geo_horizons" in active_db \
-                or "geo_wellsym" in active_db:
+        # DERIVED FROM THE CHIP LIST, NOT MAINTAINED BESIDE IT. The comment
+        # here used to say "every geography-layer chip must appear in this
+        # guard. A layer whose only trigger is missing here renders ONLY when
+        # some other layer happens to be on -- which looks exactly like a
+        # broken layer." It was right, and the guard was already wrong:
+        # geo_refwells was never added, so ticking 🔵 Reference wells on its
+        # own drew nothing, while ticking it beside 🟦 Leases worked. That
+        # is the worst symptom available -- the layer looks intermittent
+        # rather than unwired.
+        #
+        # A list that must agree with another list eventually does not; this
+        # file pays that debt in four places already. _geo_defs IS the set of
+        # chips, so the guard reads it and a chip added there can no longer
+        # be missing here. The inner blocks each still test their own flag,
+        # so a chip with no renderer costs one skipped branch.
+        if any(_k in active_db for _k, _lbl in _geo_defs):
             try:
                 from dataview.mapping.geography_layers import add_geography_layer, add_well_points
                 # AN EMPTY LAYER LOOKS EXACTLY LIKE A BROKEN ONE. Both adders
@@ -13336,6 +13345,9 @@ def run(engine=None):
                         _rb = _layer_bounds
                         _rn, _rscope = add_reference_wells(
                             m, engine, bounds=_rb, show=True)
+                        _say("[map] geo layer geo_refwells    drew %s%s"
+                             % (_rn, "" if _rscope is not None
+                                else "  (capped sample, no bounds)"))
                         _msg.info(
                             f"🔵 Drew {_rn:,} reference well(s)"
                             + ("" if _rscope is not None else
