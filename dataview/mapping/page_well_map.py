@@ -12581,6 +12581,21 @@ def run(engine=None):
                             "weight": 2.5 if _is_sel else 0.8,
                             "fillColor": "#1D6FB8",
                             "fillOpacity": 0.15 if _is_sel else 0.0,
+                            # AN INVISIBLE FILL IS STILL A HIT TARGET.
+                            # fillOpacity 0 hides the county but Leaflet keeps
+                            # hit-testing the polygon, so an unselected county
+                            # blanketed the map and swallowed every hover: the
+                            # reference wells are radius-2 circles, about a 4px
+                            # target, and missing one by a pixel returned
+                            # "County: X" instead. Reported as "the wells do
+                            # not have a popup, I am only getting the county
+                            # name" -- and the popup was bound the whole time.
+                            #
+                            # fill:false removes the fill entirely, so only the
+                            # OUTLINE is interactive. Nothing changes visually
+                            # because there was nothing to see. The selected
+                            # county keeps its wash and stays clickable.
+                            "fill": bool(_is_sel),
                         }
 
                     folium.GeoJson(
