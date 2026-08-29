@@ -9502,44 +9502,32 @@ def run(engine=None):
     # clears both widgets. The widgets are placed at the top so the user
     # always sees them during long loads — they don't have to look down
     # at the map area to know something is happening.
-    # Positioned inside the map column -- see the note at their creation.
-    _phase_msg = None
-    _phase_bar = None
+
 
     def _phase(pct: int, text: str = ""):
-        """Update or clear the top-of-page progress indicator.
+        """Record a render phase. TIMING ONLY -- it draws nothing.
 
-        Args:
-            pct: 0–100 progress percent. pct >= 100 clears the indicator.
-            text: status message to display alongside the bar.
+        It used to own a progress bar and a status line above the map. Both
+        are gone: they rendered where they were CREATED, so the one thing
+        reporting on a long render sat at the top of the page away from the
+        work, and they cost gap slots in the flex column on every render --
+        including the ones fast enough that nobody wanted a progress bar.
+
+        NOTHING DIAGNOSTIC IS LOST, which is the only reason this is safe to
+        delete. _mark() below is what produces the per-phase timings in
+        dev.out.log, and that is where every performance answer today came
+        from -- the 644s gap, the 87s density query, the 6,820 round trips.
+        The UI never told us any of that. Streamlit's own Running indicator
+        still shows that a slow render is in progress.
+
+        LABELLED "-> x", because a mark reports the time BEFORE the thing it
+        names. The first log read "2.070s  Rendering map in browser", which
+        anyone would take for st_folium's cost; it was the two seconds of
+        building spent getting there, and st_folium was the 0.5s on the NEXT
+        line. A timing log that invites the wrong conclusion is worse than
+        none.
         """
-        # The phases already sit at the render's natural boundaries, so they
-        # are also where the clock should be read. One line here beats a mark
-        # inserted at every one of them.
-        #
-        # LABELLED "-> x", because a mark reports the time BEFORE the thing it
-        # names. The first log read "2.070s  Rendering map in browser", which
-        # anyone would take for st_folium's cost; it was the two seconds of
-        # building spent getting there, and st_folium was the 0.5s on the
-        # NEXT line. A timing log that invites the wrong conclusion is worse
-        # than none.
         _mark("-> " + (text or ("phase %d" % pct)))
-        # THE PLACEHOLDERS ARE CREATED LOWER DOWN, inside the map column, so
-        # that progress appears near the map instead of at the top of the
-        # page. No caller reaches here before that -- the first is the H3
-        # density query -- but a guard costs nothing and the alternative is
-        # an AttributeError on whichever future caller is added above it.
-        # The TIMING mark above still runs either way, so a call made early
-        # is still measured even if it cannot be shown.
-        if _phase_msg is None or _phase_bar is None:
-            return
-        if pct >= 100:
-            _phase_msg.empty()
-            _phase_bar.empty()
-        else:
-            if text:
-                _phase_msg.info(text)
-            _phase_bar.progress(min(max(pct, 0), 99))
 
     # ── ⛔ Abort: a brake on the heavy layers, not a reset ─────────
     # WHY A BUTTON CAN WORK HERE AT ALL. Streamlit checks for a pending
@@ -11708,21 +11696,6 @@ def run(engine=None):
         # much more work than it needs to be.
         active_db = set()
     with mapcol:
-        # ── PROGRESS WHERE THE WORK IS ─────────────────────────
-        # These were declared at the very top of the page, which is where a
-        # placeholder RENDERS -- so the one thing that reports on a 10-second
-        # render sat above everything, out of view of anyone actually working
-        # near the map. Side by side in one row, they also cost one gap slot
-        # in the flex column instead of two.
-        #
-        # THIS IS AS LOW AS THEY CAN GO. _phase() is first called at the H3
-        # density query, well before the controls row and the map, and a
-        # placeholder cannot receive a write issued before it exists.
-        # Creating them nearer the map would silently drop the progress for
-        # the slowest step on the page, which is the one worth reporting.
-        _pcol_msg, _pcol_bar = st.columns([3, 2])
-        _phase_msg = _pcol_msg.empty()
-        _phase_bar = _pcol_bar.empty()
         # ── restore a saved view, BEFORE the widgets below exist ─────────
         # Go stores the request and asks for a full rerun; this is the top of
         # that rerun and the last safe moment to set these keys. See
