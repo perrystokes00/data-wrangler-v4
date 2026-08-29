@@ -9581,6 +9581,27 @@ def run(engine=None):
     # read as a broken one.
     _render_held = bool(st.session_state.get("_wm_render_hold"))
 
+    # ── THE MAP'S POSITION, RESERVED AT THE VERY TOP OF THE PAGE ────────
+    # Measured 29 Aug from a full-page screenshot, which is what finally
+    # settled this: the map sat ~1040px down the page, under six blocks of
+    # page-level controls (⚙ Page controls, Background/Schema/Database,
+    # Constrain to, Query, AI Well Filter, Registered layers) plus another
+    # seven inside the map column. That is the "pushed down", and no amount
+    # of padding work could touch it -- 32-96px against a 1000px problem.
+    #
+    # The controls cannot simply be MOVED below the map: a Streamlit widget
+    # is instantiated where it renders, and their values decide what the map
+    # contains, so they must execute first. A container decouples the two --
+    # this reserves a slot here, every control still runs and is still read
+    # in its own order, and the finished map is drawn into this slot at the
+    # end. Nothing is lost, nothing sits above it.
+    #
+    # It belongs at RUN() level, not inside mapcol. Reserving it in mapcol
+    # (11750) only lifted the map above mapcol's own controls and left the
+    # six page-level blocks above it -- "half my map controls are below my
+    # map", which is a worse page than the one it replaced.
+    _map_slot = st.container()
+
     # ── Reset page button (escape hatch) ───────────────────────────────
     # Tucked into a thin expander at the top so it's findable but won't
     # be clicked accidentally. Click it when the page is in a weird state
@@ -14724,23 +14745,27 @@ def run(engine=None):
                 "**▶ Resume** (on the banner above, or in ⚙ Page controls) "
                 "to draw them again.")
 
-        if _skip_folium:
-            map_data = None
-        else:
-            _phase(90, "🌐 Rendering map in browser…")
-            try:
-                map_data = st_folium(
-                m, height=500, use_container_width=True,
-                returned_objects=_ret,
-                key=_map_widget_key,
-            )
-            except TypeError:
-                # Older streamlit-folium
-                map_data = st_folium(
-                    m, width=None, height=500,
-                    returned_objects=_ret,
-                    key=_map_widget_key,
-                )
+        # Drawn into the slot reserved at the top of run(). The map is built
+        # here, at the end, with every control's value already known -- it
+        # just APPEARS at the top of the page.
+        with _map_slot:
+            if _skip_folium:
+                map_data = None
+            else:
+                _phase(90, "🌐 Rendering map in browser…")
+                try:
+                    map_data = st_folium(
+                        m, height=500, use_container_width=True,
+                        returned_objects=_ret,
+                        key=_map_widget_key,
+                    )
+                except TypeError:
+                    # Older streamlit-folium
+                    map_data = st_folium(
+                        m, width=None, height=500,
+                        returned_objects=_ret,
+                        key=_map_widget_key,
+                    )
         _phase(100)
         # UNDER THE MAP, which is what the messages are about. This used to
         # be _mapmsg.empty() -- clearing a placeholder that sat ABOVE the map
