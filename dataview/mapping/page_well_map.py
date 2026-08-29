@@ -1133,7 +1133,8 @@ def _layout_probe():
                   + '<table><tr><th>when</th><th>samples</th>'
                   + '<th class=n>padTop</th><th class=n>container top</th>'
                   + '<th class=n>FIRST BLOCK top (min-max)</th>'
-                  + '<th class=n>scrollTop max</th>'
+                  + '<th class=n>SCROLL at 250ms</th>'
+                  + '<th class=n>scroll peak (sample)</th>'
                   + '<th class=n>map top</th><th>first block</th></tr>';
             var rows = hist.slice().reverse();
             for (var i=0;i<rows.length;i++){
@@ -1143,7 +1144,10 @@ def _layout_probe():
                  + '<td class=n>'+r.pad+'</td><td class=n>'+r.cMin+'-'+r.cMax+'</td>'
                  + '<td class="n '+(spread>20?'bad':'ok')+'">'
                  + r.fMin+'-'+r.fMax+(spread>20?'  PUSHED +'+spread:'')+'</td>'
-                 + '<td class=n>'+r.sMax+'</td><td class=n>'+r.mMin+'</td>'
+                 + '<td class="n '+((r.s0>20)?'bad':'ok')+'">'+r.s0
+                 + ((r.s0>20)?'  OPENED SCROLLED':'')+'</td>'
+                 + '<td class=n>'+r.sMax+' (#'+r.sAt+')</td>'
+                 + '<td class=n>'+r.mMin+'</td>'
                  + '<td>'+r.fTag+'</td></tr>';
             }
             h += '</table>';
@@ -1163,10 +1167,18 @@ def _layout_probe():
             if (r){
               rec = r; f.push(r.fTop); c.push(r.cTop);
               s.push(r.scr); m.push(r.map);
+              // THE FIRST SAMPLE IS THE ONE THAT MEANS ANYTHING. This probe
+              // renders at the BOTTOM of a 3,634px page, so reading it
+              // requires scrolling down -- and the previous reading duly
+              // reported scrollTop 2733, which was Perry scrolling, not the
+              // bug. s0 (250ms after mount, before anyone can react) tells
+              // "opened scrolled" from "scrolled to read"; sAt says which
+              // sample the peak came from, which says the same thing again.
+              var sMax = Math.max.apply(null, s);
               var e = {when: when, n: f.length, pad: r.pad,
                        cMin: Math.min.apply(null, c), cMax: Math.max.apply(null, c),
                        fMin: Math.min.apply(null, f), fMax: Math.max.apply(null, f),
-                       sMax: Math.max.apply(null, s),
+                       s0: s[0], sMax: sMax, sAt: (s.indexOf(sMax) + 1),
                        mMin: Math.min.apply(null, m), fTag: r.fTag};
               var all = hist.concat([e]);
               save(all);
