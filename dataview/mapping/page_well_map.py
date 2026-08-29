@@ -14086,6 +14086,116 @@ def run(engine=None):
         click_centre._parent = m
         m.add_child(click_centre)
 
+        # -- "Use current view": hand Python the window you are looking at --
+        # PYTHON IS NEVER TOLD YOUR PAN OR YOUR ZOOM, and it must not be:
+        # subscribing st_folium to bounds/center makes every pan and every
+        # zoom a value change, and every value change re-serialises the whole
+        # map. That is why the reference-well layer samples 4M rows instead of
+        # reading your window, and why "draw a box" is the answer.
+        #
+        # But drawing a box by hand to mean "what I am already looking at" is
+        # busywork. The browser knows the bounds; all this does is put them
+        # into the channel that already carries a box -- the draw layer, which
+        # st_folium reports through all_drawings and which stays subscribed
+        # even under Freeze. One rerun, at a moment you chose, instead of one
+        # per pan.
+        #
+        # NO NEW PLUMBING, deliberately. It fires the same draw:created that
+        # the rectangle tool fires, so everything downstream is the code that
+        # already runs: the 5-point ring test, the geometry hash that stops a
+        # re-drill, _clip_box, the clip request, and the bounds every layer
+        # reads. A second mechanism beside the first is the failure this
+        # codebase keeps paying for.
+        #
+        # A REAL CONTROL, for the reason click-to-centre gives above: every
+        # corner is taken and the legend's height varies, so a floating div
+        # would sit on top of something at some zoom.
+        use_view = MacroElement()
+        use_view._name = "dv_use_view"
+        use_view._template = Template(u"""
+            {% macro script(this, kwargs) %}
+            (function() {
+                function findMap() {
+                    var el = document.querySelector(".leaflet-container");
+                    if (!el) { return null; }
+                    for (var k in window) {
+                        try {
+                            var v = window[k];
+                            if (v && v._container === el &&
+                                    typeof v.on === "function") { return v; }
+                        } catch (e) { /* unreadable key, skip */ }
+                    }
+                    return null;
+                }
+                // THE GROUP LEAFLET.DRAW WRITES TO. folium names it
+                // `drawnItems`; the walk is the fallback if that ever
+                // changes, because adding the rectangle anywhere else would
+                // draw a box on screen that never reaches Python.
+                function findGroup(mapInst) {
+                    try {
+                        if (typeof drawnItems !== "undefined" && drawnItems) {
+                            return drawnItems;
+                        }
+                    } catch (e) { /* not defined */ }
+                    for (var k in window) {
+                        try {
+                            var v = window[k];
+                            if (v && v instanceof L.FeatureGroup
+                                    && v._map === mapInst) { return v; }
+                        } catch (e) { /* skip */ }
+                    }
+                    return null;
+                }
+                function install() {
+                    if (typeof L === "undefined") {
+                        setTimeout(install, 200); return;
+                    }
+                    var mapInst = findMap();
+                    if (!mapInst) { setTimeout(install, 200); return; }
+                    if (mapInst.__dv_useview_bound) { return; }
+                    mapInst.__dv_useview_bound = true;
+
+                    var Ctl = L.Control.extend({
+                        options: { position: "topright" },
+                        onAdd: function() {
+                            var box = L.DomUtil.create(
+                                "div", "leaflet-bar dv-useview-ctl");
+                            var link = L.DomUtil.create("a", "", box);
+                            link.href = "#";
+                            link.innerHTML = "&#9974;";
+                            link.title = "Use the current view as the box — "
+                                + "bounds every layer to what you can see, "
+                                + "the same as drawing a rectangle round it.";
+                            link.style.cssText =
+                                "font-size:15px;line-height:26px;"
+                                + "text-align:center;font-weight:700;";
+                            L.DomEvent.disableClickPropagation(box);
+                            L.DomEvent.on(link, "click", function(ev) {
+                                L.DomEvent.preventDefault(ev);
+                                var grp = findGroup(mapInst);
+                                var rect = L.rectangle(mapInst.getBounds());
+                                // Added AND fired: folium's own draw:created
+                                // handler adds it to the group, but only if
+                                // one is registered. addLayer is keyed on the
+                                // layer id, so doing both cannot double it.
+                                if (grp) { grp.addLayer(rect); }
+                                else { rect.addTo(mapInst); }
+                                mapInst.fire("draw:created",
+                                    {layer: rect, layerType: "rectangle"});
+                            });
+                            return box;
+                        }
+                    });
+                    mapInst.addControl(new Ctl());
+                }
+                install();
+            })();
+            {% endmacro %}
+        """)
+        _mark("build: use_view JS")
+        use_view._parent = m
+        m.add_child(use_view)
+
         # -- Pick tools: 2D line, 3D survey ------------------------------
         # WHY A TOOL AND NOT JUST A CLICK. Clicking a line already opens
         # its section -- but only when no draw tool is armed, and an armed
