@@ -265,6 +265,62 @@ def _tstate():
         return {}
 
 
+class _MsgBelowMap:
+    """Collects the map's status messages and renders them UNDER the map.
+
+    THE MESSAGES WERE THE PUSH-DOWN. _msg was an st.empty() created ABOVE
+    st_folium, and 39 places write into it -- how many hexes drew, how many
+    reference wells and whether they were a sample, what the clip did, why a
+    layer is empty. Every one of them pushed the map down by its own height,
+    and because they vary run to run the map started somewhere different each
+    time. Reported as "it is still getting pushed down" and "sometimes I see a
+    statement above the page": the same thing, seen twice.
+
+    A BUFFER RATHER THAN A MOVED st.empty(), because a placeholder renders
+    where it is CREATED, not where it is written. Creating it after the map
+    would put the messages in the right place and raise NameError in all 39
+    writers, which run long before the map is built. This collects instead,
+    and flush() replays into a container made after st_folium.
+
+    empty() clears the queue, which is what its three callers mean by it.
+    """
+
+    def __init__(self):
+        self._q = []
+
+    def _add(self, kind, *a, **k):
+        self._q.append((kind, a, k))
+
+    def info(self, *a, **k):
+        self._add("info", *a, **k)
+
+    def warning(self, *a, **k):
+        self._add("warning", *a, **k)
+
+    def error(self, *a, **k):
+        self._add("error", *a, **k)
+
+    def success(self, *a, **k):
+        self._add("success", *a, **k)
+
+    def caption(self, *a, **k):
+        self._add("caption", *a, **k)
+
+    def markdown(self, *a, **k):
+        self._add("markdown", *a, **k)
+
+    def empty(self):
+        self._q = []
+
+    def flush(self, target):
+        """Replay into `target`. Never raises: a status line must not be the
+        thing that breaks the page it is describing."""
+        for kind, a, k in self._q:
+            try:
+                getattr(target, kind)(*a, **k)
+            except Exception:
+                pass
+        self._q = []
 def _marks_begin(tag=""):
     """Start a render's timing, keeping the previous render's for display.
 
@@ -10253,9 +10309,11 @@ def run(engine=None):
         # Grid mode default — show grid immediately, skip the heavy query
         _wells_raw = []
 
-    _status.info("⏳ Loading spatial layers…")
+    # NO TRANSIENT BANNER HERE. This wrote "Loading spatial layers", then
+    # cleared it two lines later in the same run -- so it either never
+    # appeared or appeared as a flash, while costing a permanent gap slot in
+    # the flex column either way. _phase() already reports progress.
     shp_layers = _load_shp_layers(engine)
-    _status.empty()
     # counts_df loaded lazily below — only when a "Has X" filter is active
 
     # LEASE ONTO THE LOADED WELLS, before any filter reads them. See
@@ -12361,7 +12419,7 @@ def run(engine=None):
                 lat0, lon0, zoom0 = float(_clat), float(_clon), int(_czoom)
 
         # Build map — show progress so user knows it's working
-        _msg = st.empty()
+        _msg = _MsgBelowMap()
         _msg.info(f"🗺 Building map for {len(dff):,} wells…")
 
         # NO prefer_canvas. THE COMMENT THAT WAS HERE WAS RIGHT AND I
@@ -14641,7 +14699,10 @@ def run(engine=None):
                     key=_map_widget_key,
                 )
         _phase(100)
-        _msg.empty()
+        # UNDER THE MAP, which is what the messages are about. This used to
+        # be _msg.empty() -- clearing a placeholder that sat ABOVE the map
+        # and had already pushed it down for the whole render.
+        _msg.flush(st.container())
         # _watch_seis_choice() USED TO BE CALLED HERE and is now registered at
         # the top of run(). See the note there: 36 statements between the two
         # points can end the render early, and each one left the browser
