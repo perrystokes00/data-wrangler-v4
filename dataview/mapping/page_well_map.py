@@ -13516,9 +13516,25 @@ def run(engine=None):
                         _rb = _layer_bounds
                         _rn, _rscope = add_reference_wells(
                             m, engine, bounds=_rb, show=True)
-                        _say("[map] geo layer geo_refwells    drew %s%s"
-                             % (_rn, "" if _rscope is not None
-                                else "  (capped sample, no bounds)"))
+                        # SAY THE TWO FACTS SEPARATELY. This used to print
+                        # "(capped sample, no bounds)" whenever the fetch
+                        # SAMPLED -- which says nothing about whether bounds
+                        # were passed, and the two have different fixes. It
+                        # cost a whole diagnosis: a box holding 32,991 wells,
+                        # well under the 50,000 cap, drew the nationwide
+                        # sample and the log called it "no bounds", leaving
+                        # "was the box ignored?" and "was the box too big?"
+                        # indistinguishable. A discarded diagnostic makes the
+                        # next failure undiagnosable -- so name the bounds it
+                        # actually received.
+                        _say("[map] geo layer geo_refwells    drew %s  "
+                             "(bounds=%s, %s)"
+                             % (_rn,
+                                ("%.4f,%.4f..%.4f,%.4f"
+                                 % (_rb[0][0], _rb[0][1], _rb[1][0], _rb[1][1])
+                                 if _rb else "NONE"),
+                                "exact" if _rscope is not None
+                                else "SAMPLED (scope over the 50,000 cap)"))
                         _mapmsg.info(
                             f"🔵 Drew {_rn:,} reference well(s)"
                             + ("" if _rscope is not None else
