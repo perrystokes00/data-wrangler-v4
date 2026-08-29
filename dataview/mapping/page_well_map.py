@@ -1020,8 +1020,27 @@ def _watch_seis_choice():
     _seen = st.session_state.get("_seis_pref_seen")
     if _seen is None:
         return
-    if _seis_pref_mtime() != _seen:
-        st.rerun()
+    _now = _seis_pref_mtime()
+    if _now == _seen:
+        return
+    # ── ONE RERUN PER MTIME, AND THE DOCSTRING ABOVE WAS WRONG ─────────
+    # "NO LOOP IS POSSIBLE. The full render records the mtime it drew" --
+    # true only if the render REACHES that stamp. This polls every 2s and a
+    # map render takes 2-8s, so the fragment aborts the render before the
+    # stamp is written, then sees the same difference and fires again. A
+    # render slower than the poll interval can never complete.
+    #
+    # Saving a place writes user_prefs.json, which is the same file this
+    # watches -- so "type a name, press Enter" started a loop that ran 246
+    # reruns from this line before anything drew.
+    #
+    # Remembering WHICH mtime was asked for makes a second ask impossible
+    # for the same value, while a genuine later change still gets its own
+    # rerun. The stamp in the render is still what clears it for good.
+    if st.session_state.get("_seis_rerun_for") == _now:
+        return
+    st.session_state["_seis_rerun_for"] = _now
+    st.rerun()
 
 
 def _map_seis_choice() -> dict:
@@ -12318,7 +12337,20 @@ def run(engine=None):
                 # "All Schemas" + H3 — diagnosed 2026-05-27. Read from
                 # session_state directly because the local _map_mode
                 # variable isn't assigned until ~80 lines below this block.
+                #
+                # THE DATA EXTENT IS NOT THAT QUERY. The expensive thing this
+                # branch avoids is _qry_well_grid; a MIN/MAX over the indexed
+                # lat/lon pair is 0.047s and cached. So H3 mode opens on the
+                # wells too -- "it opened the map at North America" was this
+                # branch, with mode=h3, not the lower-48 one already fixed.
                 lat0, lon0, zoom0 = 39.5, -98.35, 4
+                if not st.session_state.get("_last_fit_sig"):
+                    _de = _qry_data_extent(engine)
+                    if _de:
+                        _viewport_bounds = _de
+                        lat0 = (_de[0][0] + _de[1][0]) / 2
+                        lon0 = (_de[0][1] + _de[1][1]) / 2
+                        zoom0 = 7
             elif "main" in active_area.get("sources", []):
                 # An area that uses the main dv_well source IS selected.
                 # Use the dv_well centroid as the initial view (cheap
