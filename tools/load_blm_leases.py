@@ -171,7 +171,23 @@ def main():
     for f in feats:
         p = f.get("properties") or {}
         status = str(p.get("CSE_DISP") or "").strip()
-        if not a.history and status.lower() != "authorized":
+        # CURRENT, NOT "AUTHORIZED". The point of this filter is to keep a
+        # century of dead leases out of the default view -- 9,089 of
+        # Natrona's 9,785 BLM leases are Closed, and loading them makes
+        # every well intersect a dozen tracts. "Authorized" is how BLM
+        # spells current; it is not how anyone else does. Wyoming's LARCS
+        # says Prospecting, Producing, Suspended -- and its ACTIVE layer
+        # says nothing at all for 85% of leases, because the attribute
+        # table does not reach them.
+        #
+        # So a file that CARRIES an explicit ACTIVE flag is believed, and
+        # only a file without one falls back to BLM's word. Without this,
+        # a state load reported "skipped, not Authorized: 16,356" and
+        # loaded nothing -- correct by the letter, useless.
+        _explicit = (p.get("ACTIVE") or "").strip().upper()[:1]
+        _is_current = (_explicit == "Y" if _explicit
+                       else status.lower() == "authorized")
+        if not a.history and not _is_current:
             skipped_status += 1
             continue
         w = wkt_of(f.get("geometry"))
@@ -185,7 +201,7 @@ def main():
 
     print("\n%s" % os.path.abspath(a.file))
     print("   features in file        : %s" % format(len(feats), ","))
-    print("   skipped, not Authorized : %s%s"
+    print("   skipped, not current    : %s%s"
           % (format(skipped_status, ","), "" if not a.history else "  (--history: none)"))
     print("   skipped, no geometry    : %s" % format(no_geom, ","))
     print("   skipped, no CSE_NR      : %s" % format(no_serial, ","))
@@ -205,8 +221,14 @@ def main():
                 "nm": (p.get("CSE_NAME") or "").strip() or None,
                 "ln": str(p.get("CSE_NR")).strip(),
                 "st": (p.get("GEO_STATE") or p.get("ADMIN_STATE") or "").strip() or None,
-                "act": "Y" if str(p.get("CSE_DISP") or "").lower() in
-                       ("authorized", "producing", "prospecting") else "N",
+                # AN EXPLICIT FLAG BEATS AN INFERRED ONE. BLM files carry
+                # no ACTIVE property, so they keep inferring from CSE_DISP.
+                # A source that KNOWS -- because it fetched from an
+                # "active leases" endpoint -- says so, and is believed.
+                "act": ((p.get("ACTIVE") or "").strip().upper()[:1]
+                        or ("Y" if str(p.get("CSE_DISP") or "").lower() in
+                            ("authorized", "producing", "prospecting")
+                            else "N")),
                 "src": src,
                 # THE LESSEE, WHEN THE SOURCE HAS ONE. BLM publishes none, so
                 # this stays NULL for MLRS -- which is the truth, and is why

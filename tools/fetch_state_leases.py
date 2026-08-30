@@ -262,6 +262,14 @@ def build(geom_feats, attr_rows, iso):
             "LEGAL": ((_t(a.get("LeaseLegalDescription")) or "")[:400] or None)
                      if a else None,
             "STATE_PCT": (a.get("LeaseStateOwnershipPercentage") if a else None),
+            # THE ENDPOINT KNOWS THIS AND THE ATTRIBUTE ROW DOES NOT.
+            # These polygons came from ActiveMineralLeaseLARCS -- every one
+            # of them is an ACTIVE lease by the service's own definition.
+            # 85% have no attribute row, so deriving active_ind from
+            # lease_status would mark 13,978 of 16,356 inactive, and the
+            # map hides those (ISNULL(active_ind,'Y')='Y'). They would load
+            # and be invisible, which is the worst of both.
+            "ACTIVE": "Y",
             "SOURCE": SOURCE,
         }
         feats.append({"type": "Feature", "geometry": f.get("geometry"),
