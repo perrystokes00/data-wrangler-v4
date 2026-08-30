@@ -334,6 +334,8 @@ def add_well_points(m, engine, show: bool = True, limit: int = 50000) -> int:
         extra=cols, popup_fields=["nm"] + cols, popup_aliases=aliases)
 
 
+import folium as _f
+
 REFERENCE_MASTER = "WELL_REF.well_ref.well_master_gold"
 
 # What a reference-well popup answers. Declared once so the two queries below
@@ -1520,3 +1522,143 @@ def add_lease_layer_file(m, path, url, by="producing", show=True,
     if legend:
         _add_lease_legend(m, legend, key)
     return url
+
+
+# ── TOWNSHIPS: THE GRID THE LEASES WERE WRITTEN ON ─────────────────────────
+# 2,888 surveyed Wyoming townships from BLM CadNSDI, coloured by leased
+# acreage. This is the aggregate the lease layer cannot be: 24,178 polygons
+# render as a smear below about zoom 9, and a hexagon would cut across the
+# section lines every one of these leases was described against.
+#
+# THE MEASURE IS ACREAGE, NOT COUNT, and that is the one place lease
+# clustering must differ from well clustering. A well is a point, so counting
+# points is the honest summary. A 40-acre lease and a 1,280-acre lease are
+# not the same fact, so a township holding three big leases is more leased
+# than one holding twenty small ones -- and colouring by count would say the
+# opposite.
+#
+# RECTANGLES FROM bbox_wkt, NOT POLYGONS. dv_plss_township stores a centroid
+# and a bounding box and no geometry column, which is the schema's own
+# judgement that a township is a grid REFERENCE. A township IS a rectangle to
+# within the survey's own adjustments, so the box is the shape.
+TOWNSHIP_RAMP = ["#f0d9b8", "#dfae72", "#c8813c", "#a55a1c", "#7a3a0d"]
+
+
+def _twp_bounds(wkt):
+    """(s, w, n, e) from the stored POLYGON((...)) box, or None."""
+    import re
+    nums = [float(x) for x in re.findall(r"-?\d+\.?\d*", wkt or "")]
+    if len(nums) < 8:
+        return None
+    xs, ys = nums[0::2], nums[1::2]
+    return (min(ys), min(xs), max(ys), max(xs))
+
+
+def add_township_layer(m, engine, show=True, state="WY", bounds=None):
+    """PLSS townships shaded by leased acreage. (drawn, leased_townships).
+
+    ONE QUERY, AGGREGATED IN SQL. Pulling 24,178 leases to count them in
+    Python is the thing this repo has measured three times; the join is a
+    BETWEEN on the township box against the lease centroid, which the
+    lat/lon index serves.
+    """
+    where = ["t.province_state_id = :st", "t.bbox_wkt IS NOT NULL"]
+    params = {"st": state}
+    if bounds:
+        try:
+            (s, w), (n, e) = bounds
+            where.append("t.centroid_latitude BETWEEN :s AND :n")
+            where.append("t.centroid_longitude BETWEEN :w AND :e")
+            params.update({"s": float(s), "n": float(n),
+                           "w": float(w), "e": float(e)})
+        except Exception:
+            pass
+    clause = " AND ".join(where)
+    try:
+        with engine.connect() as con:
+            rows = con.execute(text(f"""
+                SELECT t.plss_id, t.township_label, t.bbox_wkt,
+                       COUNT(g.tract_id)                         AS n,
+                       ISNULL(SUM(g.area_km2), 0) * 247.105       AS acres
+                  FROM dataview.dv_plss_township t
+                  -- ON THE STAMPED COLUMN, NOT A SPATIAL FUNCTION. The
+                  -- first draft joined on geog.EnvelopeCenter() inside a
+                  -- BETWEEN, so the server evaluated a spatial function
+                  -- across 2,888 x 24,178 rows and the layer took 75.6
+                  -- seconds. assign_tract_townships stamps plss_id once --
+                  -- the same trick h3_refresh uses for wells -- and this
+                  -- becomes a GROUP BY on an indexed column.
+                  LEFT JOIN dataview.dv_land_tract_geom g
+                    ON  g.plss_id = t.plss_id
+                 WHERE {clause}
+                 GROUP BY t.plss_id, t.township_label, t.bbox_wkt
+            """), params).fetchall()
+    except Exception as exc:
+        print(f"[geography_layers] township query failed: {exc}")
+        return 0, 0
+
+    feats, leased = [], 0
+    acres = sorted(float(r.acres or 0) for r in rows if (r.n or 0) > 0)
+
+    def _colour(ac):
+        if not acres or ac <= 0:
+            return "#e8e2d6"
+        for i, q in enumerate((0.2, 0.45, 0.7, 0.9)):
+            if ac <= acres[min(int(len(acres) * q), len(acres) - 1)]:
+                return TOWNSHIP_RAMP[i]
+        return TOWNSHIP_RAMP[4]
+
+    for r in rows:
+        b = _twp_bounds(r.bbox_wkt)
+        if not b:
+            continue
+        s, w, n, e = b
+        ac = float(r.acres or 0)
+        if (r.n or 0) > 0:
+            leased += 1
+        feats.append({
+            "type": "Feature",
+            "geometry": {"type": "Polygon",
+                         "coordinates": [[[w, s], [e, s], [e, n],
+                                          [w, n], [w, s]]]},
+            "properties": {"lab": r.township_label or r.plss_id,
+                           "pid": r.plss_id,
+                           "n": int(r.n or 0),
+                           "ac": int(ac),
+                           "_c": _colour(ac)},
+        })
+    if not feats:
+        return 0, 0
+
+    _f.GeoJson(
+        {"type": "FeatureCollection", "features": feats},
+        name=f"▦ Townships ({leased:,} leased of {len(feats):,})",
+        show=show,
+        # STYLED IN THE BROWSER for the same reason the leases are: one
+        # template instead of a style block per feature.
+        on_each_feature=_f.JsCode("""
+            function(feature, layer) {
+                var p = feature.properties;
+                var c = p._c;
+                var base = {color: '#8a7a63', weight: 0.7, opacity: 0.85,
+                            fillColor: c,
+                            fillOpacity: p.n ? 0.55 : 0.10};
+                layer.setStyle(base);
+                layer.on('mouseover', function(){
+                    layer.setStyle({weight: 2, fillOpacity: 0.72}); });
+                layer.on('mouseout', function(){ layer.setStyle(base); });
+                layer.bindTooltip('<b>' + p.lab + '</b><br>' +
+                    (p.n ? p.n + ' lease(s)<br>' +
+                           p.ac.toLocaleString() + ' ac leased'
+                         : 'no leases recorded'), {sticky: true});
+                layer.bindPopup(
+                    '<table style="font-size:11px;border-collapse:collapse">' +
+                    '<tr><td style="color:#64748b;padding-right:8px">Township</td>' +
+                    '<td><b>' + p.lab + '</b></td></tr>' +
+                    '<tr><td style="color:#64748b">PLSS id</td><td>' + p.pid + '</td></tr>' +
+                    '<tr><td style="color:#64748b">Leases</td><td>' + p.n + '</td></tr>' +
+                    '<tr><td style="color:#64748b">Leased acres</td><td>' +
+                    p.ac.toLocaleString() + '</td></tr></table>', {maxWidth: 320});
+            }"""),
+    ).add_to(m)
+    return len(feats), leased

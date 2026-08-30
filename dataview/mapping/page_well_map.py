@@ -11793,6 +11793,7 @@ def run(engine=None):
         _geo_defs = [
             ("geo_fields",     "🟩 Fields"),
             ("geo_leases",     "🟦 Leases"),
+            ("geo_townships",  "▦ Townships"),
             ("geo_boundaries", "🟪 Boundaries"),
             ("geo_pipelines",  "➖ Pipelines"),
             ("geo_seismic",    "🟪 Seismic"),
@@ -13497,6 +13498,26 @@ def run(engine=None):
                                   "apply to compute them.")
                     except Exception as _pe:
                         _mapmsg.warning(f"Well paths skipped: {_pe}")
+                if "geo_townships" in active_db:
+                    # THE LEASES, AGGREGATED ONTO THE GRID THEY WERE WRITTEN
+                    # ON. 24,178 lease polygons render as a smear below about
+                    # zoom 9; 2,888 townships do not, and unlike a hexagon a
+                    # township is an ADDRESS -- "T43N R71W is 62% leased" is
+                    # a sentence a land man can act on.
+                    try:
+                        from dataview.mapping.geography_layers import (
+                            add_township_layer)
+                        _tn, _tl = add_township_layer(
+                            m, engine, show=True,
+                            bounds=_layer_bounds)
+                        _say("[map] geo layer geo_townships  drew %s "
+                             "(%s leased)" % (_tn, _tl))
+                        _mapmsg.info(
+                            f"▦ {_tn:,} township(s), {_tl:,} holding "
+                            "leases — shaded by leased acreage, not "
+                            "lease count.")
+                    except Exception as _texc:
+                        _mapmsg.warning(f"Townships skipped: {_texc}")
                 if "geo_wellpts" in active_db:
                     add_well_points(m, engine, show=True)
                 if "geo_refwells" in active_db:
@@ -15876,6 +15897,63 @@ def run(engine=None):
                 FEDWELL_POPUP_LABEL as _FEDLBL)
             if _FEDLBL in _clicked_str:
                 _say("[map] federated-well click ignored -- not a dv_well")
+                clicked = None
+                _clicked_str = ""
+
+            # ── A TOWNSHIP CLICK EXPANDS INTO ITS LEASES ────────────────
+            # The overview and the detail are the same question at two
+            # scales, so clicking the aggregate has to open it -- otherwise
+            # the township layer is a picture rather than a way in.
+            #
+            # NO NEW DRILL. The township popup carries its PLSS id, and
+            # dv_plss_township already stores that township's box; setting
+            # _clip_box to it is exactly what drawing a rectangle round the
+            # township would do, so every layer clips the way it already
+            # knows how. Reusing the box is the whole reason this is small.
+            elif "PLSS id" in _clicked_str:
+                _pid = None
+                for _ln2 in _clicked_str.splitlines():
+                    if "PLSS id" in _ln2:
+                        _pid = _ln2.split("PLSS id")[-1].strip(" \t:")
+                        break
+                if _pid and st.session_state.get("_twp_drill_for") != _pid:
+                    st.session_state["_twp_drill_for"] = _pid
+                    try:
+                        import re as _re2
+                        # IMPORTED HERE, like every other query in this file.
+                        # sqlalchemy.text is NOT a module-level name in this
+                        # module, and a bare name that is missing fails only
+                        # when the line RUNS -- which here would be the first
+                        # time anyone clicked a township, long after the
+                        # feature looked finished.
+                        from sqlalchemy import text as _t2
+                        with engine.connect() as _c2:
+                            _bw = _c2.execute(_t2(
+                                "SELECT bbox_wkt, township_label FROM "
+                                "dataview.dv_plss_township WHERE plss_id = :p"),
+                                {"p": _pid}).first()
+                        if _bw and _bw[0]:
+                            _nn = [float(x) for x in
+                                   _re2.findall(r"-?\d+\.?\d*", _bw[0])]
+                            _xs, _ys = _nn[0::2], _nn[1::2]
+                            st.session_state["_clip_box"] = [
+                                [min(_ys), min(_xs)], [max(_ys), max(_xs)]]
+                            st.session_state["_drawn_bounds"] = \
+                                st.session_state["_clip_box"]
+                            st.session_state["_drawn_bounds_oneshot"] = True
+                            if not st.session_state.get("wm_clip_to_box"):
+                                st.session_state["_clip_request"] = True
+                            _say("[map] township %s (%s) -> clip %s"
+                                 % (_pid, _bw[1],
+                                    st.session_state["_clip_box"]))
+                            st.success(
+                                "▦ **%s** — zoomed and clipped to this "
+                                "township. Every layer now shows only what "
+                                "is inside it; ✗ Clear box lets go."
+                                % (_bw[1] or _pid))
+                            st.rerun()
+                    except Exception as _texc2:
+                        _say("[map] township drill failed: %s" % _texc2)
                 clicked = None
                 _clicked_str = ""
 
