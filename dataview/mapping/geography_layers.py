@@ -1780,21 +1780,22 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                         });
                     }
 
-                    // The drawing channel is still attempted, so that Python
-                    // ALSO learns the box when st_folium allows it -- but the
-                    // explode above no longer depends on it.
-                    setTimeout(function () {
-                        var rect = L.rectangle(b);
-                        try {
-                            if (typeof drawnItems !== 'undefined' && drawnItems) {
-                                drawnItems.addLayer(rect);
-                            } else { rect.addTo(mp); }
-                        } catch (e) { try { rect.addTo(mp); } catch (e2) {} }
-                        try {
-                            mp.fire('draw:created',
-                                    {layer: rect, layerType: 'rectangle'});
-                        } catch (e) { /* st_folium's onDraw may throw */ }
-                    }, 0);
+                    // AND IT MUST NOT TELL PYTHON. An earlier version also
+                    // fired draw:created here, so that the server would learn
+                    // the box and could clip to it as well. That turned out
+                    // to DESTROY the very thing it was added beside: the
+                    // drawing reaches Python, Streamlit reruns, the map is
+                    // rebuilt from scratch, and the highlight -- which lives
+                    // only in this page -- is wiped along with it. Measured:
+                    // the explode was correct (70 highlighted, 24,108 faded)
+                    // and then the rerun replaced the map and left a "name
+                    // the shape you drew" panel, so the whole thing read as
+                    // "nothing happened".
+                    //
+                    // A client-side effect and a server rerun cannot share a
+                    // gesture. The zoom and the highlight are the feature;
+                    // clipping server-side is what ⛶ Use current view and the
+                    // box tool are for.
                 });
             }"""),
     ).add_to(m)
