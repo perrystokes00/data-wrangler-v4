@@ -1659,6 +1659,54 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                     '<tr><td style="color:#64748b">Leases</td><td>' + p.n + '</td></tr>' +
                     '<tr><td style="color:#64748b">Leased acres</td><td>' +
                     p.ac.toLocaleString() + '</td></tr></table>', {maxWidth: 320});
+
+                // ── CLICK EXPANDS THE TOWNSHIP ──────────────────────────
+                // THROUGH THE DRAWING CHANNEL, because the click channels do
+                // not work for this layer. Measured, twice: a GeoJSON polygon
+                // reports NO popup text to Python (only markers do), and a
+                // click on this layer did not change last_object_clicked
+                // either -- the log did not grow by one line. Both handlers
+                // were written, both were silent.
+                //
+                // all_drawings DOES arrive. It is how the box tool works, how
+                // the ⛶ Use current view control works, and it stays
+                // subscribed even under Freeze. So the click builds the
+                // township's own rectangle and fires the same draw:created
+                // the box tool fires -- and everything downstream is the code
+                // that already runs: the 5-point ring test, _clip_box, the
+                // clip request, and every layer clipping to it.
+                //
+                // No new drill, no new channel. The township click becomes a
+                // box the map already knows how to honour.
+                layer.on('click', function(ev) {
+                    var mp = layer._map;
+                    if (!mp) { return; }
+                    var b = layer.getBounds();
+                    try { L.DomEvent.stopPropagation(ev); } catch (e) {}
+                    // OUT OF THE CLICK'S CALL STACK, and this is the whole
+                    // reason it did not work. Fired inline, streamlit-folium's
+                    // onDraw runs while the click event is still live, reads
+                    // the click's sourceTarget as if it were a popup-bearing
+                    // layer, and throws:
+                    //   TypeError: t.sourceTarget.getPopup is not a function
+                    //       at onLayerClick ... at onDraw
+                    // The exception aborts st_folium's handler, so
+                    // all_drawings never updates and NOTHING reaches Python --
+                    // silently, because the throw is inside the component.
+                    // setTimeout lets the click finish first; onDraw then
+                    // sees an ordinary programmatic draw, exactly like the
+                    // ⛶ control's, which has always worked.
+                    setTimeout(function () {
+                        var rect = L.rectangle(b);
+                        try {
+                            if (typeof drawnItems !== 'undefined' && drawnItems) {
+                                drawnItems.addLayer(rect);
+                            } else { rect.addTo(mp); }
+                        } catch (e) { try { rect.addTo(mp); } catch (e2) {} }
+                        mp.fire('draw:created',
+                                {layer: rect, layerType: 'rectangle'});
+                    }, 0);
+                });
             }"""),
     ).add_to(m)
     return len(feats), leased
