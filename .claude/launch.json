@@ -1,0 +1,39 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "data-wrangler",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "app_v4.py",
+        "--server.port",
+        "8502",
+        "--server.headless",
+        "true",
+        "--server.fileWatcherType",
+        "none"
+      ],
+      "port": 8502
+    },
+    {
+      "name": "coltest",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "C:\\Users\\perry\\AppData\\Local\\Temp\\claude\\C--Users-perry-OneDrive-Documents-PPDM-claude-use-ai-data-wrangler-data-wrangler-v4\\58b4e1fc-976a-43fb-9200-6d65674d265a\\scratchpad\\coltest.py",
+        "--server.port",
+        "8503",
+        "--server.headless",
+        "true",
+        "--server.fileWatcherType",
+        "none"
+      ],
+      "port": 8503
+    }
+  ]
+}
