@@ -14224,8 +14224,23 @@ def run(engine=None):
         _reset_saved_view = bool(st.session_state.pop("_reset_saved_view", False))
         view_persist = MacroElement()
         view_persist._name = "dv_view_persist"
+        # ── ITS OWN <script> TAG, NOT FOLIUM'S SHARED ONE ───────────────
+        # m.add_child() emits the `script` macro INTO folium's main script
+        # block -- the same block that carries the layer control. That block
+        # is currently emitted TWICE into the component iframe, so it
+        # contains "let layer_control_div_5" twice, which is a SyntaxError.
+        # A SyntaxError is a PARSE failure: nothing in that tag runs, so this
+        # persistence never installed at all. Measured in the browser --
+        # __dv_view_persist_bound false while the source was plainly present,
+        # and the console showing the redeclaration.
+        #
+        # An `html` macro on the figure ROOT gets a tag of its own, which is
+        # the pattern the legend blocks in this file already use and the one
+        # dv_seis_picker's comment recommends. Somebody else's parse error
+        # can no longer take the map's view with it.
         view_persist._template = Template(u"""
-            {% macro script(this, kwargs) %}
+            {% macro html(this, kwargs) %}
+            <script>
             (function() {
                 var SKIP_FLAG  = """ + ("true" if _has_active_fit else "false") + u""";
                 var RESET_FLAG = """ + ("true" if _reset_saved_view else "false") + u""";
@@ -14272,10 +14287,51 @@ def run(engine=None):
                             var raw = sessionStorage.getItem(STORAGE_KEY);
                             if (raw) {
                                 var v = JSON.parse(raw);
-                                if (v && typeof v.lat === 'number'
+                                // ── BOUNDS, NOT A ZOOM NUMBER ──────────
+                                // The same rule the initial view already
+                                // follows, finally applied to the saved one.
+                                // A centre and a zoom describe a DIFFERENT
+                                // extent on a different width, so restoring
+                                // them into a map the lease strip has just
+                                // narrowed showed a tighter view than the
+                                // one that was saved -- "the zoom and center
+                                // are not reset to the size of the map with
+                                // the lease sidebar on". Bounds are what the
+                                // reader actually meant by their view, and
+                                // fitBounds re-derives the zoom from
+                                // whatever width the map now has.
+                                if (v && typeof v.s === 'number'
+                                    && typeof v.n === 'number') {
+                                    setTimeout(function() {
+                                        // Suppressed while WE move the map:
+                                        // fitBounds zooms out to the next
+                                        // step that fits, so saving the
+                                        // result would record a slightly
+                                        // larger box, which the next restore
+                                        // would grow again -- a ratchet that
+                                        // walks the view outwards on every
+                                        // rerun.
+                                        mapInst.__dv_restoring = true;
+                                        try {
+                                            // The container may have changed
+                                            // width since Leaflet measured
+                                            // it; ask it to look again.
+                                            mapInst.invalidateSize(
+                                                { animate: false });
+                                        } catch (e) { /* not fatal */ }
+                                        mapInst.fitBounds(
+                                            [[v.s, v.w], [v.n, v.e]],
+                                            { animate: false });
+                                        setTimeout(function () {
+                                            mapInst.__dv_restoring = false;
+                                        }, 300);
+                                    }, 0);
+                                } else if (v && typeof v.lat === 'number'
                                     && typeof v.lng === 'number'
                                     && typeof v.zoom === 'number') {
-                                    // Defer until after Leaflet's own init.
+                                    // A view saved by the previous build.
+                                    // Honoured once; the next save writes
+                                    // bounds and it never appears again.
                                     setTimeout(function() {
                                         mapInst.setView(
                                             [v.lat, v.lng], v.zoom,
@@ -14297,12 +14353,11 @@ def run(engine=None):
                         if (saveTimer) clearTimeout(saveTimer);
                         saveTimer = setTimeout(function() {
                             try {
-                                var c = mapInst.getCenter();
-                                var z = mapInst.getZoom();
+                                if (mapInst.__dv_restoring) { return; }
+                                var b = mapInst.getBounds();
                                 sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
-                                    lat:  c.lat,
-                                    lng:  c.lng,
-                                    zoom: z
+                                    s: b.getSouth(), w: b.getWest(),
+                                    n: b.getNorth(), e: b.getEast()
                                 }));
                             } catch (e) { /* silent */ }
                         }, 200);
@@ -14355,11 +14410,14 @@ def run(engine=None):
                 }
                 install();
             })();
+            </script>
             {% endmacro %}
         """)
         _mark("build: view_persist JS")
         view_persist._parent = m
-        m.add_child(view_persist)
+        # ROOT, not the map: an html macro added to the map is silently
+        # dropped -- the trap dv_seis_picker's comment records.
+        m.get_root().add_child(view_persist)
 
         # -- Click-to-centre: walk the map without dragging -----------------
         # A REAL LEAFLET CONTROL, not a floating div. Every corner of this map
