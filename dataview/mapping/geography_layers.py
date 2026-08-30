@@ -1630,6 +1630,17 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
     if not feats:
         return 0, 0
 
+    # FEW TOWNSHIPS MEANS WE ARE CLOSE IN. Statewide is 2,888; a drawn box
+    # around a field is tens. Below the threshold the layer stops being a
+    # choropleth and becomes a grid over the leases -- which is the whole
+    # point of clipping to a box. Declared before the layer so the style
+    # function can read it; a Python-side flag rather than a zoom listener,
+    # because Python already knows the count and never learns the zoom.
+    _f.Element(
+        "<script>window.DV_TWP_FRAMED = %s;</script>"
+        % ("true" if len(feats) <= 250 else "false")
+    ).add_to(m.get_root().html)
+
     _f.GeoJson(
         {"type": "FeatureCollection", "features": feats},
         name=f"▦ Townships ({leased:,} leased of {len(feats):,})",
@@ -1640,9 +1651,24 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
             function(feature, layer) {
                 var p = feature.properties;
                 var c = p._c;
-                var base = {color: '#8a7a63', weight: 0.7, opacity: 0.85,
-                            fillColor: c,
-                            fillOpacity: p.n ? 0.55 : 0.10};
+                // CLOSE IN, THE TOWNSHIP BECOMES A FRAME, NOT A FILL.
+                // Townships render in the default overlay pane and the
+                // leases in a custom pane BELOW it, so a 55% fill sits on
+                // top of the very thing you zoomed in to see -- "I drew a
+                // box and the townships did not expand" is partly this: the
+                // leases were under there, smothered.
+                //
+                // Far out, the fill IS the information: it is a choropleth
+                // of leased acreage across 2,888 squares. Clipped or zoomed
+                // in, the leases are the information and the township is
+                // just the grid line round them. FRAMED is set by the layer
+                // when it draws few enough townships to mean "we are close".
+                var framed = (typeof DV_TWP_FRAMED !== 'undefined') && DV_TWP_FRAMED;
+                var base = framed
+                    ? {color: '#7a3a0d', weight: 1.6, opacity: 0.95,
+                       fillColor: c, fillOpacity: 0.06}
+                    : {color: '#8a7a63', weight: 0.7, opacity: 0.85,
+                       fillColor: c, fillOpacity: p.n ? 0.55 : 0.10};
                 layer.setStyle(base);
                 layer.on('mouseover', function(){
                     layer.setStyle({weight: 2, fillOpacity: 0.72}); });
