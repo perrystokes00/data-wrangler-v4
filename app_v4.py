@@ -719,8 +719,25 @@ with st.sidebar:
     except Exception as _e_src:                  # never let a banner break boot
         st.caption(f"(code source unknown: {str(_e_src)[:60]})")
 
-    # (The theme CSS is injected above, before the sidebar opens. A second
-    # call used to sit here and emit the same <style> block twice.)
+    # THE THEME PICKER, WITH NOTHING AROUND IT. It sits at the top, under
+    # the logo, which is where it has always been and where it reads best:
+    # one line, the name of the theme, and nothing announcing it. What was
+    # removed is the ceremony that grew around it -- an APPEARANCE header
+    # with a rule under it, and a three-line description under that saying
+    # what the name in the dropdown already says.
+    #
+    # The theme CSS is injected before the sidebar opens, so nothing here
+    # renders unthemed. A second _inject_theme call used to sit at this
+    # spot and emit the same <style> block twice per run.
+    theme_choice = st.selectbox(
+        "Color theme",
+        options=list(THEMES.keys()),
+        index=list(THEMES.keys()).index(S.get("theme", "Midnight Gold")),
+        key="sb_theme",
+        label_visibility="collapsed")
+    if theme_choice != S.get("theme"):
+        S.theme = theme_choice
+        st.rerun()
 
     # ── Connect panel ─────────────────────────────────────────────────
     with st.expander("🔌 Connect", expanded=not S.connected):
@@ -963,20 +980,6 @@ with st.sidebar:
             del S[_k]
         st.rerun()
 
-    # THE PICKER, WITH NOTHING AROUND IT. It used to carry a section header
-    # with a rule under it and a three-line description under that, and
-    # between them they pushed Connect and Reset down the page to say what
-    # the name in the dropdown already says. The CSS still goes in up top,
-    # before Connect draws, so nothing renders unthemed.
-    theme_choice = st.selectbox(
-        "Color theme",
-        options=list(THEMES.keys()),
-        index=list(THEMES.keys()).index(S.get("theme", "Midnight Gold")),
-        key="sb_theme",
-        label_visibility="collapsed")
-    if theme_choice != S.get("theme"):
-        S.theme = theme_choice
-        st.rerun()
 
     # ── Navigation (only when connected) ─────────────────────────────
     if S.connected:
