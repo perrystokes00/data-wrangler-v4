@@ -1339,6 +1339,21 @@ def write_lease_geojson(engine, out_dir, limit=200000):
             "IS NOT NULL AND COL_LENGTH('dataview.dv_land_tract_geom',"
             "'plss_id') IS NOT NULL THEN 1 ELSE 0 END")).scalar()
         _twcol = "tg.plss_id" if _has_twp else "NULL"
+        # THE COUNTY COMES OFF THE SAME JOIN. dv_land_tract (the view) does
+        # not expose it; dv_land_tract_geom stamps it on 24,177 of 24,178
+        # tracts, which is what makes a county filter a column test rather
+        # than a spatial join.
+        _cocol = "tg.county" if _has_twp else "NULL"
+        # ELEVATION AND THE TWO DISTANCES, stamped by tools/stamp_elevation.py
+        # and tools/stamp_cultural_distance.py. Guarded individually: the
+        # file must still build on a database where those tools have never
+        # been run, and _has_twp only proves the geom table exists.
+        _extra = {}
+        for _c2 in ("elevation_ft", "dist_city_km", "near_city",
+                    "dist_hwy_km", "near_hwy"):
+            _extra[_c2] = ("tg." + _c2) if (_has_twp and con.execute(text(
+                "SELECT COL_LENGTH('dataview.dv_land_tract_geom', :c)"),
+                {"c": _c2}).scalar() is not None) else "NULL"
         _twjoin = ("LEFT JOIN dataview.dv_land_tract_geom tg "
                    "ON tg.tract_id = lt.land_tract_id"
                    if _has_twp else "")
@@ -1362,6 +1377,12 @@ def write_lease_geojson(engine, out_dir, limit=200000):
                    -- for a missing TABLE and a missing COLUMN alike -- so it
                    -- is paired with OBJECT_ID, or the guard skips silently.
                    {_twcol}               AS twp,
+                   {_cocol}               AS cty,
+                   {_extra['elevation_ft']}  AS el,
+                   {_extra['dist_city_km']}  AS dcity,
+                   {_extra['near_city']}     AS ncity,
+                   {_extra['dist_hwy_km']}   AS dhwy,
+                   {_extra['near_hwy']}      AS nhwy,
                    lt.geog.STAsText()     AS wkt
               FROM dataview.dv_land_tract lt
               {_twjoin}
@@ -1393,6 +1414,27 @@ def write_lease_geojson(engine, out_dir, limit=200000):
             "ac": ("%s ac" % format(int(float(r.km2) * 247.105), ",")
                    if r.km2 is not None else ""),
             "_tw": _t(r.twp),
+            # NORMALISED FOR MATCHING, not for display. Seven tracts straddle
+            # two counties and the source recorded both in one field with
+            # inconsistent separators -- "Campbell & Converse" and
+            # "Campbell,Johnson". Stored as ",campbell,converse," so a filter
+            # can ask "does this contain ,campbell,?" and a straddling lease
+            # answers yes under BOTH its counties, instead of being silently
+            # missed by county = 'Campbell'.
+            "_co": _county_key(r.cty),
+            # NUMBERS FOR THE FILTER, prose for the popup -- the same split
+            # the 640-acre boundary forced: never filter on a display string.
+            "_el": (round(float(r.el), 1) if r.el is not None else None),
+            "_dc": (round(float(r.dcity), 4) if r.dcity is not None else None),
+            "_dh": (round(float(r.dhwy), 4) if r.dhwy is not None else None),
+            "el": ("%s ft" % format(int(float(r.el)), ",")
+                   if r.el is not None else ""),
+            "ncity": ("%s (%.1f mi)" % (_t(r.ncity),
+                                        float(r.dcity) * 0.621371)
+                      if (r.ncity and r.dcity is not None) else ""),
+            "nhwy": ("%s (%.1f mi)" % (_t(r.nhwy),
+                                       float(r.dhwy) * 0.621371)
+                     if (r.nhwy and r.dhwy is not None) else ""),
             # THE NUMBER, BESIDE THE STRING THAT DISPLAYS IT. "km" is
             # "%.2f km2" for a popup; filtering on it means filtering on a
             # ROUNDED value, and at a threshold that is exactly one section
@@ -1500,9 +1542,46 @@ function(feature, layer) {
                 FILT.src.indexOf(p.src) < 0) { hide(); return; }
         if (FILT.lst && FILT.lst.length &&
                 FILT.lst.indexOf(p.lst) < 0) { hide(); return; }
+        if (FILT.st && FILT.st.length &&
+                FILT.st.indexOf(p.st) < 0) { hide(); return; }
+        if (FILT.co && FILT.co.length) {
+            // CONTAINMENT, NOT EQUALITY. _co is ",campbell,converse," for a
+            // lease straddling two counties; asking for Campbell must find
+            // it. The wrapping commas keep the test exact.
+            var ck = p._co;
+            if (!ck) { hide(); return; }
+            var anyCo = false;
+            for (var ci = 0; ci < FILT.co.length; ci++) {
+                if (ck.indexOf(',' + FILT.co[ci] + ',') >= 0) {
+                    anyCo = true; break;
+                }
+            }
+            if (!anyCo) { hide(); return; }
+        }
         if (FILT.opr) {
             var o = (p.opr || '').toLowerCase();
             if (o.indexOf(FILT.opr) < 0) { hide(); return; }
+        }
+        // ELEVATION AND DISTANCE, on the numeric properties. A lease with
+        // no stamp fails a filter that asks about it, the way a NULL fails
+        // the SQL comparison -- unknown must not be reported as a match.
+        if (FILT.elmin !== undefined || FILT.elmax !== undefined) {
+            var el = p._el;
+            if (el === undefined || el === null) { hide(); return; }
+            if (FILT.elmin !== undefined && el < FILT.elmin) { hide(); return; }
+            if (FILT.elmax !== undefined && el > FILT.elmax) { hide(); return; }
+        }
+        if (FILT.dcity !== undefined) {
+            var dc = p._dc;
+            if (dc === undefined || dc === null || dc > FILT.dcity) {
+                hide(); return;
+            }
+        }
+        if (FILT.dhwy !== undefined) {
+            var dh = p._dh;
+            if (dh === undefined || dh === null || dh > FILT.dhwy) {
+                hide(); return;
+            }
         }
         if (FILT.ac) {
             // _km2 IS THE NUMBER; km is the rounded string for the popup.
@@ -1544,6 +1623,8 @@ function(feature, layer) {
                 ['Effective', p.eff], ['Expires', p.exp],
                 ['Area', p.ac], ['Area (km2)', p.km],
                 ['Operator', p.opr], ['State', p.st],
+                ['Elevation', p.el],
+                ['Nearest town', p.ncity], ['Nearest highway', p.nhwy],
                 ['Source', p.src], ['Quality', p.qly]];
     var h = '<table style="font-size:11px;border-collapse:collapse">';
     for (var i = 0; i < rows.length; i++) {
@@ -1553,6 +1634,62 @@ function(feature, layer) {
     }
     layer.bindPopup(h + '</table>', {maxWidth: 420});
 }"""
+
+
+def lease_on_each(by, clip=None, filt=None):
+    """_LEASE_ON_EACH with EVERY placeholder filled. The only way to use it.
+
+    THE TEMPLATE HAS THREE HOLES AND HAD TWO CALLERS, and when __FILT__ was
+    added for the lease filters only one caller learned about it. The other
+    is the township click, which injects the same template to style the
+    leases it fetches on demand -- so it shipped a literal __FILT__ into the
+    browser and died with "ReferenceError: __FILT__ is not defined" the
+    moment somebody clicked a township. Reported from the map, not caught
+    here, because a Python-side syntax check cannot see an unfilled token in
+    a string.
+
+    That is the "lists that must agree" failure at its smallest: two call
+    sites, one template, a new hole. One function fills them all now, so a
+    fourth placeholder cannot be half-applied.
+    """
+    key = by if by in LEASE_COLOUR_BY else "producing"
+    out = (_LEASE_ON_EACH
+           .replace("__BY__", key)
+           .replace("__CLIP__",
+                    ("[%r, %r, %r, %r]" % (clip[0][0], clip[0][1],
+                                           clip[1][0], clip[1][1]))
+                    if clip else "null")
+           .replace("__FILT__", _filter_literal(filt)))
+    # CAUGHT HERE, NOT IN THE BROWSER. An unfilled __TOKEN__ is valid Python,
+    # valid JSON and valid-looking JavaScript right up until it runs, so
+    # nothing upstream of the user's screen notices. This is the one place
+    # that can see the finished text.
+    import re as _re          # not module-level in this file; see CLAUDE.md
+    _left = _re.findall(r"__[A-Z_]+__", out)
+    if _left:
+        raise ValueError(
+            "lease_on_each: placeholder(s) never filled: %s -- add them to "
+            "this function, which is the only filler." % ", ".join(sorted(set(_left))))
+    return out
+
+
+def _county_key(raw):
+    """A county string as a matchable token list: ",campbell,converse,".
+
+    ONE SPELLING OF THE RULE, used by the file, the browser filter and the
+    SQL count -- three places that must agree about whether a straddling
+    lease is "in Campbell County". It is, and equality says otherwise.
+
+    Both separators seen in the data are handled ("&" and ","), and the
+    wrapping commas make a containment test exact: ",campbell," cannot match
+    inside ",campbell county," or a county whose name merely starts the same.
+    """
+    if not raw:
+        return None
+    parts = [p.strip().lower()
+             for p in str(raw).replace("&", ",").split(",")]
+    parts = [p for p in parts if p]
+    return ("," + ",".join(parts) + ",") if parts else None
 
 
 def _filter_literal(filt):
@@ -1570,6 +1707,10 @@ def _filter_literal(filt):
     out = {}
     _src = [s for s in (filt.get("source") or []) if s]
     _lst = [s for s in (filt.get("status") or []) if s]
+    _st = [s for s in (filt.get("state") or []) if s]
+    # LOWER-CASED HERE so the browser compares like for like against the
+    # normalised _co key, rather than lower-casing 24,178 times.
+    _co = [str(s).strip().lower() for s in (filt.get("county") or []) if s]
     _opr = str(filt.get("operator") or "").strip().lower()
     try:
         _ac = float(filt.get("min_acres") or 0)
@@ -1579,10 +1720,31 @@ def _filter_literal(filt):
         out["src"] = _src
     if _lst:
         out["lst"] = _lst
+    if _st:
+        out["st"] = _st
+    if _co:
+        out["co"] = _co
     if _opr:
         out["opr"] = _opr
     if _ac > 0:
         out["ac"] = _ac
+    # MILES IN, KILOMETRES OUT. The panel asks in miles because that is what
+    # a land man says; the stamp is in km because that is what the projection
+    # measured. Converted once, here, so the browser never sees a unit.
+    _elmin = filt.get("elev_min")
+    _elmax = filt.get("elev_max")
+    if _elmin is not None:
+        out["elmin"] = float(_elmin)
+    if _elmax is not None:
+        out["elmax"] = float(_elmax)
+    for _k, _src in (("dcity", "miles_city"), ("dhwy", "miles_hwy")):
+        _v = filt.get(_src)
+        try:
+            _v = float(_v or 0)
+        except (TypeError, ValueError):
+            _v = 0.0
+        if _v > 0:
+            out[_k] = _v * 1.609344
     return _j.dumps(out) if out else "null"
 
 
@@ -1614,18 +1776,7 @@ def add_lease_layer_file(m, path, url, by="producing", show=True,
     _gj = _f.GeoJson(
         path, embed=False, pane="dvleases", show=show,
         name="▩ Leases",
-        on_each_feature=_f.JsCode(
-            _LEASE_ON_EACH.replace("__BY__", key).replace(
-                "__CLIP__",
-                ("[%r, %r, %r, %r]" % (clip[0][0], clip[0][1],
-                                       clip[1][0], clip[1][1]))
-                if clip else "null")
-            # NORMALISED ONCE, HERE, so the browser compares like for like:
-            # the operator is lower-cased on this side too (the JS lower-
-            # cases only the value it is testing), and an empty filter is
-            # `null` rather than an object of empty lists that would run
-            # four tests per feature for nothing.
-            .replace("__FILT__", _filter_literal(filt))),
+        on_each_feature=_f.JsCode(lease_on_each(key, clip=clip, filt=filt)),
     )
     # The link folium emits must be the BROWSER's, not ours.
     _gj.embed_link = url
@@ -1938,9 +2089,22 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                                 'margin-top:4px">' + extra + '</div>';
                             if (pop) { pop.setContent(html); }
                             else {
+                                // ── NOT OVER THE THING IT DESCRIBES ─────
+                                // At the centre it covered the leases it had
+                                // just counted: fitBounds zooms so the
+                                // township fills the view, so a popup at the
+                                // middle sits squarely on the answer.
+                                // Reported as "it says 22 leases but where
+                                // are the actual leases" -- they were
+                                // behind the box.
+                                //
+                                // Anchored at the NORTH edge instead, where
+                                // a Leaflet popup opens upward and clears
+                                // the township almost entirely.
                                 pop = L.popup({closeButton: true,
                                                autoPan: false})
-                                       .setLatLng(b.getCenter())
+                                       .setLatLng([b.getNorth(),
+                                                   b.getCenter().lng])
                                        .setContent(html).openOn(mp);
                             }
                         } catch (e) {}
@@ -2128,9 +2292,10 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
         # here would be one more list that must agree with another.
         .replace("__LEASE_URL__",
                  _json.dumps(lease_url) if lease_url else "null")
-        .replace("__LEASE_ONEACH__",
-                 _LEASE_ON_EACH.replace("__BY__", _lkey)
-                               .replace("__CLIP__", "null"))),
+        # THE SAME FILLER THE DRAWN LAYER USES. Spelling the replacements
+        # out here is what left __FILT__ unfilled and broke the township
+        # click in the browser.
+        .replace("__LEASE_ONEACH__", lease_on_each(_lkey))),
     ).add_to(m)
 
     # ── ZOOM IN FAR ENOUGH AND THE GRID GETS OUT OF THE WAY ─────────────
@@ -2210,3 +2375,71 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
     _zoom_hide._parent = m
     m.add_child(_zoom_hide)
     return len(feats), leased
+
+
+
+# ── WETLANDS: THE REGISTRY, NOT A COPY OF IT ───────────────────────────────
+# The USFWS National Wetlands Inventory is the registry a land man would
+# actually cite -- PEM, PSS, PFO classifications, not a basemap's "green
+# bit". Wyoming's download is 1,071 MB; the same data is served live, so for
+# LOOKING there is nothing to store and nothing to keep in sync.
+#
+# Querying is the other half and is deliberately not attempted here: "is this
+# lease on a wetland" needs the polygons locally, and that is the gigabyte.
+# Display first, because it answers the question that was actually asked.
+NWI_SERVICE = ("https://www.fws.gov/wetlandsmapservice/rest/services/"
+               "Wetlands/MapServer")
+# WMS LIVES UNDER /services/, NOT /rest/services/. That one path segment is
+# the whole reason the first attempt concluded there was no WMS.
+NWI_WMS = ("https://www.fws.gov/wetlandsmapservice/services/"
+           "Wetlands/MapServer/WMSServer")
+
+# THE SERVICE DRAWS NOTHING ABOVE THIS SCALE, by its own configuration
+# (minScale 100000 on layer 0). Zoomed out to the state, ticking the layer
+# would look broken -- so the layer says so rather than leaving the reader to
+# wonder. Web-mercator zoom 11 is roughly 1:144k, 12 roughly 1:72k, so 12 is
+# the first zoom that reliably paints.
+NWI_MIN_ZOOM = 12
+
+
+def add_wetlands_layer(m, show=False):
+    """USFWS NWI wetlands as a live WMS overlay. Returns the layer name.
+
+    IT IS A WMS AFTER ALL. The first version of this hand-wrote a Leaflet
+    tile layer that computed each tile's bbox and called the ArcGIS `export`
+    endpoint, because .../rest/services/Wetlands/MapServer/WMSServer 404s.
+    That was the wrong URL: ArcGIS serves WMS from /services/, not
+    /rest/services/, and the service advertises it plainly --
+    supportedExtensions: WMSServer. Asking the service what it supports
+    would have settled it before fifteen lines of tile arithmetic.
+
+    So this is folium's own WmsTileLayer now: a standard protocol, no custom
+    JavaScript, and it registers itself in the layer control instead of
+    hunting for one in window. Verified against the live service --
+    GetCapabilities returns WMS 1.3.0 with EPSG:3857 and image/png, and
+    GetMap returns real PNGs.
+
+    THE SERVICE DRAWS NOTHING ZOOMED OUT (minScale 100000 on its one layer),
+    so the name carries the zoom rather than leaving a blank overlay looking
+    broken.
+
+    DISPLAY ONLY. "Which leases sit on wetland" needs the polygons locally,
+    and Wyoming's NWI download is 1,071 MB -- a different decision, not a
+    bigger version of this one.
+    """
+    import folium as _f
+    _name = "🟩 Wetlands (NWI, zoom 12+)"
+    _f.raster_layers.WmsTileLayer(
+        url=NWI_WMS,
+        layers="0",
+        fmt="image/png",
+        transparent=True,
+        version="1.3.0",
+        name=_name,
+        overlay=True,
+        control=True,
+        show=show,
+        opacity=0.75,
+        attr="Wetlands: USFWS National Wetlands Inventory",
+    ).add_to(m)
+    return _name

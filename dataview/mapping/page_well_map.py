@@ -9370,7 +9370,7 @@ def _ensure_lease_geojson(engine, say=None):
     # been judged current forever and the new property would never appear --
     # the change would look applied and do nothing. Bump on any change to
     # what write_lease_geojson PUTS IN the file.
-    _FMT = 3
+    _FMT = 5
     _sdir = os.path.join(os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.abspath(__file__)))), "static")
     _path = os.path.join(_sdir, LEASE_GEOJSON_NAME)
@@ -13505,7 +13505,16 @@ def run(engine=None):
                 source=list(st.session_state.get("lv_src") or []),
                 status=list(st.session_state.get("lv_status") or []),
                 operator=str(st.session_state.get("lv_op") or ""),
-                min_acres=int(st.session_state.get("lv_acres") or 0))
+                min_acres=int(st.session_state.get("lv_acres") or 0),
+                state=list(st.session_state.get("lv_state") or []),
+                county=list(st.session_state.get("lv_county") or []),
+                miles_city=float(st.session_state.get("lv_micity") or 0),
+                miles_hwy=float(st.session_state.get("lv_mihwy") or 0))
+            # The slider reports a SPAN; only a real narrowing is a filter.
+            _wel = st.session_state.get("lv_elev")
+            if isinstance(_wel, (tuple, list)) and len(_wel) == 2:
+                _lv_choice = dict(_lv_choice,
+                                  elev_min=_wel[0], elev_max=_wel[1])
         _lv_mode = (_lv_choice.get("mode") or "")
         if (any(_k in active_db for _k, _lbl in _geo_defs)
                 or _lv_mode in ("leases", "townships", "both")):
@@ -13958,6 +13967,24 @@ def run(engine=None):
         # so nothing is hidden, and the names are short now because the
         # explanation belongs in the status line, not in a legend entry.
         folium.LayerControl(collapsed=True).add_to(m)
+
+        # ── WETLANDS, AFTER THE CONTROL EXISTS ──────────────────────────
+        # It registers itself through the control rather than as a folium
+        # layer, so it has to be added once the control is on the map --
+        # ordering is the whole reason this sits here and not with the other
+        # geography layers.
+        #
+        # ALWAYS ADDED, NEVER SHOWN BY DEFAULT: it is a live service, so an
+        # unticked layer costs one line of JavaScript and fetches nothing.
+        # No chip, no Python state -- the map's own layer control is where a
+        # reader looks for an overlay, and this is one.
+        try:
+            from dataview.mapping.geography_layers import add_wetlands_layer
+            add_wetlands_layer(m, show=False)
+        except Exception as _we:
+            # Not swallowed: a missing overlay should say so once, not leave
+            # the reader hunting for a switch that never appears.
+            _say("[map] wetlands overlay unavailable: %s" % str(_we)[:140])
 
         # Draw toolbar — circle + rectangle. Both are bulk cell-selectors
         # for grid mode: drawing one selects every cell whose bbox intersects
@@ -15314,8 +15341,13 @@ def run(engine=None):
         # The columns are still created HERE, immediately above the map, so
         # the strip's top is still the map's top -- the alignment does not
         # depend on the map being drawn either.
+        # 1:2.5 -- ~400px of a 1,920px viewport, up from the 344 that matched
+        # the nav sidebar. The panel is about to carry state and county on
+        # top of source, status, operator and acres, and a multiselect
+        # showing chips needs room before it starts wrapping one per line.
+        # The map keeps ~980px, still wider than it had before any of this.
         if st.session_state.get("wm_lease_strip") and engine is not None:
-            _sc, _mc = st.columns([1, 3], gap="small")
+            _sc, _mc = st.columns([1, 2.5], gap="small")
         else:
             _mc, _sc = st.container(), None
         if _sc is not None:
@@ -15334,9 +15366,22 @@ def run(engine=None):
                     else "leases" if "geo_leases" in active_db
                     else "townships" if "geo_townships" in active_db
                     else "off")
+                # ── THE PANEL ENDS WHERE THE MAP ENDS ───────────────────
+                # "so it is the same height as the map". Its own scroll
+                # rather than the page's: a panel that runs past the map
+                # drags the whole page down with it, and every control
+                # added from here makes that worse -- which is the shape of
+                # the push-down that cost a day, arriving from the other
+                # side.
+                #
+                # 500 is the map's height, given to st_folium a few lines
+                # below and hard-capped in the page CSS. Written here as the
+                # same number for the same reason; if the map grows, this
+                # follows it.
                 try:
-                    render_lease_view(engine, compact=True,
-                                      default_mode=_chip_mode)
+                    with st.container(height=500, border=False):
+                        render_lease_view(engine, compact=True,
+                                          default_mode=_chip_mode)
                 except Exception as _lse:
                     # NOT swallowed. A strip that silently draws nothing is
                     # indistinguishable from one switched off.
@@ -16904,6 +16949,18 @@ def render_lease_view(engine, compact=False, default_mode=None):
             _stats = [r[0] for r in _c.execute(_lt(
                 "SELECT DISTINCT lease_status FROM dataview.dv_land_right "
                 "WHERE lease_status IS NOT NULL ORDER BY lease_status"))]
+            # WHAT IS ACTUALLY LOADED, not every US state: offering all 52
+            # would be 51 choices that match nothing.
+            _elev_range = _c.execute(_lt(
+                "SELECT MIN(elevation_ft), MAX(elevation_ft) "
+                "FROM dataview.dv_land_tract_geom "
+                "WHERE elevation_ft IS NOT NULL")).first()
+            if not _elev_range or _elev_range[0] is None:
+                _elev_range = (0, 0)
+            _tract_states = [r[0] for r in _c.execute(_lt(
+                "SELECT DISTINCT province_state "
+                "FROM dataview.dv_land_tract_geom "
+                "WHERE province_state IS NOT NULL ORDER BY province_state"))]
     except Exception as _e:
         st.error("Cannot read the lease vocabulary: %s" % _e)
         return
@@ -16941,6 +16998,42 @@ def render_lease_view(engine, compact=False, default_mode=None):
         index=(list(LEASE_COLOUR_BY).index(_cur["colour_by"])
                if _cur["colour_by"] in LEASE_COLOUR_BY else 0),
         key="lv_by")
+    # ── STATE AND COUNTY, FROM COLUMNS THAT ARE ALREADY STAMPED ─────────
+    # dv_land_tract_geom carries province_state on all 24,178 tracts and
+    # county on 24,177, so this is a column test, not a spatial join -- the
+    # same reason the township layer went from 75.6s to 0.4s.
+    #
+    # THE COUNTY LIST COMES FROM us_geo, NOT FROM DISTINCT. Seven tracts
+    # straddle two counties and record both in one field, so DISTINCT
+    # offers "Campbell & Converse" as though it were a county. us_geo reads
+    # assets/geo/us_counties.geojson -- 52 states, 3,214 counties, already
+    # relied on by the boundaries layer, the region picker and four tools --
+    # so this asks the same source the rest of the app asks.
+    _states = sorted({s for s in _tract_states if s})
+    _counties = []
+    try:
+        from dataview.mapping import us_geo as _ug
+        # THE PREVIOUS SELECTION, read from session_state -- the State
+        # widget is drawn below, so its return value does not exist yet.
+        # Narrowing the county list follows one rerun behind, which is what
+        # every other option on this page costs.
+        _pick = [s for s in (st.session_state.get("lv_state") or [])
+                 if s in _states] or _states
+        for _s in _pick:
+            _counties.extend(_ug.counties(_s) or [])
+        _counties = sorted(set(_counties))
+    except Exception as _ge:
+        st.caption("County list unavailable (%s)" % str(_ge)[:80])
+    _stsel = st.multiselect("State", _states,
+                            default=[s for s in _cur.get("state") or []
+                                     if s in _states],
+                            key="lv_state")
+    _cosel = st.multiselect("County", _counties,
+                            default=[s for s in _cur.get("county") or []
+                                     if s in _counties],
+                            key="lv_county",
+                            help="A lease that straddles two counties is "
+                                 "listed under both.")
     _src = st.multiselect("Source", _srcs,
                           default=[s for s in _cur["source"] if s in _srcs],
                           key="lv_src")
@@ -16952,6 +17045,44 @@ def render_lease_view(engine, compact=False, default_mode=None):
                         key="lv_op", placeholder="e.g. Kirkwood")
     _ac = st.number_input("Minimum acres", min_value=0, step=40,
                           value=int(_cur["min_acres"] or 0), key="lv_acres")
+
+    # ── ELEVATION AND ACCESS, from columns stamped once ─────────────────
+    # elevation_ft, dist_city_km and dist_hwy_km are on every tract already
+    # (tools/stamp_elevation.py and tools/stamp_cultural_distance.py), so
+    # these are numeric column tests -- no spatial work at render time.
+    #
+    # ASKED IN FEET AND MILES because that is what a land man says; stored
+    # in feet and kilometres because that is what the sources measured. The
+    # conversion happens in one place, _filter_literal, so no reader of this
+    # panel ever has to know there was one.
+    _el_lo, _el_hi = (_elev_range or (0, 0))
+    _elmin = _elmax = None
+    if _el_hi > _el_lo:
+        _e1, _e2 = st.slider(
+            "Elevation (ft)", int(_el_lo), int(_el_hi),
+            (int(_cur.get("elev_min") or _el_lo),
+             int(_cur.get("elev_max") or _el_hi)),
+            step=100, key="lv_elev",
+            help="Wyoming runs about 3,360 to 10,550 ft, so this separates "
+                 "basin from mountain. Nothing here is below 100 ft.")
+        # ONLY A REAL NARROWING COUNTS. Left at the full span it is not a
+        # filter, and sending it as one would hide every tract whose
+        # elevation was never stamped.
+        if _e1 > _el_lo:
+            _elmin = _e1
+        if _e2 < _el_hi:
+            _elmax = _e2
+    _mi_city = st.number_input("Within miles of a town", min_value=0.0,
+                               step=1.0, format="%.0f",
+                               value=float(_cur.get("miles_city") or 0),
+                               key="lv_micity",
+                               help="0 means no limit.")
+    _mi_hwy = st.number_input("Within miles of a highway", min_value=0.0,
+                              step=1.0, format="%.0f",
+                              value=float(_cur.get("miles_hwy") or 0),
+                              key="lv_mihwy",
+                              help="Interstates and US highways (TIGER "
+                                   "S1100). 0 means no limit.")
 
     # ── THE COUNT, BEFORE ANYTHING IS SENT ──────────────────────────────
     # "Wrong is worse than missing": a filter that silently matches nothing
@@ -16966,6 +17097,39 @@ def render_lease_view(engine, compact=False, default_mode=None):
         _where.append("r.lease_status IN (%s)"
                       % ",".join(":t%d" % i for i in range(len(_st_))))
         _params.update({"t%d" % i: v for i, v in enumerate(_st_)})
+    if _stsel:
+        _where.append("g.province_state IN (%s)"
+                      % ",".join(":ps%d" % i for i in range(len(_stsel))))
+        _params.update({"ps%d" % i: v for i, v in enumerate(_stsel)})
+    if _cosel:
+        # THE SAME CONTAINMENT RULE THE BROWSER USES, spelled in T-SQL. A
+        # straddling lease is stamped "Campbell & Converse"; county = 'Campbell'
+        # would miss it, and then this count and the map would disagree --
+        # which is the failure the 640-acre boundary already taught once.
+        # Normalise both separators, wrap in commas, test containment.
+        _co_clauses = []
+        for _i, _v in enumerate(_cosel):
+            _co_clauses.append(
+                "',' + LOWER(REPLACE(REPLACE(REPLACE("
+                "g.county, ' & ', ','), '&', ','), ', ', ',')) + ',' "
+                "LIKE :co%d" % _i)
+            _params["co%d" % _i] = "%," + str(_v).strip().lower() + ",%"
+        _where.append("(" + " OR ".join(_co_clauses) + ")")
+    if _elmin is not None:
+        _where.append("g.elevation_ft >= :elmin")
+        _params["elmin"] = float(_elmin)
+    if _elmax is not None:
+        _where.append("g.elevation_ft <= :elmax")
+        _params["elmax"] = float(_elmax)
+    # MILES -> KM HERE TOO, with the same constant the browser uses. Two
+    # conversions that disagree would put the count and the map back into
+    # the argument the 640-acre section already settled once.
+    if _mi_city:
+        _where.append("g.dist_city_km <= :dcity")
+        _params["dcity"] = float(_mi_city) * 1.609344
+    if _mi_hwy:
+        _where.append("g.dist_hwy_km <= :dhwy")
+        _params["dhwy"] = float(_mi_hwy) * 1.609344
     if _op:
         _where.append("r.operator_name LIKE :op")
         _params["op"] = "%" + _op + "%"
@@ -17008,7 +17172,11 @@ def render_lease_view(engine, compact=False, default_mode=None):
         st.warning("No leases match. The map would draw nothing.")
 
     _panel = {"mode": _mode, "colour_by": _by, "source": sorted(_src),
-              "status": sorted(_st_), "operator": _op, "min_acres": int(_ac)}
+              "status": sorted(_st_), "operator": _op, "min_acres": int(_ac),
+              "state": sorted(_stsel), "county": sorted(_cosel),
+              "elev_min": _elmin, "elev_max": _elmax,
+              "miles_city": float(_mi_city or 0),
+              "miles_hwy": float(_mi_hwy or 0)}
 
     # IN THE STRIP THIS BUTTON IS NOT REQUIRED, and says so. The mode and
     # colour are read straight from these widgets by the map build, so a
