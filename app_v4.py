@@ -704,13 +704,12 @@ with st.sidebar:
             _os.path.abspath(_dv_pkg.__file__)))
         _here = _os.path.dirname(_os.path.abspath(__file__))
         _same = _os.path.normcase(_code_root) == _os.path.normcase(_here)
-        st.markdown(
-            f"<div style=\"font-size:9px;font-family:'IBM Plex Mono',monospace;"
-            f"letter-spacing:.5px;margin-top:4px;"
-            f"color:{'#7fd18b' if _same else '#ff6b6b'}\">"
-            + ("● repo" if _same else "▲ NOT this folder")
-            + f"<br><span style=\"opacity:.7\">{_code_root}</span></div>",
-            unsafe_allow_html=True)
+        # SILENT WHEN CORRECT. This printed "● repo" and the full path on
+        # every single run -- a line long enough to spill past the sidebar's
+        # edge, spent saying the ordinary thing. The deployed second copy it
+        # watched for was removed 18 Aug 2026, so the green half had nothing
+        # left to tell anyone. The alarm is kept: it costs nothing, and if
+        # `dataview` ever resolves somewhere else it still says so, loudly.
         if not _same:
             st.warning(
                 f"`dataview` is being imported from **{_code_root}**, not from "
@@ -720,55 +719,8 @@ with st.sidebar:
     except Exception as _e_src:                  # never let a banner break boot
         st.caption(f"(code source unknown: {str(_e_src)[:60]})")
 
-    # Theme selector
-    st.markdown("<div class='sec-hdr'>Appearance</div>", unsafe_allow_html=True)
-    theme_choice = st.selectbox(
-        "Color theme",
-        options=list(THEMES.keys()),
-        index=list(THEMES.keys()).index(S.get("theme", "Midnight Gold")),
-        key="sb_theme",
-        label_visibility="collapsed")
-    if theme_choice != S.get("theme"):
-        S.theme = theme_choice
-        st.rerun()
-    _inject_theme(THEMES[S.get("theme", "Midnight Gold")])
-    st.caption(THEMES[S.get("theme", "Midnight Gold")]["desc"])
-
-    # Connection status
-    if S.connected:
-        st.markdown(
-            f"<div class='conn-pill connected'>● {S.db_label}</div>",
-            unsafe_allow_html=True)
-    else:
-        st.markdown(
-            "<div class='conn-pill disconnected'>○ Not connected</div>",
-            unsafe_allow_html=True)
-
-    # ── Global reset (cold start) ─────────────────────────────────────
-    if st.button("🔄  Reset", key="global_reset",
-                 use_container_width=True,
-                 help="Cold start: disposes the connection, clears all cached "
-                      "data and every bit of session state, and returns to a "
-                      "fresh, not-connected app — like restarting Streamlit."):
-        # tear down the DB connection cleanly if one exists
-        try:
-            if S.get("engine") is not None:
-                S.engine.dispose()
-        except Exception:
-            pass
-        # drop every Streamlit cache
-        for _cache in (getattr(st, "cache_data", None),
-                       getattr(st, "cache_resource", None)):
-            try:
-                if _cache is not None:
-                    _cache.clear()
-            except Exception:
-                pass
-        # wipe ALL session state — DEFAULTS re-seed on the next run,
-        # landing on the splash page, not connected, Midnight Gold theme.
-        for _k in list(S.keys()):
-            del S[_k]
-        st.rerun()
+    # (The theme CSS is injected above, before the sidebar opens. A second
+    # call used to sit here and emit the same <style> block twice.)
 
     # ── Connect panel ─────────────────────────────────────────────────
     with st.expander("🔌 Connect", expanded=not S.connected):
@@ -984,6 +936,48 @@ with st.sidebar:
             except Exception as e:
                 st.error(str(e))
 
+    # ── RESET, THEN THE THEME PICKER ── BOTH BELOW CONNECT ───────
+    # Connect is the first thing anyone touches, so it is the first thing in
+    # the sidebar. Reset sits under it -- it is a cold start, wanted rarely
+    # and never before you have tried connecting.
+    if st.button("🔄  Reset", key="global_reset",
+                 use_container_width=True,
+                 help="Cold start: disposes the connection, clears all cached "
+                      "data and every bit of session state, and returns to a "
+                      "fresh, not-connected app — like restarting Streamlit."):
+        try:
+            if S.get("engine") is not None:
+                S.engine.dispose()
+        except Exception:
+            pass
+        for _cache in (getattr(st, "cache_data", None),
+                       getattr(st, "cache_resource", None)):
+            try:
+                if _cache is not None:
+                    _cache.clear()
+            except Exception:
+                pass
+        # Wipe ALL session state -- DEFAULTS re-seed on the next run, landing
+        # on the splash page, not connected, Midnight Gold theme.
+        for _k in list(S.keys()):
+            del S[_k]
+        st.rerun()
+
+    # THE PICKER, WITH NOTHING AROUND IT. It used to carry a section header
+    # with a rule under it and a three-line description under that, and
+    # between them they pushed Connect and Reset down the page to say what
+    # the name in the dropdown already says. The CSS still goes in up top,
+    # before Connect draws, so nothing renders unthemed.
+    theme_choice = st.selectbox(
+        "Color theme",
+        options=list(THEMES.keys()),
+        index=list(THEMES.keys()).index(S.get("theme", "Midnight Gold")),
+        key="sb_theme",
+        label_visibility="collapsed")
+    if theme_choice != S.get("theme"):
+        S.theme = theme_choice
+        st.rerun()
+
     # ── Navigation (only when connected) ─────────────────────────────
     if S.connected:
         # ── ONCE LOGGED IN, THE SIDEBAR IS NOT NEEDED ────────────────
@@ -1041,6 +1035,12 @@ with st.sidebar:
 
         st.markdown("<div class='sec-hdr'>Session</div>",
                     unsafe_allow_html=True)
+        # WHICH DATABASE, kept from the status pill that used to sit above
+        # Connect. The pill went, but this half of it earns its place: it is
+        # the only thing on screen that says WHICH database is connected, and
+        # the day DataView was silently selected instead of DataView_Demo
+        # this line was the fastest way to see it.
+        st.caption("● %s" % (S.db_label or "connected"))
         if st.button("⏏ Disconnect", key="nav_disconnect",
                      use_container_width=True):
             for k, v in DEFAULTS.items():
