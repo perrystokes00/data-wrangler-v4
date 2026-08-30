@@ -89,7 +89,7 @@ def main(argv=None):
 
     if a.clear:
         with eng.connect() as cx:
-            n = cx.execute(t("SELECT COUNT(*) FROM dataview.dv_land_tract "
+            n = cx.execute(t("SELECT COUNT(*) FROM dataview.dv_land_right "
                              "WHERE row_changed_by = :s"), {"s": STAMP}).scalar()
         print("%s row(s) carry the %s stamp." % (format(n, ","), STAMP))
         if not n:
@@ -99,7 +99,7 @@ def main(argv=None):
             print("DRY RUN -- re-run with --clear --apply to undo.")
             return 0
         with eng.begin() as cx:
-            cx.execute(t("UPDATE dataview.dv_land_tract "
+            cx.execute(t("UPDATE dataview.dv_land_right "
                          "SET operator_name = NULL, row_changed_by = NULL, "
                          "    row_changed_date = NULL "
                          "WHERE row_changed_by = :s"), {"s": STAMP})
@@ -109,7 +109,7 @@ def main(argv=None):
     with eng.connect() as cx:
         rows = cx.execute(t("""
             SELECT lease_number, operator_name, row_changed_by
-              FROM dataview.dv_land_tract
+              FROM dataview.dv_land_right
              WHERE source = 'BLM_MLRS' AND lease_number IS NOT NULL""")).fetchall()
 
     # NEVER OVERWRITE SOMETHING REAL. A row that already carries an operator
@@ -156,7 +156,7 @@ def main(argv=None):
                     params["l%d" % j] = ln
                     names.append(":l%d" % j)
                 cx.execute(t(
-                    "UPDATE dataview.dv_land_tract "
+                    "UPDATE dataview.dv_land_right "
                     "   SET operator_name = :op, row_changed_by = :s, "
                     "       row_changed_date = SYSUTCDATETIME() "
                     " WHERE lease_number IN (%s)" % ",".join(names)), params)

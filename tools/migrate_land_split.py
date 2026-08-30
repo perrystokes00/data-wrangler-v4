@@ -220,6 +220,21 @@ SELECT  r.land_right_id  AS land_tract_id,
 """
 
 
+VIEW_SQL = """
+CREATE VIEW dataview.dv_land_tract AS
+SELECT  r.land_right_id  AS land_tract_id,
+        r.tract_name, r.lease_number, r.operator_name,
+        t.province_state, t.country, t.area_km2, t.geog,
+        r.active_ind, r.source, r.row_created_by, r.row_created_date,
+        r.row_changed_by, r.row_changed_date, r.INVENTORY_ID,
+        r.effective_date, r.expiry_date, r.lease_status, r.producing_ind,
+        t.quality_note
+  FROM  dataview.dv_land_right r
+  JOIN  dataview.dv_land_right_tract x ON x.land_right_id = r.land_right_id
+  JOIN  dataview.dv_land_tract_geom  t ON t.tract_id      = x.tract_id
+"""
+
+
 def objects_present(cx, t):
     from sqlalchemy import text as _t
     return cx.execute(_t("SELECT OBJECT_ID(:n)"), {"n": t}).scalar() is not None
@@ -233,6 +248,14 @@ def main(argv=None):
     ap.add_argument("--verify", action="store_true",
                     help="compare the new shape against dv_land_tract and "
                          "say whether they agree. Reads only.")
+    ap.add_argument("--phase2", action="store_true",
+                    help="the swap: rename dv_land_tract out of the way and "
+                         "put a READ view in its place. Writers must already "
+                         "target the new tables -- a view over a three-table "
+                         "join cannot be inserted into.")
+    ap.add_argument("--rollback2", action="store_true",
+                    help="undo the swap: drop the view, rename the table back. "
+                         "The three new tables are left alone.")
     ap.add_argument("--rollback", action="store_true",
                     help="drop the three new tables. dv_land_tract is not "
                          "touched by this tool at all, so nothing is at risk.")
@@ -243,6 +266,61 @@ def main(argv=None):
     from dataview.core.dw_utils import make_engine
     from sqlalchemy import text as _t
     eng = make_engine(a.database)
+
+    if a.rollback2:
+        with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as cx:
+            is_view = cx.execute(_t(
+                "SELECT COUNT(*) FROM sys.views WHERE object_id="
+                "OBJECT_ID('dataview.dv_land_tract')")).scalar()
+            legacy = objects_present(cx, "dataview.dv_land_tract_legacy")
+            print("   dv_land_tract is a %s" % ("VIEW" if is_view else "table"))
+            print("   dv_land_tract_legacy %s" % ("exists" if legacy else "absent"))
+            if not (is_view and legacy):
+                print("\nNothing to undo.")
+                return 0
+            if a.apply:
+                cx.execute(_t("DROP VIEW dataview.dv_land_tract"))
+                cx.execute(_t("EXEC sp_rename 'dataview.dv_land_tract_legacy', "
+                              "'dv_land_tract'"))
+                print("   view dropped, table renamed back")
+            else:
+                print("\nDRY RUN -- add --apply.")
+        return 0
+
+    if a.phase2:
+        with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as cx:
+            for t in NEW:
+                if not objects_present(cx, t):
+                    print("%s missing -- run --apply first." % t)
+                    return 1
+            is_view = cx.execute(_t(
+                "SELECT COUNT(*) FROM sys.views WHERE object_id="
+                "OBJECT_ID('dataview.dv_land_tract')")).scalar()
+            if is_view:
+                print("dv_land_tract is already a view. Nothing to do.")
+                return 0
+            n_old = cx.execute(_t(
+                "SELECT COUNT(*) FROM dataview.dv_land_tract")).scalar()
+            print("   dv_land_tract  %s row(s)  -> dv_land_tract_legacy"
+                  % format(n_old, ","))
+            print("   then a READ view of the same name over the split")
+            if not a.apply:
+                print("\nDRY RUN -- add --apply. Undo with --rollback2 --apply.")
+                return 0
+            cx.execute(_t("EXEC sp_rename 'dataview.dv_land_tract', "
+                          "'dv_land_tract_legacy'"))
+            cx.execute(_t(VIEW_SQL))
+            n_new = cx.execute(_t(
+                "SELECT COUNT(*) FROM dataview.dv_land_tract")).scalar()
+            print("   renamed, view created: %s row(s) through it"
+                  % format(n_new, ","))
+            if n_new != n_old:
+                print("   *** the view does not return the same count. "
+                      "Undo with --rollback2 --apply. ***")
+                return 1
+        print("\nThe readers are unchanged. The WRITERS must now target the "
+              "new tables directly -- see the note in this file.")
+        return 0
 
     if a.rollback:
         with eng.connect().execution_options(isolation_level="AUTOCOMMIT") as cx:

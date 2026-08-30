@@ -46,24 +46,34 @@ REQUIRED = ("effective_date", "expiry_date", "lease_status",
             "producing_ind", "quality_note")
 
 INSERT = """
-INSERT INTO dataview.dv_land_tract
-    (land_tract_id, tract_name, lease_number, operator_name,
-     province_state, country, area_km2, geog, active_ind, source,
-     effective_date, expiry_date, lease_status, producing_ind, quality_note,
-     row_created_by, row_created_date)
--- REORIENT FIRST, THEN MEASURE. Measuring the raw ring while storing the
--- reoriented one records the size of the COMPLEMENT -- half a billion km2
--- for a tract a few km across. Same guard, and the same ordering, as
--- gen_synthetic_leases and the map's draw-a-boundary writer.
-SELECT :id, :nm, :ln, :opr, :st, 'USA',
-       g2.STArea()/1000000.0, g2, :act, :src,
-       :eff, :exp, :status, :prod, :qlty,
-       :src, GETUTCDATE()
-  FROM (SELECT CASE WHEN g.STArea()/1000000.0 > 100000
-                    THEN g.ReorientObject() ELSE g END AS g2
-          FROM (SELECT geography::STGeomFromText(:wkt, 4326).MakeValid() AS g) q1) q
- WHERE NOT EXISTS (SELECT 1 FROM dataview.dv_land_tract t
-                    WHERE t.lease_number = :ln AND t.source = :src)
+-- THE GROUND, THEN THE INSTRUMENT, THEN THE TIE. dv_land_tract is a VIEW
+-- over these three from phase 2 onward, and a view over a join cannot be
+-- inserted into -- so the loader writes the three tables itself. The guards
+-- are unchanged: reorient before measuring, and insert-only on
+-- (lease_number, source).
+DECLARE @g geography = geography::STGeomFromText(:wkt, 4326).MakeValid();
+IF @g.STArea()/1000000.0 > 100000 SET @g = @g.ReorientObject();
+
+IF NOT EXISTS (SELECT 1 FROM dataview.dv_land_right r
+                WHERE r.lease_number = :ln AND r.source = :src)
+BEGIN
+    INSERT INTO dataview.dv_land_tract_geom
+        (tract_id, geog, area_km2, province_state, country, source,
+         quality_note, row_created_by, row_created_date)
+    VALUES (:id, @g, @g.STArea()/1000000.0, :st, 'USA', :src, :qlty,
+            :src, GETUTCDATE());
+
+    INSERT INTO dataview.dv_land_right
+        (land_right_id, lease_number, source, tract_name, operator_name,
+         effective_date, expiry_date, lease_status, producing_ind,
+         active_ind, row_created_by, row_created_date)
+    VALUES (:id, :ln, :src, :nm, :opr, :eff, :exp, :status, :prod, :act,
+            :src, GETUTCDATE());
+
+    INSERT INTO dataview.dv_land_right_tract
+        (land_right_id, tract_id, row_created_by, row_created_date)
+    VALUES (:id, :id, :src, GETUTCDATE());
+END
 """
 
 
@@ -140,11 +150,21 @@ def main():
 
     if a.remove:
         with eng.begin() as cx:
-            n = cx.execute(_t("SELECT COUNT(*) FROM dataview.dv_land_tract "
+            n = cx.execute(_t("SELECT COUNT(*) FROM dataview.dv_land_right "
                               "WHERE source=:s"), {"s": src}).scalar()
             if a.apply:
-                cx.execute(_t("DELETE FROM dataview.dv_land_tract WHERE source=:s"),
-                           {"s": src})
+                # CHILDREN FIRST -- the tie has FKs to both.
+                cx.execute(_t(
+                    "DELETE x FROM dataview.dv_land_right_tract x "
+                    "JOIN dataview.dv_land_right r ON "
+                    "r.land_right_id = x.land_right_id "
+                    "WHERE r.source = :s"), {"s": src})
+                cx.execute(_t(
+                    "DELETE FROM dataview.dv_land_tract_geom "
+                    "WHERE source = :s"), {"s": src})
+                cx.execute(_t(
+                    "DELETE FROM dataview.dv_land_right "
+                    "WHERE source = :s"), {"s": src})
             print("%s %d %s tract(s). SYNTH_LEASE is untouched."
                   % ("removed" if a.apply else "would remove", n, src))
         return 0
@@ -213,7 +233,18 @@ def main():
         print("\nDRY RUN -- re-run with --apply to write.")
         return 0
 
-    n = 0
+    # COUNT THE TABLE, NOT THE ROWCOUNTS. The insert is now a BATCH -- ground,
+    # instrument, tie inside one IF NOT EXISTS -- and pyodbc's rowcount over a
+    # multi-statement batch is not the number of leases added: a re-load of
+    # 288 already-present leases reported "inserted 6,336", which is 288 x 22
+    # and means nothing. Nothing was actually written (verified: no duplicate
+    # (source, lease_number), all three tables still 24,178), so this was a
+    # LYING NUMBER rather than a bad write -- which is worse, because it is
+    # the number a person would act on.
+    before = 0
+    with eng.connect() as cx0:
+        before = cx0.execute(_t("SELECT COUNT(*) FROM dataview.dv_land_right "
+                                "WHERE source = :s"), {"s": src}).scalar() or 0
     with eng.begin() as cx:
         for p, w in keep:
             r = cx.execute(_t(INSERT), {
@@ -241,7 +272,10 @@ def main():
                 "prod": (p.get("PRDCNG") or "").strip() or None,
                 "qlty": (p.get("QLTY") or "").strip()[:400] or None,
                 "wkt": w})
-            n += r.rowcount or 0
+    with eng.connect() as cx0:
+        n = (cx0.execute(_t("SELECT COUNT(*) FROM dataview.dv_land_right "
+                            "WHERE source = :s"), {"s": src}).scalar()
+             or 0) - before
     print("\ninserted %s (the rest were already here -- insert-only on "
           "lease_number)" % format(n, ","))
     with eng.connect() as cx:
