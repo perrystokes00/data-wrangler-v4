@@ -103,6 +103,16 @@ def main(argv=None):
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--database", default="DataView_Demo")
+    ap.add_argument("--source-code", default="OPERATOR",
+                    help="the dv_r_source code to stamp. Defaults to "
+                         "OPERATOR, which is registered -- WY_OSLI is not, "
+                         "and registering it is a vocabulary decision this "
+                         "tool will not make for you. The true origin is "
+                         "recorded in remark either way.")
+    ap.add_argument("--include-synthetic", action="store_true",
+                    help="also create entities for the invented federal "
+                         "owners. Off by default: the real lessees are the "
+                         "ones worth resolving first.")
     ap.add_argument("--no-detail", action="store_true",
                     help="skip the address lookup; create name-only entities")
     ap.add_argument("--clear", action="store_true",
@@ -140,6 +150,8 @@ def main(argv=None):
               FROM dataview.dv_land_right
              WHERE operator_name IS NOT NULL
              GROUP BY operator_name"""))]
+    if not a.include_synthetic:
+        names = [(n, s) for n, s in names if not s]
     synth = sum(1 for _n, s in names if s)
     print("operators in dv_land_right : %s" % format(len(names), ","))
     print("   real                    : %s" % format(len(names) - synth, ","))
@@ -159,7 +171,7 @@ def main(argv=None):
     # row to a dv_r_* table is a decision about the vocabulary, and the
     # Reference Tables app owns that decision. Automation may skip ceremony,
     # never a decision.
-    wanted = sorted({("SYNTH_OWNER" if s else "WY_OSLI") for _n, s in names})
+    wanted = [a.source_code]
     with eng.connect() as cx:
         known = {r[0] for r in cx.execute(t(
             "SELECT source FROM dataview.dv_r_source"))}
@@ -202,10 +214,16 @@ def main(argv=None):
                  "st": (_t(d.get("CompanyStateCode")) or "")[:100] or None,
                  "zp": (_t(d.get("CompanyZipCode")) or "")[:20] or None,
                  "ph": (_t(d.get("CompanyPhoneNumber")) or "")[:40] or None,
-                 "src": "SYNTH_OWNER" if is_synth else "WY_OSLI",
+                 "src": a.source_code,
+                 # THE TRUE ORIGIN, in a column with no reference guard on
+                 # it. source has to be a registered code; remark does not,
+                 # so the provenance is recorded rather than lost to the
+                 # vocabulary the FK happens to allow.
                  "rem": ("Synthetic operator -- see "
                          "assign_synthetic_lease_owners.py"
-                         if is_synth else None),
+                         if is_synth else
+                         "Lessee from Wyoming OSLI LARCS "
+                         "(ActiveMineralLeaseLARCS); address as published"),
                  "stamp": STAMP})
             made += 1
         # resolve the leases to their entity, by the same deterministic id
