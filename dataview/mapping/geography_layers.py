@@ -2005,6 +2005,51 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                     // any control change rebuilds the map. Said here because
                     // the next reader will otherwise look for the undo that
                     // the comment above used to promise.
+                    // ── THE WAY BACK ────────────────────────────────
+                    // The body of the zoom-10 reset that was removed on
+                    // request. Removing the ZOOM as a trigger did not mean
+                    // removing the capability -- but it left the map with no
+                    // undo at all, and the popup still telling people to zoom
+                    // out. Offered as a link instead: same work, a trigger
+                    // that is visible at the moment it is wanted.
+                    //
+                    // Restores ONLY what was hidden here: if __dv_twp_grp is
+                    // null the grid was never stood down, and a grid switched
+                    // off in the layer control is not switched back on behind
+                    // the reader's back.
+                    function backOut() {
+                        window.DV_TWP_FOCUS = null;
+                        if (mp.__dv_twp_leases) {
+                            try { mp.removeLayer(mp.__dv_twp_leases); }
+                            catch (e) {}
+                            mp.__dv_twp_leases = null;
+                        }
+                        if (mp.__dv_twp_grp) {
+                            try { mp.addLayer(mp.__dv_twp_grp); }
+                            catch (e) {}
+                            mp.__dv_twp_grp = null;
+                        }
+                        if (mp.__dv_twp_frame) {
+                            try { mp.removeLayer(mp.__dv_twp_frame); }
+                            catch (e) {}
+                            mp.__dv_twp_frame = null;
+                        }
+                        // Un-fade every lease the highlight dimmed.
+                        mp.eachLayer(function (grp) {
+                            if (!grp || !grp.eachLayer) { return; }
+                            try {
+                                grp.eachLayer(function (c) {
+                                    var q = c.feature && c.feature.properties;
+                                    if (!q || q.ln === undefined) { return; }
+                                    c.setStyle({opacity: 0.9,
+                                                fillOpacity: 0.38,
+                                                weight: 1.0});
+                                });
+                            } catch (e) { /* not a lease group */ }
+                        });
+                        try { mp.closePopup(); } catch (e) {}
+                    }
+
                     function standDownGrid() {
                         var grp = null;
                         mp.eachLayer(function (g) {
@@ -2089,7 +2134,11 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                                 p.n + ' lease(s) &middot; ' +
                                 p.ac.toLocaleString() + ' ac leased</div>' +
                                 '<div style="font:11px system-ui;color:#64748b;' +
-                                'margin-top:4px">' + extra + '</div>';
+                                'margin-top:4px">' + extra + '</div>' +
+                                '<div style="margin-top:6px"><a href="#" ' +
+                                'id="dvtwpback" style="font:600 11px ' +
+                                'system-ui;color:#f59e0b;text-decoration:none"' +
+                                '>&#8617; show all townships</a></div>';
                             if (pop) { pop.setContent(html); }
                             else {
                                 // ── NOT OVER THE THING IT DESCRIBES ─────
@@ -2110,9 +2159,22 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                                                    b.getCenter().lng])
                                        .setContent(html).openOn(mp);
                             }
+                            // BOUND AFTER EVERY setContent, because Leaflet
+                            // replaces the popup's DOM each time -- a handler
+                            // attached once would survive exactly until the
+                            // first update, which is the async lease load.
+                            try {
+                                var lnk = document.getElementById('dvtwpback');
+                                if (lnk) {
+                                    lnk.addEventListener('click', function (ev) {
+                                        ev.preventDefault();
+                                        backOut();
+                                    });
+                                }
+                            } catch (e) {}
                         } catch (e) {}
                     }
-                    say(inside + ' drawn here &middot; zoom out to reset');
+                    say(inside + ' drawn here');
 
                     // ── NOTHING TO EXPAND? FETCH THE LEASES ──────────────
                     // The grid can be drawn with the lease layer off -- the
@@ -2196,8 +2258,7 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                             // and a blank map is how "it broke" looks.
                             standDownGrid();
                             say(picked.length + ' lease(s) drawn' +
-                                (byStamp ? '' : ' (approx)') +
-                                ' &middot; zoom out to reset');
+                                (byStamp ? '' : ' (approx)'));
                         }).catch(function (e) {
                             // SAID, NOT SWALLOWED: a silent failure here is
                             // indistinguishable from a township that simply
