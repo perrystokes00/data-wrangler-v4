@@ -1997,11 +1997,14 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                     // rectangle, non-interactive, so it cannot swallow a
                     // lease click the way the polygon it replaces did.
                     //
-                    // NO CONFLICT WITH THE ZOOM RULE. dv_twp_zoom_hide only
-                    // ever re-adds what IT hid (its autoHidden flag), so a
-                    // grid hidden here is not switched back on by zooming
-                    // out past 13 -- it comes back with the reset below,
-                    // which is the gesture that undoes the whole expansion.
+                    // ONE-WAY, NOW THAT THE ZOOM RULES ARE GONE. This used
+                    // to coexist with a zoom-13 auto-hide and a zoom-10
+                    // reset that put the grid back; both were removed on
+                    // request. So a grid stood down here stays down for the
+                    // life of this render, and the way back is a rerun --
+                    // any control change rebuilds the map. Said here because
+                    // the next reader will otherwise look for the undo that
+                    // the comment above used to promise.
                     function standDownGrid() {
                         var grp = null;
                         mp.eachLayer(function (g) {
@@ -2215,58 +2218,14 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                     // setTimeout lets the click finish first; onDraw then
                     // sees an ordinary programmatic draw, exactly like the
                     // ⛶ control's, which has always worked.
-                    // ZOOMING OUT PUTS EVERYTHING BACK. A focus you cannot
-                    // leave is a trap, and the gesture people already use to
-                    // mean "show me more" is the zoom -- so that is the
-                    // gesture that clears it, rather than a button they have
-                    // to find. Bound once per map, not once per township.
-                    if (!mp.__dv_twp_reset_bound) {
-                        mp.__dv_twp_reset_bound = true;
-                        mp.on('zoomend', function () {
-                            if (!window.DV_TWP_FOCUS) { return; }
-                            if (mp.getZoom() > 10) { return; }
-                            window.DV_TWP_FOCUS = null;
-                            // The zoom-out means "show me more", so the
-                            // fetched expansion goes with the highlight --
-                            // otherwise one township's leases stay drawn
-                            // across a state-wide view.
-                            if (mp.__dv_twp_leases) {
-                                try { mp.removeLayer(mp.__dv_twp_leases); }
-                                catch (e) {}
-                                mp.__dv_twp_leases = null;
-                            }
-                            // AND THE GRID COMES BACK, because zooming out
-                            // is the gesture that means "show me the
-                            // overview again" -- which is what the grid is.
-                            // Only what standDownGrid actually removed: if
-                            // it was never hidden, __dv_twp_grp is null and
-                            // this does nothing, so a grid the user switched
-                            // off in the layer control is not switched back
-                            // on behind their back.
-                            if (mp.__dv_twp_grp) {
-                                try { mp.addLayer(mp.__dv_twp_grp); }
-                                catch (e) {}
-                                mp.__dv_twp_grp = null;
-                            }
-                            if (mp.__dv_twp_frame) {
-                                try { mp.removeLayer(mp.__dv_twp_frame); }
-                                catch (e) {}
-                                mp.__dv_twp_frame = null;
-                            }
-                            mp.eachLayer(function (grp) {
-                                if (!grp || !grp.eachLayer) { return; }
-                                try {
-                                    grp.eachLayer(function (c) {
-                                        var q = c.feature && c.feature.properties;
-                                        if (!q || q.ln === undefined) { return; }
-                                        c.setStyle({opacity: 0.9,
-                                                    fillOpacity: 0.38,
-                                                    weight: 1.0});
-                                    });
-                                } catch (e) {}
-                            });
-                        });
-                    }
+                    // THE ZOOM NO LONGER RESETS ANYTHING. A zoomend handler
+                    // used to clear the focus below zoom 10 -- restoring the
+                    // grid, dropping the fetched leases and un-fading the rest.
+                    // Removed on request, with the consequence stated rather
+                    // than discovered: nothing now puts the grid back inside a
+                    // single render. Clicking another township re-frames it,
+                    // and ANY control change rebuilds the map, which restores
+                    // the grid -- that is the recovery path.
 
                     // AND IT MUST NOT TELL PYTHON. An earlier version also
                     // fired draw:created here, so that the server would learn
@@ -2298,82 +2257,11 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
         .replace("__LEASE_ONEACH__", lease_on_each(_lkey))),
     ).add_to(m)
 
-    # ── ZOOM IN FAR ENOUGH AND THE GRID GETS OUT OF THE WAY ─────────────
-    # "Could I turn off the townships by zooming in, rather than scrolling
-    # up and switching off the pill." Yes -- and it has to be done in the
-    # browser, because Python never learns the zoom. That is the same
-    # constraint that shaped the box tool and the ⛶ control; here it costs
-    # nothing, since hiding a layer is a browser job anyway.
-    #
-    # REMOVED, NOT FADED. A township at zoom 13 is bigger than the screen,
-    # so a faint one is just a stray line across the map -- and while it is
-    # still on the map it keeps taking the clicks that should reach the
-    # leases underneath. Removing the layer hands the clicks back.
-    #
-    # AND IT ONLY RE-ADDS WHAT IT REMOVED. If you switch the layer off
-    # yourself in the layer control, zooming out must not switch it back on:
-    # autoHidden records that the hiding was ours to undo.
-    from branca.element import MacroElement as _ME, Template as _TPL
-    _zoom_hide = _ME()
-    _zoom_hide._name = "dv_twp_zoom_hide"
-    _zoom_hide._template = _TPL(u"""
-        {% macro script(this, kwargs) %}
-        (function () {
-            var HIDE_AT = 13;
-            function findMap() {
-                var el = document.querySelector('.leaflet-container');
-                if (!el) { return null; }
-                for (var k in window) {
-                    try {
-                        var v = window[k];
-                        if (v && v._container === el &&
-                                typeof v.on === 'function') { return v; }
-                    } catch (e) { /* unreadable key */ }
-                }
-                return null;
-            }
-            function findGroup(mp) {
-                var found = null;
-                mp.eachLayer(function (g) {
-                    if (found || !g.eachLayer) { return; }
-                    try {
-                        g.eachLayer(function (c) {
-                            if (found) { return; }
-                            var p = c.feature && c.feature.properties;
-                            if (p && p.pid !== undefined) { found = g; }
-                        });
-                    } catch (e) { /* not it */ }
-                });
-                return found;
-            }
-            function install() {
-                if (typeof L === 'undefined') {
-                    setTimeout(install, 200); return;
-                }
-                var mp = findMap();
-                if (!mp) { setTimeout(install, 200); return; }
-                if (mp.__dv_twp_zoom_bound) { return; }
-                var grp = findGroup(mp);
-                if (!grp) { setTimeout(install, 300); return; }
-                mp.__dv_twp_zoom_bound = true;
-                var autoHidden = false;
-                function apply() {
-                    var z = mp.getZoom();
-                    if (z >= HIDE_AT && mp.hasLayer(grp)) {
-                        mp.removeLayer(grp); autoHidden = true;
-                    } else if (z < HIDE_AT && autoHidden && !mp.hasLayer(grp)) {
-                        mp.addLayer(grp); autoHidden = false;
-                    }
-                }
-                mp.on('zoomend', apply);
-                apply();
-            }
-            install();
-        })();
-        {% endmacro %}
-    """)
-    _zoom_hide._parent = m
-    m.add_child(_zoom_hide)
+    # THE GRID NO LONGER HIDES ITSELF ON ZOOM. A MacroElement removed
+    # the township layer past zoom 13 and re-added it below, so the grid
+    # got out of the way when you were close enough to want leases.
+    # Removed on request. The grid now stays until it is switched off in
+    # the layer control, or until a township click stands it down.
     return len(feats), leased
 
 
