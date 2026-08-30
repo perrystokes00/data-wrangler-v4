@@ -1045,6 +1045,69 @@ with st.sidebar:
                      use_container_width=True):
             for k, v in DEFAULTS.items():
                 S[k] = v
+            # ── AND THE MAP'S SELECTIONS, WHICH DEFAULTS DOES NOT COVER ──
+            # DEFAULTS resets seven keys, all about the CONNECTION. Every map
+            # widget lives under its own key and survived untouched, so
+            # reconnecting resumed drawing whatever was on before: "I
+            # disconnected and started a new map. I entered Wyoming and the
+            # county map plotted along with all the leases, uncalled for."
+            # It was not a new map -- it was the old one, still selected.
+            #
+            # Disconnect means a clean slate, so it now means one.
+            #
+            # BY PREFIX, so a control added later is covered without anyone
+            # remembering to add it here -- the "lists that must agree"
+            # failure this repo pays for in four places. wm_ is the map,
+            # lv_ the lease panel, seis_ the seismic screen. The connection
+            # form is sb_ and is deliberately left alone: clearing the server
+            # and database someone just typed would be its own rudeness.
+            #
+            # DELETED, NOT ASSIGNED. Assigning a widget's own key is the
+            # Streamlit error that surfaces on a LATER run, on whatever page
+            # draws next; deleting before the widget is built is the
+            # supported way to restore a default. Safe here because the
+            # rerun lands on the splash page, where none of them exist.
+            _keep = ("sb_",)
+            _drop = [k for k in list(st.session_state.keys())
+                     if isinstance(k, str)
+                     and k.startswith(("wm_", "lv_", "seis_"))
+                     and not k.startswith(_keep)]
+            # ── AND THE DATABASE CHOICE, WHICH sb_ WOULD OTHERWISE KEEP ──
+            # The Database control is a selectbox created with index= pointing
+            # at DataView_Demo -- but once a widget's key holds a value,
+            # index= is IGNORED on every later run. DataView sorts first in
+            # sys.databases, so if that selectbox was ever built before
+            # DataView_Demo appeared in the fetched list, "DataView" was
+            # stored and became permanent: the older, essentially empty
+            # database, which has no dv_land_right at all.
+            #
+            # Reported as "Invalid object name 'dataview.dv_land_right'"
+            # followed by "I have not changed databases" -- and that was
+            # correct. The user changed nothing; the widget kept an answer
+            # nobody gave it, and Disconnect preserved it because it wears
+            # the sb_ prefix that protects the server and driver.
+            #
+            # Server, driver and auth are still kept: retyping those is the
+            # rudeness this exception is carved out of. Only the database
+            # goes, back to the default that is right.
+            _drop += [k for k in ("sb_database_sel", "sb_database")
+                      if k in st.session_state]
+            # The map's own bookkeeping, which has no prefix.
+            _drop += [k for k in (
+                "map_mode", "wells_layer_on", "h3_layer_on", "h3_resolution",
+                "_drawn_bounds", "_drawn_bounds_oneshot", "_clip_box",
+                "_active_drill_bbox", "_place_shapes", "_place_pending",
+                "_lease_channel_live", "_lease_rerun_for", "_lease_pref_seen",
+                "_lease_gj_sig", "_lease_gj_legend", "_lease_gj_n",
+                "_sidebar_collapsed_once", "_reset_saved_view",
+            ) if k in st.session_state]
+            for _k in _drop:
+                try:
+                    del st.session_state[_k]
+                except Exception:
+                    # A key that will not delete must not block the
+                    # disconnect itself.
+                    pass
             st.rerun()
 
         with st.expander("🗑️ Reset demo data", expanded=False):

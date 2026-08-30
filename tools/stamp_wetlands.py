@@ -62,6 +62,7 @@ def main(argv=None):
     import fiona
     from shapely.geometry import shape
     from shapely.strtree import STRtree
+    from shapely import make_valid as shapely_make_valid
     from shapely import wkt as shapely_wkt
     from sqlalchemy import text as t, event
     from dataview.core.dw_utils import make_engine
@@ -132,7 +133,7 @@ def main(argv=None):
             pyproj.CRS(src_crs), pyproj.CRS(METRIC), always_xy=True).transform
 
         t0 = time.time()
-        seen = hits = 0
+        seen = hits = repaired = skipped = 0
         for feat in src:
             seen += 1
             if a.limit and seen > a.limit:
@@ -146,14 +147,41 @@ def main(argv=None):
                 continue
             if g.is_empty:
                 continue
-            wt = (feat["properties"].get("WETLAND_TYPE") or "Unknown")
-            for idx in tree.query(g):
-                tg = tr.geometry.iloc[int(idx)]
-                if not g.intersects(tg):
-                    continue
+            # ONE BAD POLYGON MUST NOT END A THIRTY-MINUTE PASS. The first
+            # run died at 750,000 of 882,183 with
+            #     TopologyException: side location conflict
+            # because the guard sat around intersection() and NOT around
+            # intersects(), which is the call that actually threw. A public
+            # set of 882,183 hand-digitised polygons WILL contain invalid
+            # ones; the only question is whether the job survives them.
+            #
+            # Repaired once on the way in -- make_valid fixes the
+            # self-touching ring that exception describes -- with the
+            # per-tract work guarded as a backstop. Anything still unusable
+            # is COUNTED and reported, never skipped in silence.
+            if not g.is_valid:
                 try:
+                    g = shapely_make_valid(g)
+                    repaired += 1
+                except Exception:
+                    skipped += 1
+                    continue
+            wt = (feat["properties"].get("WETLAND_TYPE") or "Unknown")
+            try:
+                cands = tree.query(g)
+            except Exception:
+                skipped += 1
+                continue
+            for idx in cands:
+                tg = tr.geometry.iloc[int(idx)]
+                try:
+                    if not g.intersects(tg):
+                        continue
                     inter = g.intersection(tg).area
                 except Exception:
+                    # This tract cannot be tested against THIS polygon; the
+                    # other tracts it touches are still worth doing.
+                    skipped += 1
                     continue
                 if inter > 0:
                     acc[int(idx)][wt] += inter
@@ -164,7 +192,9 @@ def main(argv=None):
                       % (format(seen, ","), format(total, ","), el,
                          format(hits, ",")))
 
-    print("\ntracts touching wetland: %s of %s"
+    print("\nread %s   repaired %s   unusable %s"
+          % (format(seen, ","), format(repaired, ","), format(skipped, ",")))
+    print("tracts touching wetland: %s of %s"
           % (format(len(acc), ","), format(len(tr), ",")))
     if not acc:
         print("nothing overlapped -- refusing to stamp zeros over everything")

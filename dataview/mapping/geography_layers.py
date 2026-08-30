@@ -1350,7 +1350,8 @@ def write_lease_geojson(engine, out_dir, limit=200000):
         # been run, and _has_twp only proves the geom table exists.
         _extra = {}
         for _c2 in ("elevation_ft", "dist_city_km", "near_city",
-                    "dist_hwy_km", "near_hwy"):
+                    "dist_hwy_km", "near_hwy",
+                    "wetland_pct", "wetland_acres", "wetland_type"):
             _extra[_c2] = ("tg." + _c2) if (_has_twp and con.execute(text(
                 "SELECT COL_LENGTH('dataview.dv_land_tract_geom', :c)"),
                 {"c": _c2}).scalar() is not None) else "NULL"
@@ -1383,6 +1384,9 @@ def write_lease_geojson(engine, out_dir, limit=200000):
                    {_extra['near_city']}     AS ncity,
                    {_extra['dist_hwy_km']}   AS dhwy,
                    {_extra['near_hwy']}      AS nhwy,
+                   {_extra['wetland_pct']}   AS wpct,
+                   {_extra['wetland_acres']} AS wac,
+                   {_extra['wetland_type']}  AS wty,
                    lt.geog.STAsText()     AS wkt
               FROM dataview.dv_land_tract lt
               {_twjoin}
@@ -1435,6 +1439,16 @@ def write_lease_geojson(engine, out_dir, limit=200000):
             "nhwy": ("%s (%.1f mi)" % (_t(r.nhwy),
                                        float(r.dhwy) * 0.621371)
                      if (r.nhwy and r.dhwy is not None) else ""),
+            # ZERO AND NULL ARE DIFFERENT FACTS. 0 means measured and none
+            # found; null means never measured. A filter that treats them
+            # alike reports 1,123 wetland-free leases as unknown, or worse.
+            "_wp": (round(float(r.wpct), 3) if r.wpct is not None else None),
+            "_wt": (_t(r.wty) or None),
+            "wet": (("%s%% wetland (%s ac)%s"
+                     % (round(float(r.wpct), 1),
+                        format(int(float(r.wac or 0)), ","),
+                        (" - " + _t(r.wty)) if r.wty else ""))
+                    if (r.wpct is not None and float(r.wpct) > 0) else ""),
             # THE NUMBER, BESIDE THE STRING THAT DISPLAYS IT. "km" is
             # "%.2f km2" for a popup; filtering on it means filtering on a
             # ROUNDED value, and at a threshold that is exactly one section
@@ -1602,6 +1616,16 @@ function(feature, layer) {
                 hide(); return;
             }
         }
+        if (FILT.wpmin) {
+            // A NULL IS NOT A ZERO. Never-measured fails a wetland question
+            // the way it fails every other one here.
+            var wp = p._wp;
+            if (wp === undefined || wp === null || wp < FILT.wpmin) {
+                hide(); return;
+            }
+        }
+        if (FILT.wty && FILT.wty.length &&
+                FILT.wty.indexOf(p._wt) < 0) { hide(); return; }
         if (FILT.ac) {
             // _km2 IS THE NUMBER; km is the rounded string for the popup.
             // Filtering on the display value put 1,043 section-sized leases
@@ -1644,6 +1668,7 @@ function(feature, layer) {
                 ['Operator', p.opr], ['State', p.st],
                 ['Elevation', p.el],
                 ['Nearest town', p.ncity], ['Nearest highway', p.nhwy],
+                ['Wetland', p.wet],
                 ['Source', p.src], ['Quality', p.qly]];
     var h = '<table style="font-size:11px;border-collapse:collapse">';
     for (var i = 0; i < rows.length; i++) {
@@ -1754,6 +1779,15 @@ def _filter_literal(filt):
     # MILES IN, KILOMETRES OUT. The panel asks in miles because that is what
     # a land man says; the stamp is in km because that is what the projection
     # measured. Converted once, here, so the browser never sees a unit.
+    try:
+        _wp = float(filt.get("wet_min_pct") or 0)
+    except (TypeError, ValueError):
+        _wp = 0.0
+    if _wp > 0:
+        out["wpmin"] = _wp
+    _wty = [s for s in (filt.get("wet_types") or []) if s]
+    if _wty:
+        out["wty"] = _wty
     _elmin = filt.get("elev_min")
     _elmax = filt.get("elev_max")
     if _elmin is not None:

@@ -9428,7 +9428,7 @@ def _ensure_lease_geojson(engine, say=None):
     # been judged current forever and the new property would never appear --
     # the change would look applied and do nothing. Bump on any change to
     # what write_lease_geojson PUTS IN the file.
-    _FMT = 5
+    _FMT = 6
     _sdir = os.path.join(os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.abspath(__file__)))), "static")
     _path = os.path.join(_sdir, LEASE_GEOJSON_NAME)
@@ -13569,7 +13569,9 @@ def run(engine=None):
                 miles_city=float(st.session_state.get("lv_micity") or 0),
                 miles_hwy=float(st.session_state.get("lv_mihwy") or 0),
                 towns=list(st.session_state.get("lv_towns") or []),
-                roads=list(st.session_state.get("lv_roads") or []))
+                roads=list(st.session_state.get("lv_roads") or []),
+                wet_min_pct=float(st.session_state.get("lv_wetpct") or 0),
+                wet_types=list(st.session_state.get("lv_wetty") or []))
             # The slider reports a SPAN; only a real narrowing is a filter.
             _wel = st.session_state.get("lv_elev")
             if isinstance(_wel, (tuple, list)) and len(_wel) == 2:
@@ -16988,14 +16990,39 @@ MAP_LEASE_PREF = "map_lease"
 LEASE_MODES = ("leases", "townships", "both", "off")
 
 
-def _lease_pref_mtime() -> float:
-    """Timestamp of the prefs file, or 0. The poll compares THIS, not the
-    contents -- reading and parsing the file every two seconds to notice a
-    change that usually has not happened is work for nothing."""
+def _lease_pref_mtime():
+    """A fingerprint of the LEASE choice -- not the file's timestamp.
+
+    IT USED TO BE THE MTIME, and the seismic screen shares this file. So
+    pressing "Show all" in seismic rewrote the file, the mtime moved, and
+    this watcher concluded a LEASE instruction had arrived. It then applied
+    whatever mode was sitting in the file -- "leases" from hours earlier --
+    and the map drew all 24,178 uncalled for. Reported twice: once as leases
+    appearing on a fresh Wyoming map, and once as a blank page after
+    pressing Show all in seismic, with the log showing map_seis written and
+    geo_leases drawn in the very next render.
+
+    A watcher keyed on the whole file cannot tell whose change it was. This
+    reads the lease section only, so a seismic write is invisible to it and
+    a lease write still isn't.
+
+    Still cheap: a few hundred bytes of JSON every two seconds, against a
+    file that is already in the page cache. The mtime is kept as a first
+    gate, so the parse only happens when SOMETHING changed.
+    """
     try:
-        return float(_USER_PREFS_PATH.stat().st_mtime)
+        _m = float(_USER_PREFS_PATH.stat().st_mtime)
     except Exception:
-        return 0.0
+        return ""
+    _cache = getattr(_lease_pref_mtime, "_cache", None)
+    if _cache and _cache[0] == _m:
+        return _cache[1]
+    try:
+        _sig = json.dumps(_map_lease_choice(), sort_keys=True)
+    except Exception:
+        _sig = ""
+    _lease_pref_mtime._cache = (_m, _sig)
+    return _sig
 
 
 def _map_lease_choice() -> dict:
@@ -17130,6 +17157,13 @@ def render_lease_view(engine, compact=False, default_mode=None):
                 # The geometry tables are optional: without them the panel
                 # keeps the nearest-based filters and simply offers no names.
                 _towns, _routes = [], []
+            try:
+                _wtypes = [r[0] for r in _c.execute(_lt(
+                    "SELECT DISTINCT wetland_type "
+                    "FROM dataview.dv_land_tract_geom "
+                    "WHERE wetland_type IS NOT NULL ORDER BY wetland_type"))]
+            except Exception:
+                _wtypes = []
             _elev_range = _c.execute(_lt(
                 "SELECT MIN(elevation_ft), MAX(elevation_ft) "
                 "FROM dataview.dv_land_tract_geom "
@@ -17269,6 +17303,22 @@ def render_lease_view(engine, compact=False, default_mode=None):
                             key="lv_roads",
                             help="Interstates and US highways. Leave empty "
                                  "to measure to whichever is nearest.")
+    # ── WETLAND, AS A SHARE RATHER THAN A FLAG ──────────────────────────
+    # 23,059 of 24,178 leases contain SOME wetland -- a creek across a
+    # section counts -- so a yes/no would mark 95% of Wyoming and mean
+    # nothing. Only 1,052 are over 10%, and that is the set worth finding.
+    _wetpct = st.number_input("Minimum wetland %", min_value=0.0,
+                              max_value=100.0, step=1.0, format="%.0f",
+                              value=float(_cur.get("wet_min_pct") or 0),
+                              key="lv_wetpct",
+                              help="Share of the lease that is NWI wetland. "
+                                   "0 means no limit; 95% hold some.")
+    _wetty = st.multiselect("Wetland type", _wtypes,
+                            default=[x for x in _cur.get("wet_types") or []
+                                     if x in _wtypes],
+                            key="lv_wetty",
+                            help="The dominant class by area within the "
+                                 "lease. Riverine is much the commonest.")
     _mi_city = st.number_input("Within miles of a town", min_value=0.0,
                                step=1.0, format="%.0f",
                                value=float(_cur.get("miles_city") or 0),
@@ -17312,6 +17362,13 @@ def render_lease_view(engine, compact=False, default_mode=None):
                 "LIKE :co%d" % _i)
             _params["co%d" % _i] = "%," + str(_v).strip().lower() + ",%"
         _where.append("(" + " OR ".join(_co_clauses) + ")")
+    if _wetpct:
+        _where.append("g.wetland_pct >= :wpmin")
+        _params["wpmin"] = float(_wetpct)
+    if _wetty:
+        _where.append("g.wetland_type IN (%s)"
+                      % ",".join(":wt%d" % i for i in range(len(_wetty))))
+        _params.update({"wt%d" % i: v for i, v in enumerate(_wetty)})
     if _elmin is not None:
         _where.append("g.elevation_ft >= :elmin")
         _params["elmin"] = float(_elmin)
@@ -17393,7 +17450,9 @@ def render_lease_view(engine, compact=False, default_mode=None):
               "elev_min": _elmin, "elev_max": _elmax,
               "miles_city": float(_mi_city or 0),
               "miles_hwy": float(_mi_hwy or 0),
-              "towns": sorted(_twnsel), "roads": sorted(_rdsel)}
+              "towns": sorted(_twnsel), "roads": sorted(_rdsel),
+              "wet_min_pct": float(_wetpct or 0),
+              "wet_types": sorted(_wetty)}
 
     # IN THE STRIP THIS BUTTON IS NOT REQUIRED, and says so. The mode and
     # colour are read straight from these widgets by the map build, so a
