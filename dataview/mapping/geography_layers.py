@@ -1393,6 +1393,15 @@ def write_lease_geojson(engine, out_dir, limit=200000):
             "ac": ("%s ac" % format(int(float(r.km2) * 247.105), ",")
                    if r.km2 is not None else ""),
             "_tw": _t(r.twp),
+            # THE NUMBER, BESIDE THE STRING THAT DISPLAYS IT. "km" is
+            # "%.2f km2" for a popup; filtering on it means filtering on a
+            # ROUNDED value, and at a threshold that is exactly one section
+            # that changes the answer: 2.589988 km2 is 639.9997 acres and
+            # fails ">= 640", while the rounded 2.59 is 640.0018 and passes.
+            # 1,043 section-sized leases sat on that boundary, so the map
+            # drew 7,369 where the count said 6,326. Same source, same
+            # arithmetic, both sides.
+            "_km2": (round(float(r.km2), 6) if r.km2 is not None else None),
             "km": ("%.2f km2" % float(r.km2) if r.km2 is not None else ""),
         }
         for k, v in lab.items():
@@ -1455,13 +1464,56 @@ function(feature, layer) {
     // OUTSIDE THE CLIP BOX: hidden, and not clickable. opacity alone leaves
     // an invisible polygon still swallowing clicks over the wells beneath.
     var CLIP = __CLIP__;
+    var GONE = {opacity: 0, fillOpacity: 0};
+    function hide() {
+        feature.properties.style = GONE;
+        layer.setStyle(GONE);
+        if (layer._path) { layer._path.style.pointerEvents = "none"; }
+    }
     if (CLIP && (p._la < CLIP[0] || p._la > CLIP[2] ||
                  p._lo < CLIP[1] || p._lo > CLIP[3])) {
-        var gone = {opacity: 0, fillOpacity: 0};
-        feature.properties.style = gone;
-        layer.setStyle(gone);
-        if (layer._path) { layer._path.style.pointerEvents = "none"; }
+        hide();
         return;
+    }
+    // ── THE PANEL'S FILTERS, APPLIED TO WHAT IS DRAWN ────────────────────
+    // The panel said "6,131 lease(s) match" and the map drew all 24,178:
+    // source, status, operator and minimum acres reached the COUNT and
+    // nothing else. A number beside a map that disagrees with the map is
+    // the confident-wrong-value failure, and the count was the believable
+    // half.
+    //
+    // Filtered HERE rather than in the query, because the file is a cached
+    // artifact shared by every filter combination -- re-querying and
+    // rewriting 29 MB per filter change would undo the whole reason it is
+    // served as a file. The browser already holds every lease; deciding
+    // which to show is the same client-side job the clip box above does.
+    //
+    // THE PREDICATES MIRROR THE SQL the count runs, deliberately:
+    //   source / status  IN (...)      -> exact match against the list
+    //   operator_name LIKE '%op%'      -> case-insensitive substring
+    //   area_km2 * 247.105 >= :ac      -> same arithmetic, same constant
+    // A lease with no area fails the acres test, exactly as a NULL fails
+    // the SQL comparison -- unknown size must not be claimed as a match.
+    var FILT = __FILT__;
+    if (FILT) {
+        if (FILT.src && FILT.src.length &&
+                FILT.src.indexOf(p.src) < 0) { hide(); return; }
+        if (FILT.lst && FILT.lst.length &&
+                FILT.lst.indexOf(p.lst) < 0) { hide(); return; }
+        if (FILT.opr) {
+            var o = (p.opr || '').toLowerCase();
+            if (o.indexOf(FILT.opr) < 0) { hide(); return; }
+        }
+        if (FILT.ac) {
+            // _km2 IS THE NUMBER; km is the rounded string for the popup.
+            // Filtering on the display value put 1,043 section-sized leases
+            // on the wrong side of "at least 640 acres". Falls back to the
+            // string for a file written before _km2 existed, and an unknown
+            // area fails the test the way a NULL fails the SQL comparison.
+            var km = (p._km2 === undefined || p._km2 === null)
+                     ? parseFloat(p.km) : p._km2;
+            if (!(km * 247.105 >= FILT.ac)) { hide(); return; }
+        }
     }
     // NO DARK EDGE AT ALL. Tried three times: the tract's own hue (tracts of
     // one owner merge), black at 2.2 (the edges become the picture at state
@@ -1503,8 +1555,39 @@ function(feature, layer) {
 }"""
 
 
+def _filter_literal(filt):
+    """The panel's filters as a JS literal, or "null" when nothing is set.
+
+    ONE PLACE DECIDES WHAT "EMPTY" MEANS. A filter of empty lists and blank
+    strings matches everything, and shipping it as an object would run four
+    tests per feature across 24,178 features to reach that conclusion --
+    and, worse, would make `if (FILT)` true, so a bug in any predicate
+    would blank the layer for a user who had filtered nothing.
+    """
+    import json as _j
+    if not filt:
+        return "null"
+    out = {}
+    _src = [s for s in (filt.get("source") or []) if s]
+    _lst = [s for s in (filt.get("status") or []) if s]
+    _opr = str(filt.get("operator") or "").strip().lower()
+    try:
+        _ac = float(filt.get("min_acres") or 0)
+    except (TypeError, ValueError):
+        _ac = 0.0
+    if _src:
+        out["src"] = _src
+    if _lst:
+        out["lst"] = _lst
+    if _opr:
+        out["opr"] = _opr
+    if _ac > 0:
+        out["ac"] = _ac
+    return _j.dumps(out) if out else "null"
+
+
 def add_lease_layer_file(m, path, url, by="producing", show=True,
-                         legend=None, clip=None):
+                         legend=None, clip=None, filt=None):
     """Leases from a SERVED GeoJSON file, styled entirely in the browser.
 
     TWO ARGUMENTS FOR ONE FILE, and they are not interchangeable:
@@ -1536,7 +1619,13 @@ def add_lease_layer_file(m, path, url, by="producing", show=True,
                 "__CLIP__",
                 ("[%r, %r, %r, %r]" % (clip[0][0], clip[0][1],
                                        clip[1][0], clip[1][1]))
-                if clip else "null")),
+                if clip else "null")
+            # NORMALISED ONCE, HERE, so the browser compares like for like:
+            # the operator is lower-cased on this side too (the JS lower-
+            # cases only the value it is testing), and an empty filter is
+            # `null` rather than an object of empty lists that would run
+            # four tests per feature for nothing.
+            .replace("__FILT__", _filter_literal(filt))),
     )
     # The link folium emits must be the BROWSER's, not ours.
     _gj.embed_link = url
@@ -1740,6 +1829,47 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                     // the same function for a handler most never fire.
                     var LEASE_URL = __LEASE_URL__;
                     var LEASE_ONEACH = __LEASE_ONEACH__;
+
+                    // ── THE GRID STANDS DOWN ONCE THE LEASES ARRIVE ─────
+                    // "If both layers are on then the leases and townships
+                    // plot together, defeating the purpose of the
+                    // townships." The grid is the overview you use to
+                    // CHOOSE; the moment it has handed over to the leases
+                    // its job is done, and leaving it drawn is the smear
+                    // this layer exists to prevent. It also stops taking
+                    // the clicks that should reach the leases beneath it.
+                    //
+                    // ONE FRAME IS KEPT. Removing every township at zoom 12
+                    // leaves six polygons floating on blank tiles with no
+                    // way to tell WHICH township you opened -- so the one
+                    // you clicked stays as an outline. It is a plain
+                    // rectangle, non-interactive, so it cannot swallow a
+                    // lease click the way the polygon it replaces did.
+                    //
+                    // NO CONFLICT WITH THE ZOOM RULE. dv_twp_zoom_hide only
+                    // ever re-adds what IT hid (its autoHidden flag), so a
+                    // grid hidden here is not switched back on by zooming
+                    // out past 13 -- it comes back with the reset below,
+                    // which is the gesture that undoes the whole expansion.
+                    function standDownGrid() {
+                        var grp = null;
+                        mp.eachLayer(function (g) {
+                            if (!grp && g !== layer && g.hasLayer &&
+                                    g.hasLayer(layer)) { grp = g; }
+                        });
+                        if (grp && mp.hasLayer(grp)) {
+                            mp.removeLayer(grp);
+                            mp.__dv_twp_grp = grp;
+                        }
+                        if (mp.__dv_twp_frame) {
+                            try { mp.removeLayer(mp.__dv_twp_frame); }
+                            catch (e) {}
+                        }
+                        mp.__dv_twp_frame = L.rectangle(b, {
+                            fill: false, color: '#f59e0b', weight: 2,
+                            opacity: 0.9, interactive: false
+                        }).addTo(mp);
+                    }
                     var b = layer.getBounds();
                     try { L.DomEvent.stopPropagation(ev); } catch (e) {}
 
@@ -1786,6 +1916,11 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                             });
                         } catch (e) { /* not a lease group */ }
                     });
+                    // Leases were ALREADY on the map ("both" mode): they
+                    // have just been highlighted, so the grid has done its
+                    // job and gets out of their way now rather than waiting
+                    // for zoom 13.
+                    if (inside > 0) { standDownGrid(); }
                     // Say what happened, on the map, where the click was.
                     // ONE POPUP THAT CAN BE REWRITTEN, because the load below
                     // is asynchronous: the click has to answer immediately
@@ -1886,6 +2021,13 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                                  onEachFeature: LEASE_ONEACH});
                             lyr.addTo(mp);
                             mp.__dv_twp_leases = lyr;
+                            // The leases are on the map; the grid steps
+                            // aside. Done HERE, not beside the fetch call,
+                            // because the fetch is asynchronous -- hiding
+                            // the grid before the leases arrive leaves an
+                            // empty map for as long as the download takes,
+                            // and a blank map is how "it broke" looks.
+                            standDownGrid();
                             say(picked.length + ' lease(s) drawn' +
                                 (byStamp ? '' : ' (approx)') +
                                 ' &middot; zoom out to reset');
@@ -1928,6 +2070,24 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                                 try { mp.removeLayer(mp.__dv_twp_leases); }
                                 catch (e) {}
                                 mp.__dv_twp_leases = null;
+                            }
+                            // AND THE GRID COMES BACK, because zooming out
+                            // is the gesture that means "show me the
+                            // overview again" -- which is what the grid is.
+                            // Only what standDownGrid actually removed: if
+                            // it was never hidden, __dv_twp_grp is null and
+                            // this does nothing, so a grid the user switched
+                            // off in the layer control is not switched back
+                            // on behind their back.
+                            if (mp.__dv_twp_grp) {
+                                try { mp.addLayer(mp.__dv_twp_grp); }
+                                catch (e) {}
+                                mp.__dv_twp_grp = null;
+                            }
+                            if (mp.__dv_twp_frame) {
+                                try { mp.removeLayer(mp.__dv_twp_frame); }
+                                catch (e) {}
+                                mp.__dv_twp_frame = null;
                             }
                             mp.eachLayer(function (grp) {
                                 if (!grp || !grp.eachLayer) { return; }

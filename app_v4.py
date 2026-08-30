@@ -53,11 +53,29 @@ def _dump_loaded_modules():
 _atexit.register(_dump_loaded_modules)
 # ── end probe ─
 
+# THE LEASE WINDOW OPENS AS A 520px STRIP, and Streamlit turns the sidebar
+# into an OVERLAY DRAWER below ~768px rather than a column -- so in that
+# window an expanded sidebar does not sit beside the panel, it covers it
+# completely. Measured at 520x900: the panel was entirely hidden behind nav
+# and Connect until the drawer was collapsed by hand, every time the window
+# was opened.
+#
+# initial_sidebar_state applies to the FIRST render of a session, which is
+# exactly the right scope: the drawer is still there for the one Connect that
+# window needs, it just does not start on top of the thing it came for.
+_view = ""
+try:
+    _view = str(st.query_params.get("view") or "")
+except Exception:
+    # Older Streamlit, or no params at all. An expanded sidebar is the
+    # correct fallback -- it is what every other page wants.
+    _view = ""
+
 st.set_page_config(
     page_title="DataView",
     page_icon="🛢",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state=("collapsed" if _view == "lease" else "expanded"),
 )
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -968,6 +986,30 @@ with st.sidebar:
 
     # ── Navigation (only when connected) ─────────────────────────────
     if S.connected:
+        # ── ONCE LOGGED IN, THE SIDEBAR IS NOT NEEDED ────────────────
+        # "We should also be able to close the sidebar at any time to give
+        # more space to the applications. Once logged in we don't need it."
+        # Connecting is the one thing it is required for, so connecting is
+        # when it stands down -- every page gets the ~336px, not just the
+        # map.
+        #
+        # ONCE PER PAGE LOAD, and only when it is observed to have worked:
+        # the flag lives on the window and is set on aria-expanded, so a
+        # sidebar re-opened by hand STAYS open. Streamlit has no API for
+        # this after the session starts -- initial_sidebar_state applies to
+        # the first render only, and the connection happens later -- so it
+        # clicks the control a person would click.
+        #
+        # The » control Streamlit leaves behind is how it comes back, and
+        # nav lives in there, so nothing becomes unreachable.
+        try:
+            from dataview.mapping.page_well_map import _collapse_sidebar_once
+            _collapse_sidebar_once()
+        except Exception as _cse:
+            # Cosmetic only: an unreachable helper must not stop the app
+            # from drawing its navigation.
+            print("[app] sidebar auto-collapse skipped: %s" % _cse)
+
         st.markdown("<div class='sec-hdr'>Navigation</div>",
                     unsafe_allow_html=True)
 

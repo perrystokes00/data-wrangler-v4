@@ -1048,6 +1048,92 @@ def _seis_pref_mtime() -> float:
         return float(_USER_PREFS_PATH.stat().st_mtime)
     except OSError:
         return 0.0
+def _collapse_sidebar_once():
+    """Fold the nav sidebar away, ONCE per session.
+
+    The strip needs the width and the sidebar is holding ~300px of nav that
+    is not being used while reading a map. Streamlit has no API for this
+    after the session starts -- initial_sidebar_state applies only to the
+    first render, and by the time the map page is reached that moment is
+    long gone -- so it clicks the control the user would click, in the
+    PARENT document, the same reach _scroll_main_to_top already makes from
+    inside a components iframe.
+
+    ONCE, AND NEVER AGAIN -- but the "once" is recorded IN THE BROWSER, and
+    only after it actually worked.
+
+    The first version set a session_state flag in Python and then emitted
+    the script. That stamps success before anything has happened: if the
+    sidebar was not mounted yet, or the page was still loading, every retry
+    missed and the flag said "done" for the rest of the session. Reported as
+    "the sidebar doesn't collapse", with nothing in any log, because from
+    Python's side it had been handled. It is the same error the lease
+    sidecar has a comment warning against -- stamp only after the write
+    succeeds -- made three hundred lines away from that comment.
+
+    Emitted on every render now, and the WINDOW flag decides: set only when
+    the sidebar is observed collapsed, so a failed attempt is retried by the
+    next render, and a success is never repeated. That also means a sidebar
+    the user re-opens by hand stays open -- the flag is already set, and a
+    control that fights back is worse than the problem it solves.
+
+    If the selector ever stops matching, nothing happens and the sidebar
+    stays open -- a cosmetic no-op, not a broken page. Guarded on the
+    testids Streamlit 1.45 actually emits, checked against the shipped
+    bundle rather than assumed.
+    """
+    st.components.v1.html(
+        """
+        <script>
+        (function(){
+          var w = window.parent, d = w.document;
+          // ALREADY DONE FOR THIS PAGE? The flag lives on the parent window
+          // and is set only on observed success, so a missed attempt is
+          // retried by the next render and a sidebar re-opened by hand is
+          // left alone.
+          if (w.__dv_sidebar_collapsed) { return; }
+          var done = false;
+          // COLLAPSED IS A STATE TO TEST, NOT A CLICK TO COUNT. The retry
+          // schedule exists because the sidebar may not be mounted yet --
+          // but a schedule that just clicks four times TOGGLES four times,
+          // and an even number of toggles leaves it exactly where it
+          // started. Ask whether it is collapsed; stop as soon as it is.
+          //
+          // ARIA-EXPANDED, NOT THE PRESENCE OF THE COLLAPSED CONTROL.
+          // Measured in the browser: [data-testid="stSidebarCollapsedControl"]
+          // is in the DOM while the sidebar is OPEN -- so testing for it
+          // reported "already collapsed" on the first try and the click
+          // never happened. The sidebar simply stayed open, silently and
+          // with no error. Width is no better: collapsing translates the
+          // section off-canvas and getBoundingClientRect still reads 336px.
+          // aria-expanded flips true -> false, verified both ways.
+          function collapsed(){
+            var sb = d.querySelector('[data-testid="stSidebar"]');
+            return !!sb && sb.getAttribute('aria-expanded') === 'false';
+          }
+          function go(){
+            if (done) { return; }
+            // STAMPED ON OBSERVED STATE, never on "we clicked something".
+            if (collapsed()) { done = true; w.__dv_sidebar_collapsed = 1; return; }
+            var btn = d.querySelector(
+              '[data-testid="stSidebarCollapseButton"] button')
+              || d.querySelector('[data-testid="stSidebarCollapseButton"]');
+            if (btn && btn.click) { btn.click(); }
+            // NOT done yet -- the next tick re-reads aria-expanded and only
+            // then calls it finished. A click that did not land (button not
+            // mounted, React not listening yet) is retried rather than
+            // recorded as a success.
+          }
+          // Out to 4s: the sidebar mounts late on a cold load, and the old
+          // 900ms ceiling is what a slower machine was losing the race to.
+          [0, 150, 400, 900, 1600, 2500, 4000].forEach(
+            function(t){ setTimeout(go, t); });
+        })();
+        </script>
+        """,
+        height=0)
+
+
 def _scroll_main_to_top():
     """Put the main scroll container back at the top.
 
@@ -9284,7 +9370,7 @@ def _ensure_lease_geojson(engine, say=None):
     # been judged current forever and the new property would never appear --
     # the change would look applied and do nothing. Bump on any change to
     # what write_lease_geojson PUTS IN the file.
-    _FMT = 2
+    _FMT = 3
     _sdir = os.path.join(os.path.dirname(os.path.dirname(
         os.path.dirname(os.path.abspath(__file__)))), "static")
     _path = os.path.join(_sdir, LEASE_GEOJSON_NAME)
@@ -11769,6 +11855,28 @@ def run(engine=None):
     # Everything that needed room (AI filter, layer registration) has already
     # moved above the split, so the rail was holding two items and costing the
     # map 25% of the page.
+    # ── THE LEASE STRIP, BESIDE THE MAP ────────────────────────────────
+    # The rail described above came back, and this time it has something to
+    # hold. It was removed for being EMPTY -- two items for a quarter of the
+    # page -- not for being the wrong shape, and a query panel is exactly
+    # what it was missing.
+    #
+    # A COLUMN CANNOT PUSH THE MAP DOWN. That is why this is allowed to sit
+    # on the map page at all: the push-down that cost a day was controls
+    # stacked ABOVE the map, and beside is a different axis.
+    #
+    # IT STANDS WHERE THE SIDEBAR WAS: same edge, same width. Collapsing the
+    # nav frees ~336px and the strip takes about that, so the page keeps one
+    # column of controls rather than gaining a second one.
+    #
+    # THE SPLIT ITSELF IS NOT HERE. It is made at the st_folium call, so the
+    # strip is a column beside the MAP rather than beside the whole control
+    # stack -- see the note there. Splitting at this level put the strip's
+    # top level with ⚙ Page controls, 200px above the map.
+    #
+    # In the SAME SESSION it needs no Connect and no two-second poll: the
+    # write and the redraw are one rerun.
+    st.session_state.setdefault("wm_lease_strip", False)
     mapcol = st.container()
     ctrl = st.container()
 
@@ -13317,7 +13425,87 @@ def run(engine=None):
         # wrote the file, reran the map, and drew NOTHING -- the screen said
         # sent, the map said nothing, and no message explained the gap. A
         # request that cannot be seen to fail is worse than one that errors.
+        # ── SEED THE PANEL BEFORE THE MAP READS IT ──────────────────────
+        # The map decides its layers HERE, and the strip renders ~1,800
+        # lines later. So on the first run after the strip is switched on,
+        # lv_mode does not exist yet: the widget override below finds
+        # nothing, the prefs file wins, and the map draws whatever was last
+        # sent -- 24,178 leases from yesterday. The strip then seeds itself
+        # to "off" and the radio reads "off" over a map full of leases.
+        #
+        # Measured exactly that way: mode radio on index 3 ("off") with
+        # 24,178 lease paths on the map in the same render.
+        #
+        # Seeding here closes the window: the value exists before the first
+        # read, so the panel and the map agree from the very first render.
+        if (st.session_state.get("wm_lease_strip")
+                and "lv_mode" not in st.session_state):
+            st.session_state["lv_mode"] = (
+                "both" if ("geo_leases" in active_db
+                           and "geo_townships" in active_db)
+                else "leases" if "geo_leases" in active_db
+                else "townships" if "geo_townships" in active_db
+                else "off")
         _lv_choice = _map_lease_choice()
+        # ── A STALE FILE MUST NOT DRIVE A FRESH SESSION ──────────────────
+        # "I opened a new session and the leases were on automatically."
+        # The prefs file outlives the session that wrote it, so one Send
+        # last night meant every launch afterwards drew leases before
+        # anyone asked -- the map obeying an instruction from a window that
+        # is not open and a person who is not there. It contradicts the
+        # rule this channel was built on: a screen nobody has opened must
+        # not change the map.
+        #
+        # THE CHANNEL IS LIVE ONLY ONCE SOMETHING HAPPENS IN THIS SESSION:
+        # the strip is switched on here, or the watcher sees the file
+        # actually CHANGE (a second window pressing Send). A file that
+        # merely already existed is history, not an instruction.
+        #
+        # The file is left alone rather than cleared -- the second window
+        # may be sitting on it, and destroying its state to fix the map's
+        # startup would trade one surprise for another.
+        if not (st.session_state.get("_lease_channel_live")
+                or st.session_state.get("wm_lease_strip")):
+            _lv_choice = dict(_lv_choice, mode="")
+        # ── THE STRIP APPLIES AT ONCE; ONLY THE OTHER WINDOW NEEDS SEND ──
+        # "I think I forgot to send to map. I expected it to be automatic."
+        # Correct -- and Send only ever existed because a SECOND WINDOW is a
+        # second session and a file was the only way across. The strip is in
+        # THIS session, so its widgets are already in session_state before
+        # this line runs, and reading them here means a click on the radio
+        # is drawn by the very same rerun the click caused. No Send, no file
+        # round trip, no second rebuild.
+        #
+        # THE WIDGET WINS OVER THE FILE, and only while the strip is on: it
+        # is the control the user is actually looking at. With the strip off
+        # the file is the only voice, which is what the separate window
+        # needs. Guarded on the vocabulary rather than truthiness, so a
+        # stale or hand-edited value cannot select a mode that does not
+        # exist.
+        if st.session_state.get("wm_lease_strip"):
+            # LOCAL IMPORT, not a bare name. LEASE_COLOUR_BY lives in
+            # geography_layers and is imported inside render_lease_view --
+            # referencing it here would raise NameError only on the runs
+            # where the strip is on, which is the module-level-import trap
+            # CLAUDE.md opens its list with and which this same feature has
+            # already tripped over once.
+            from dataview.mapping.geography_layers import (
+                LEASE_COLOUR_BY as _LCB)
+            _w_mode = st.session_state.get("lv_mode")
+            if _w_mode in LEASE_MODES:
+                _lv_choice = dict(_lv_choice, mode=_w_mode)
+            _w_by = st.session_state.get("lv_by")
+            if _w_by in _LCB:
+                _lv_choice = dict(_lv_choice, colour_by=_w_by)
+            # THE FILTERS TRAVEL WITH THE MODE. They used to reach the count
+            # and nothing else, so the panel read "6,131 lease(s) match"
+            # over a map drawing all 24,178.
+            _lv_choice = dict(
+                _lv_choice,
+                source=list(st.session_state.get("lv_src") or []),
+                status=list(st.session_state.get("lv_status") or []),
+                operator=str(st.session_state.get("lv_op") or ""),
+                min_acres=int(st.session_state.get("lv_acres") or 0))
         _lv_mode = (_lv_choice.get("mode") or "")
         if (any(_k in active_db for _k, _lbl in _geo_defs)
                 or _lv_mode in ("leases", "townships", "both")):
@@ -13388,8 +13576,21 @@ def run(engine=None):
                                     m, _lpath, _lurl,
                                     by=_by, show=True,
                                     legend=(_lgd.get(_by) if _lg_on else None),
-                                    clip=_clip_bounds_now())
+                                    clip=_clip_bounds_now(),
+                                    filt=_lv2)
                                 _drew = _ln
+                                # SAY WHEN A FILTER IS HIDING SOME. _drew is
+                                # what the FILE holds, not what is visible,
+                                # and the browser is the only thing that
+                                # knows the difference -- so the log must not
+                                # imply the whole set is on screen. The
+                                # panel's own count is the number to read.
+                                if any((_lv2.get("source"), _lv2.get("status"),
+                                        _lv2.get("operator"),
+                                        _lv2.get("min_acres"))):
+                                    _say("[map] lease filter active -- fewer "
+                                         "than %s are visible; the strip's "
+                                         "count is the number drawn" % _ln)
                             else:
                                 # NOT swallowed: a discarded diagnostic makes
                                 # the next failure undiagnosable, and this
@@ -14833,16 +15034,26 @@ def run(engine=None):
         # see one result. Held, the options still rerun (they are cheap; the
         # map serialize is what costs) and the map is simply not drawn until
         # Apply. Off restores the draw-on-every-change behaviour.
-        # THE DOOR TO THE SECOND SCREEN, beside the map controls it
-        # replaces. A NAMED window (target=dwlease) so pressing it
-        # twice reuses the one window instead of opening tabs -- the
-        # same choice the seismic screen made and for the same
-        # reason.
-        _rvf.markdown(
-            '<a href="?view=lease" target="dwlease" rel="noopener" '
-            'style="font:600 12px system-ui;color:#f59e0b;'
-            'text-decoration:none">▦ Lease screen ↗</a>',
-            unsafe_allow_html=True)
+        # THE SECOND WINDOW IS REACHED FROM THE STRIP, not from here. A
+        # standalone link lived in this cell, 40px under the ▦ Lease strip
+        # toggle and prefixed with the same ▦ -- and it opened a second
+        # session, so hitting it instead of the toggle produced a Connect
+        # prompt and looked exactly like the toggle being broken. Measured
+        # at y=500 and y=540 in the same 297px column.
+        #
+        # The panel now has ONE home and a "Move to its own window" at its
+        # foot, so there is one door here, not two.
+        #
+        # THIS TOGGLE IS THE DOOR. It is read ~3,000 lines above, where the
+        # columns are built -- session_state carries it, so the layout that
+        # draws is the layout the last toggle asked for.
+        _rvb.toggle(
+            "▦ Lease strip", key="wm_lease_strip",
+            help="A narrow lease panel beside the map, where the nav "
+                 "sidebar is. Same session, so it needs no Connect and the "
+                 "map redraws at once. The sidebar folds away to pay for "
+                 "the width; the panel can be moved to its own window from "
+                 "its foot.")
         _rvh.toggle(
             "⏸ Hold for Map", key="wm_hold_map",
             help="Don't redraw the map on every option change. Pick your "
@@ -15090,23 +15301,66 @@ def run(engine=None):
                 "**▶ Resume** (on the banner above, or in ⚙ Page controls) "
                 "to draw them again.")
 
+        # ── THE STRIP IS DRAWN ON EVERY RUN, MAP OR NO MAP ──────────────
+        # It used to live inside the `else` below, so it only existed on
+        # runs where the map actually drew. STREAMLIT DISCARDS WIDGET STATE
+        # FOR WIDGETS THAT ARE NOT INSTANTIATED, so any rerun that skipped
+        # the map -- hold, freeze, an early return -- threw away lv_mode,
+        # and the next render fell back to the value in the prefs file.
+        # Clicking "leases" then appeared to do nothing at all: the radio
+        # snapped back, every time. Reported as "the radio buttons don't
+        # alternate between lease, townships or both".
+        #
+        # The columns are still created HERE, immediately above the map, so
+        # the strip's top is still the map's top -- the alignment does not
+        # depend on the map being drawn either.
+        if st.session_state.get("wm_lease_strip") and engine is not None:
+            _sc, _mc = st.columns([1, 3], gap="small")
+        else:
+            _mc, _sc = st.container(), None
+        if _sc is not None:
+            with _sc:
+                _collapse_sidebar_once()
+                # WHAT THE MAP IS ALREADY DRAWING, so the panel can open
+                # REFLECTING it instead of overriding it. Opening a panel
+                # must not change the map -- and it did: the radio seeded
+                # from the prefs file, so a new session that switched the
+                # strip on immediately drew whatever was last sent, which
+                # is "the leases were turned on by default" a second time,
+                # by a different route than the one already fixed.
+                _chip_mode = (
+                    "both" if ("geo_leases" in active_db
+                               and "geo_townships" in active_db)
+                    else "leases" if "geo_leases" in active_db
+                    else "townships" if "geo_townships" in active_db
+                    else "off")
+                try:
+                    render_lease_view(engine, compact=True,
+                                      default_mode=_chip_mode)
+                except Exception as _lse:
+                    # NOT swallowed. A strip that silently draws nothing is
+                    # indistinguishable from one switched off.
+                    st.warning("Lease strip: %s" % str(_lse)[:200])
+
         if _skip_folium:
             map_data = None
         else:
             _phase(90, "🌐 Rendering map in browser…")
-            try:
-                map_data = st_folium(
-                m, height=500, use_container_width=True,
-                returned_objects=_ret,
-                key=_map_widget_key,
-            )
-            except TypeError:
-                # Older streamlit-folium
-                map_data = st_folium(
-                    m, width=None, height=500,
-                    returned_objects=_ret,
-                    key=_map_widget_key,
-                )
+            # THE MAP GOES IN THE WIDE COLUMN the block above created.
+            with _mc:
+                try:
+                    map_data = st_folium(
+                        m, height=500, use_container_width=True,
+                        returned_objects=_ret,
+                        key=_map_widget_key,
+                    )
+                except TypeError:
+                    # Older streamlit-folium
+                    map_data = st_folium(
+                        m, width=None, height=500,
+                        returned_objects=_ret,
+                        key=_map_widget_key,
+                    )
         _phase(100)
         # UNDER THE MAP, which is what the messages are about. This used to
         # be _mapmsg.empty() -- clearing a placeholder that sat ABOVE the map
@@ -16593,15 +16847,30 @@ def _watch_lease_choice():
     if st.session_state.get("_lease_rerun_for") == _now:
         return
     st.session_state["_lease_rerun_for"] = _now
+    # A CHANGE OBSERVED IN THIS SESSION IS WHAT MAKES THE CHANNEL LIVE.
+    # Until one happens, the file is just the last thing somebody sent --
+    # possibly days ago -- and the map must not obey it. See the gate in
+    # run(); this is the only place that opens it.
+    st.session_state["_lease_channel_live"] = True
     st.rerun()
 
 
-def render_lease_view(engine):
-    """The lease query panel ALONE, sized for a second monitor.
+def render_lease_view(engine, compact=False, default_mode=None):
+    """The lease query panel. One function, three homes.
 
     It draws no map. That is the point: the map page had no room for a query
     over fifty attributes, and every control added to it pushed the map
     further down the page -- which is where this day started.
+
+    compact=True is the STRIP beside the map on the map page itself, which is
+    a column and therefore cannot push anything down -- the push-down was
+    always controls stacked ABOVE the map, never beside it. It drops the
+    heading (the strip is captioned by its own border) and stacks the mode
+    vertically, because four radio options do not fit across ~260px.
+
+    ONE FUNCTION, not a copy per home. A panel this size duplicated for a
+    narrow layout is two lists that must agree, and the second one silently
+    loses whichever control was added last.
     """
     from sqlalchemy import text as _lt
     # IMPORTED HERE, not assumed. LEASE_COLOUR_BY lives in
@@ -16611,9 +16880,15 @@ def render_lease_view(engine):
     # opens with, and it surfaced here because app_v4 prints the
     # traceback rather than swallowing it.
     from dataview.mapping.geography_layers import LEASE_COLOUR_BY
-    st.markdown("### Leases — second screen")
-    st.caption("Choose what the map draws. It follows within two seconds; "
-               "no need to touch the map window.")
+    if compact:
+        # IN THE SAME SESSION, so it does not wait and does not need its own
+        # Connect -- the two facts the separate window has to explain and
+        # this one must not repeat.
+        st.markdown("**▦ Leases**")
+    else:
+        st.markdown("### Leases — second screen")
+        st.caption("Choose what the map draws. It follows within two "
+                   "seconds; no need to touch the map window.")
 
     _cur = _map_lease_choice()
 
@@ -16633,28 +16908,45 @@ def render_lease_view(engine):
         st.error("Cannot read the lease vocabulary: %s" % _e)
         return
 
-    _c1, _c2 = st.columns([1, 1])
-    with _c1:
-        _mode = st.radio(
-            "What the map draws", LEASE_MODES,
-            index=(LEASE_MODES.index(_cur["mode"])
-                   if _cur["mode"] in LEASE_MODES else 0),
-            key="lv_mode",
-            help="townships is the overview, leases is the detail. Drawing "
-                 "both at once is what makes the map unreadable in the "
-                 "middle zooms.")
-        _by = st.selectbox(
-            "Colour leases by", list(LEASE_COLOUR_BY),
-            index=(list(LEASE_COLOUR_BY).index(_cur["colour_by"])
-                   if _cur["colour_by"] in LEASE_COLOUR_BY else 0),
-            key="lv_by")
-    with _c2:
-        _src = st.multiselect("Source", _srcs,
-                              default=[s for s in _cur["source"] if s in _srcs],
-                              key="lv_src")
-        _st_ = st.multiselect("Status", _stats,
-                              default=[s for s in _cur["status"] if s in _stats],
-                              key="lv_status")
+    # ONE COLUMN, because this window is now opened as a 520px strip docked
+    # beside the map. Two columns there give two ~230px halves, which is not
+    # enough for a multiselect showing chips -- and the panel is only six
+    # controls, so a column is what it wanted anyway.
+    # ── THE SEED, SET ONCE, BEFORE THE WIDGET EXISTS ────────────────────
+    # default_mode is what the map is ALREADY drawing. It wins over the
+    # prefs file unless the file is live in this session, because a file
+    # written yesterday is history and the chips are the present -- opening
+    # this panel must not change the map, and seeding from the file made it
+    # do exactly that.
+    #
+    # setdefault BEFORE the radio, never assignment after it: assigning a
+    # widget's own key after instantiation is the Streamlit error that
+    # surfaces on a LATER run, on whatever page draws next. Seeding first is
+    # the supported half of that rule, and once seeded session_state carries
+    # the user's choice, so this runs once per session.
+    _seed = _cur["mode"]
+    if not st.session_state.get("_lease_channel_live"):
+        _seed = default_mode or _cur["mode"]
+    if "lv_mode" not in st.session_state:
+        st.session_state["lv_mode"] = (
+            _seed if _seed in LEASE_MODES else LEASE_MODES[0])
+    _mode = st.radio(
+        "What the map draws", LEASE_MODES,
+        key="lv_mode", horizontal=(not compact),
+        help="townships is the overview, leases is the detail. Drawing "
+             "both at once is what makes the map unreadable in the "
+             "middle zooms.")
+    _by = st.selectbox(
+        "Colour leases by", list(LEASE_COLOUR_BY),
+        index=(list(LEASE_COLOUR_BY).index(_cur["colour_by"])
+               if _cur["colour_by"] in LEASE_COLOUR_BY else 0),
+        key="lv_by")
+    _src = st.multiselect("Source", _srcs,
+                          default=[s for s in _cur["source"] if s in _srcs],
+                          key="lv_src")
+    _st_ = st.multiselect("Status", _stats,
+                          default=[s for s in _cur["status"] if s in _stats],
+                          key="lv_status")
 
     _op = st.text_input("Operator contains", value=_cur["operator"],
                         key="lv_op", placeholder="e.g. Kirkwood")
@@ -16718,7 +17010,19 @@ def render_lease_view(engine):
     _panel = {"mode": _mode, "colour_by": _by, "source": sorted(_src),
               "status": sorted(_st_), "operator": _op, "min_acres": int(_ac)}
 
-    if st.button("▶ Send to map", type="primary", use_container_width=True,
+    # IN THE STRIP THIS BUTTON IS NOT REQUIRED, and says so. The mode and
+    # colour are read straight from these widgets by the map build, so a
+    # click on the radio is already drawn by the rerun that click caused.
+    # What Send still does here is WRITE THE FILE, which is the only way the
+    # separate window can be told -- so it is "also send to the other
+    # window", not "apply". Labelled for what it does, because a button that
+    # looks mandatory and is not gets pressed out of doubt, and one that
+    # looks optional and is not gets skipped.
+    _compact_note = compact and st.session_state.get("wm_lease_strip")
+    if st.button(("▶ Also send to the second window" if _compact_note
+                  else "▶ Send to map"),
+                 type=("secondary" if _compact_note else "primary"),
+                 use_container_width=True,
                  disabled=not _n, key="lv_send"):
         _write_map_lease(**_panel)
         st.rerun()
@@ -16741,7 +17045,14 @@ def render_lease_view(engine):
     _live_cmp = dict(_live, source=sorted(_live["source"]),
                      status=sorted(_live["status"]),
                      min_acres=int(_live["min_acres"] or 0))
-    if not _live.get("mode"):
+    if _compact_note:
+        # IN THE STRIP THE FILE IS NOT WHAT THE MAP IS READING, so comparing
+        # against it would report "unsent changes" for a map that is already
+        # drawing exactly this -- the read-back would become the confident
+        # wrong statement it was written to prevent.
+        st.caption("✓ Drawing **%s**, coloured by %s — applied as you choose."
+                   % (_mode, _by))
+    elif not _live.get("mode"):
         st.caption("The map has not been told anything yet — it is drawing "
                    "whatever its own chips say. Press ▶ Send to map.")
     elif _live_cmp == _panel:
@@ -16750,3 +17061,53 @@ def render_lease_view(engine):
     else:
         st.warning("The map is still drawing **%s**. This panel has unsent "
                    "changes — press ▶ Send to map." % _live["mode"])
+
+    if compact:
+        # ── MOVE IT OUT, rather than open a second copy ──────────────────
+        # The strip is the panel's home; the second window is for a second
+        # monitor. Offering "open" would leave the same panel in two places
+        # driving one map, so this MOVES: the window opens and the strip
+        # switches off in the same gesture.
+        #
+        # THE TOGGLE IS CLICKED IN THE PARENT DOCUMENT, for the reason every
+        # other browser-side action on this page exists: Python cannot hear
+        # a click here, and a Streamlit button cannot open a window --
+        # window.open outside a user gesture is refused by the popup
+        # blocker, and a button's handler runs a round trip later, which is
+        # not a gesture any more. So the anchor does both: it is the
+        # gesture, so the window opens; and it flips the toggle the way a
+        # person would.
+        #
+        # IF THE TOGGLE CANNOT BE FOUND, the window still opens and the
+        # strip simply stays -- the useful half survives, visibly, instead
+        # of the whole thing failing.
+        st.components.v1.html(
+            """
+            <style>
+              html,body{margin:0;padding:0;background:transparent}
+              a{font:600 11px system-ui;color:#94a3b8;text-decoration:none;
+                cursor:pointer}
+              a:hover{color:#f59e0b;text-decoration:underline}
+            </style>
+            <a id="dwmove" href="?view=lease">&#8663; Move to its own window</a>
+            <script>
+              document.getElementById('dwmove').addEventListener(
+                'click', function (ev) {
+                  ev.preventDefault();
+                  var w = 520, h = (screen.availHeight || 900);
+                  var x = Math.max(0, (screen.availWidth || 1600) - w);
+                  var win = window.open(
+                    '?view=lease', 'dwlease',
+                    'width=' + w + ',height=' + h + ',left=' + x +
+                    ',top=0,menubar=no,toolbar=no,location=no,status=no');
+                  if (win) { win.focus(); }
+                  else { window.open('?view=lease', 'dwlease'); }
+                  try {
+                    var cb = window.parent.document.querySelector(
+                      'input[type=checkbox][aria-label="▦ Lease strip"]');
+                    if (cb) { cb.click(); }
+                  } catch (e) { /* strip stays; the window is what mattered */ }
+                });
+            </script>
+            """,
+            height=22)
