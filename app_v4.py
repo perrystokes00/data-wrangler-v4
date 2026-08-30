@@ -719,16 +719,19 @@ with st.sidebar:
     except Exception as _e_src:                  # never let a banner break boot
         st.caption(f"(code source unknown: {str(_e_src)[:60]})")
 
-    # THE THEME PICKER, WITH NOTHING AROUND IT. It sits at the top, under
-    # the logo, which is where it has always been and where it reads best:
-    # one line, the name of the theme, and nothing announcing it. What was
-    # removed is the ceremony that grew around it -- an APPEARANCE header
-    # with a rule under it, and a three-line description under that saying
-    # what the name in the dropdown already says.
+    # THE THEME PICKER, AT THE TOP, UNDER THE LOGO. Its header and rule are
+    # kept: they are the framing that makes this read as a labelled group
+    # rather than a stray dropdown, and nobody asked for them to go.
+    #
+    # What is gone is the three-line description that used to sit BELOW the
+    # dropdown, restating the name already showing in it -- and, being the
+    # last thing before the Reset button, it was the line directly above
+    # Reset that was asked about.
     #
     # The theme CSS is injected before the sidebar opens, so nothing here
     # renders unthemed. A second _inject_theme call used to sit at this
     # spot and emit the same <style> block twice per run.
+    st.markdown("<div class='sec-hdr'>Appearance</div>", unsafe_allow_html=True)
     theme_choice = st.selectbox(
         "Color theme",
         options=list(THEMES.keys()),
