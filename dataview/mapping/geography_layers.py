@@ -1825,4 +1825,81 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                 });
             }"""),
     ).add_to(m)
+
+    # ── ZOOM IN FAR ENOUGH AND THE GRID GETS OUT OF THE WAY ─────────────
+    # "Could I turn off the townships by zooming in, rather than scrolling
+    # up and switching off the pill." Yes -- and it has to be done in the
+    # browser, because Python never learns the zoom. That is the same
+    # constraint that shaped the box tool and the ⛶ control; here it costs
+    # nothing, since hiding a layer is a browser job anyway.
+    #
+    # REMOVED, NOT FADED. A township at zoom 13 is bigger than the screen,
+    # so a faint one is just a stray line across the map -- and while it is
+    # still on the map it keeps taking the clicks that should reach the
+    # leases underneath. Removing the layer hands the clicks back.
+    #
+    # AND IT ONLY RE-ADDS WHAT IT REMOVED. If you switch the layer off
+    # yourself in the layer control, zooming out must not switch it back on:
+    # autoHidden records that the hiding was ours to undo.
+    from branca.element import MacroElement as _ME, Template as _TPL
+    _zoom_hide = _ME()
+    _zoom_hide._name = "dv_twp_zoom_hide"
+    _zoom_hide._template = _TPL(u"""
+        {% macro script(this, kwargs) %}
+        (function () {
+            var HIDE_AT = 13;
+            function findMap() {
+                var el = document.querySelector('.leaflet-container');
+                if (!el) { return null; }
+                for (var k in window) {
+                    try {
+                        var v = window[k];
+                        if (v && v._container === el &&
+                                typeof v.on === 'function') { return v; }
+                    } catch (e) { /* unreadable key */ }
+                }
+                return null;
+            }
+            function findGroup(mp) {
+                var found = null;
+                mp.eachLayer(function (g) {
+                    if (found || !g.eachLayer) { return; }
+                    try {
+                        g.eachLayer(function (c) {
+                            if (found) { return; }
+                            var p = c.feature && c.feature.properties;
+                            if (p && p.pid !== undefined) { found = g; }
+                        });
+                    } catch (e) { /* not it */ }
+                });
+                return found;
+            }
+            function install() {
+                if (typeof L === 'undefined') {
+                    setTimeout(install, 200); return;
+                }
+                var mp = findMap();
+                if (!mp) { setTimeout(install, 200); return; }
+                if (mp.__dv_twp_zoom_bound) { return; }
+                var grp = findGroup(mp);
+                if (!grp) { setTimeout(install, 300); return; }
+                mp.__dv_twp_zoom_bound = true;
+                var autoHidden = false;
+                function apply() {
+                    var z = mp.getZoom();
+                    if (z >= HIDE_AT && mp.hasLayer(grp)) {
+                        mp.removeLayer(grp); autoHidden = true;
+                    } else if (z < HIDE_AT && autoHidden && !mp.hasLayer(grp)) {
+                        mp.addLayer(grp); autoHidden = false;
+                    }
+                }
+                mp.on('zoomend', apply);
+                apply();
+            }
+            install();
+        })();
+        {% endmacro %}
+    """)
+    _zoom_hide._parent = m
+    m.add_child(_zoom_hide)
     return len(feats), leased
