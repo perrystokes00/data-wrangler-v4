@@ -9339,6 +9339,64 @@ def _render_saved_places(engine):
             st.warning(_emsg)
 
 
+def _lease_ids_near(engine, towns, roads, miles_city, miles_hwy):
+    """Lease numbers within N miles of the NAMED towns/routes, or None.
+
+    "Within 5 miles of Casper" is not "nearest town is Casper" -- a lease four
+    miles from Glenrock and four and a half from Casper answers yes to the
+    first and no to the second, and the stamped dist_city_km can only answer
+    the second. So this asks the precomputed pair tables, which hold the
+    distance from every tract to every town within 50 miles and to all 16
+    routes.
+
+    PRECOMPUTED, BECAUSE THE OBVIOUS QUERY DOES NOT RETURN. STDistance inside
+    a correlated EXISTS gets no help from the spatial index: measured at 626
+    seconds without an answer, against 0.08-0.9s here.
+
+    Returns lease_number strings -- unique across all 24,178 features and
+    already in the served GeoJSON, so the browser filters on them without the
+    file being rebuilt. None means "no named filter", which is different from
+    an empty list ("named filter, nothing matched") and must stay different:
+    the first draws everything, the second draws nothing.
+    """
+    from sqlalchemy import text as _t
+    _km = 1.609344
+    _clauses, _params = [], {}
+    if towns and miles_city:
+        _clauses.append(
+            "EXISTS (SELECT 1 FROM dataview.dv_tract_place_dist d "
+            "WHERE d.tract_id = g.tract_id AND d.dist_km <= :mc AND "
+            "d.place_name IN (%s))"
+            % ",".join(":pn%d" % i for i in range(len(towns))))
+        _params.update({"pn%d" % i: v for i, v in enumerate(towns)})
+        _params["mc"] = float(miles_city) * _km
+    if roads and miles_hwy:
+        _clauses.append(
+            "EXISTS (SELECT 1 FROM dataview.dv_tract_road_dist d "
+            "WHERE d.tract_id = g.tract_id AND d.dist_km <= :mh AND "
+            "d.road_name IN (%s))"
+            % ",".join(":rn%d" % i for i in range(len(roads))))
+        _params.update({"rn%d" % i: v for i, v in enumerate(roads)})
+        _params["mh"] = float(miles_hwy) * _km
+    if not _clauses:
+        return None
+    try:
+        with engine.connect() as _c:
+            return [r[0] for r in _c.execute(_t("""
+                SELECT DISTINCT r.lease_number
+                  FROM dataview.dv_land_right r
+                  JOIN dataview.dv_land_right_tract x
+                    ON x.land_right_id = r.land_right_id
+                  JOIN dataview.dv_land_tract_geom g
+                    ON g.tract_id = x.tract_id
+                 WHERE r.lease_number IS NOT NULL AND """
+                + " AND ".join(_clauses)), _params)]
+    except Exception:
+        # A failure here must not silently widen the map to everything, so
+        # it returns "nothing matched" rather than "no filter".
+        return []
+
+
 def _ensure_lease_geojson(engine, say=None):
     """Make static/dv_leases.geojson current, and say where it is.
 
@@ -13509,7 +13567,9 @@ def run(engine=None):
                 state=list(st.session_state.get("lv_state") or []),
                 county=list(st.session_state.get("lv_county") or []),
                 miles_city=float(st.session_state.get("lv_micity") or 0),
-                miles_hwy=float(st.session_state.get("lv_mihwy") or 0))
+                miles_hwy=float(st.session_state.get("lv_mihwy") or 0),
+                towns=list(st.session_state.get("lv_towns") or []),
+                roads=list(st.session_state.get("lv_roads") or []))
             # The slider reports a SPAN; only a real narrowing is a filter.
             _wel = st.session_state.get("lv_elev")
             if isinstance(_wel, (tuple, list)) and len(_wel) == 2:
@@ -13586,7 +13646,20 @@ def run(engine=None):
                                     by=_by, show=True,
                                     legend=(_lgd.get(_by) if _lg_on else None),
                                     clip=_clip_bounds_now(),
-                                    filt=_lv2)
+                                    filt=dict(
+                                        _lv2,
+                                        # ONE QUERY ANSWERS BOTH the panel's
+                                        # count and the map's filter. ~0.1s
+                                        # against the precomputed pair
+                                        # tables; the version that asked
+                                        # STDistance directly ran 626s and
+                                        # had to be killed.
+                                        ids=_lease_ids_near(
+                                            engine,
+                                            _lv2.get("towns"),
+                                            _lv2.get("roads"),
+                                            _lv2.get("miles_city"),
+                                            _lv2.get("miles_hwy"))))
                                 _drew = _ln
                                 # SAY WHEN A FILTER IS HIDING SOME. _drew is
                                 # what the FILE holds, not what is visible,
@@ -13989,6 +14062,26 @@ def run(engine=None):
         # unticked layer costs one line of JavaScript and fetches nothing.
         # No chip, no Python state -- the map's own layer control is where a
         # reader looks for an overlay, and this is one.
+        # ── THE HIGHWAYS THE DISTANCE FILTER MEASURED TO ────────────────
+        # Off by default and only offered when the file exists, so a machine
+        # without the TIGER build simply has one fewer overlay rather than a
+        # broken one. Built by tools/build_road_geojson.py.
+        try:
+            from dataview.mapping.geography_layers import (
+                add_highway_layer, HIGHWAY_GEOJSON_NAME)
+            _hdir = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__)))), "static")
+            _hpath = os.path.join(_hdir, HIGHWAY_GEOJSON_NAME)
+            if os.path.exists(_hpath):
+                add_highway_layer(m, _hpath,
+                                  "/app/static/" + HIGHWAY_GEOJSON_NAME,
+                                  show=False)
+            else:
+                _say("[map] highways layer skipped: %s not built "
+                     "(tools/build_road_geojson.py --apply)" % _hpath)
+        except Exception as _he:
+            _say("[map] highways overlay unavailable: %s" % str(_he)[:140])
+
         try:
             from dataview.mapping.geography_layers import add_wetlands_layer
             add_wetlands_layer(m, show=False)
@@ -17022,6 +17115,21 @@ def render_lease_view(engine, compact=False, default_mode=None):
                 "WHERE lease_status IS NOT NULL ORDER BY lease_status"))]
             # WHAT IS ACTUALLY LOADED, not every US state: offering all 52
             # would be 51 choices that match nothing.
+            # NAMED TOWNS AND ROUTES, from the geometry tables. Only what
+            # is actually loaded is offered -- a dropdown of 3,214 US
+            # counties' worth of towns would be 3,000 choices matching
+            # nothing.
+            try:
+                _towns = [r[0] for r in _c.execute(_lt(
+                    "SELECT place_name FROM dataview.dv_place_geom "
+                    "ORDER BY place_name"))]
+                _routes = [r[0] for r in _c.execute(_lt(
+                    "SELECT road_name FROM dataview.dv_road_geom "
+                    "ORDER BY road_name"))]
+            except Exception:
+                # The geometry tables are optional: without them the panel
+                # keeps the nearest-based filters and simply offers no names.
+                _towns, _routes = [], []
             _elev_range = _c.execute(_lt(
                 "SELECT MIN(elevation_ft), MAX(elevation_ft) "
                 "FROM dataview.dv_land_tract_geom "
@@ -17143,6 +17251,24 @@ def render_lease_view(engine, compact=False, default_mode=None):
             _elmin = _e1
         if _e2 < _el_hi:
             _elmax = _e2
+    # ── A NAMED PLACE CHANGES WHAT THE MILES MEAN ───────────────────────
+    # Empty, the mileage measures to the NEAREST town (the stamped column).
+    # Name one and it measures to THAT town, which is a different question
+    # and usually the one being asked: a lease four miles from Glenrock and
+    # four and a half from Casper is within five miles of Casper, and the
+    # nearest-based filter says otherwise.
+    _twnsel = st.multiselect("Near which town(s)", _towns,
+                             default=[x for x in _cur.get("towns") or []
+                                      if x in _towns],
+                             key="lv_towns",
+                             help="Leave empty to measure to whichever town "
+                                  "is nearest.")
+    _rdsel = st.multiselect("Near which highway(s)", _routes,
+                            default=[x for x in _cur.get("roads") or []
+                                     if x in _routes],
+                            key="lv_roads",
+                            help="Interstates and US highways. Leave empty "
+                                 "to measure to whichever is nearest.")
     _mi_city = st.number_input("Within miles of a town", min_value=0.0,
                                step=1.0, format="%.0f",
                                value=float(_cur.get("miles_city") or 0),
@@ -17195,10 +17321,29 @@ def render_lease_view(engine, compact=False, default_mode=None):
     # MILES -> KM HERE TOO, with the same constant the browser uses. Two
     # conversions that disagree would put the count and the map back into
     # the argument the 640-acre section already settled once.
-    if _mi_city:
+    # NAMED -> the precomputed pair table (distance to THAT town/route).
+    # UNNAMED -> the stamped nearest-anything column. Same control, two
+    # questions, and the help text says which is being asked.
+    if _mi_city and _twnsel:
+        _where.append(
+            "EXISTS (SELECT 1 FROM dataview.dv_tract_place_dist d "
+            "WHERE d.tract_id = g.tract_id AND d.dist_km <= :dcity AND "
+            "d.place_name IN (%s))"
+            % ",".join(":pn%d" % i for i in range(len(_twnsel))))
+        _params.update({"pn%d" % i: v for i, v in enumerate(_twnsel)})
+        _params["dcity"] = float(_mi_city) * 1.609344
+    elif _mi_city:
         _where.append("g.dist_city_km <= :dcity")
         _params["dcity"] = float(_mi_city) * 1.609344
-    if _mi_hwy:
+    if _mi_hwy and _rdsel:
+        _where.append(
+            "EXISTS (SELECT 1 FROM dataview.dv_tract_road_dist d "
+            "WHERE d.tract_id = g.tract_id AND d.dist_km <= :dhwy AND "
+            "d.road_name IN (%s))"
+            % ",".join(":rn%d" % i for i in range(len(_rdsel))))
+        _params.update({"rn%d" % i: v for i, v in enumerate(_rdsel)})
+        _params["dhwy"] = float(_mi_hwy) * 1.609344
+    elif _mi_hwy:
         _where.append("g.dist_hwy_km <= :dhwy")
         _params["dhwy"] = float(_mi_hwy) * 1.609344
     if _op:
@@ -17247,7 +17392,8 @@ def render_lease_view(engine, compact=False, default_mode=None):
               "state": sorted(_stsel), "county": sorted(_cosel),
               "elev_min": _elmin, "elev_max": _elmax,
               "miles_city": float(_mi_city or 0),
-              "miles_hwy": float(_mi_hwy or 0)}
+              "miles_hwy": float(_mi_hwy or 0),
+              "towns": sorted(_twnsel), "roads": sorted(_rdsel)}
 
     # IN THE STRIP THIS BUTTON IS NOT REQUIRED, and says so. The mode and
     # colour are read straight from these widgets by the map build, so a

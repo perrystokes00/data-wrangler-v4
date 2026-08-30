@@ -1542,6 +1542,25 @@ function(feature, layer) {
                 FILT.src.indexOf(p.src) < 0) { hide(); return; }
         if (FILT.lst && FILT.lst.length &&
                 FILT.lst.indexOf(p.lst) < 0) { hide(); return; }
+        // ── THE NAMED-PLACE ANSWER, DECIDED BY SQL ──────────────────
+        // "Within 5 miles of Casper" needs Casper's geometry, which the
+        // browser does not have and should not: the panel's count already
+        // asked that question, so the map filters on the SAME answer rather
+        // than computing a second one that could disagree. ids is a list of
+        // lease_number, unique across all 24,178 features.
+        //
+        // An EMPTY list means "asked, nothing matched" and hides everything;
+        // its ABSENCE means "not asked". Those must stay distinct -- collapse
+        // them and a filter that matches nothing silently draws the lot.
+        if (FILT.ids) {
+            if (!FILT._idset) {
+                FILT._idset = {};
+                for (var ii = 0; ii < FILT.ids.length; ii++) {
+                    FILT._idset[FILT.ids[ii]] = 1;
+                }
+            }
+            if (!FILT._idset[p.ln]) { hide(); return; }
+        }
         if (FILT.st && FILT.st.length &&
                 FILT.st.indexOf(p.st) < 0) { hide(); return; }
         if (FILT.co && FILT.co.length) {
@@ -1724,6 +1743,10 @@ def _filter_literal(filt):
         out["st"] = _st
     if _co:
         out["co"] = _co
+    # PASSED THROUGH VERBATIM, not recomputed. None means the named filter
+    # was not asked; a list (even empty) means it was.
+    if filt.get("ids") is not None:
+        out["ids"] = list(filt.get("ids") or [])
     if _opr:
         out["opr"] = _opr
     if _ac > 0:
@@ -2391,4 +2414,52 @@ def add_wetlands_layer(m, show=False):
         opacity=0.75,
         attr="Wetlands: USFWS National Wetlands Inventory",
     ).add_to(m)
+    return _name
+
+
+
+# ── HIGHWAYS: THE LINES THE DISTANCE FILTER MEASURED TO ────────────────────
+# The basemaps already draw roads, so this is not "show me roads". It is the
+# specific 84 primary routes that tools/stamp_cultural_distance.py measured
+# against -- so "within 5 miles of a highway: 3,286 leases" can be checked by
+# eye instead of taken on trust.
+#
+# SERVED, NOT EMBEDDED, for the reason the leases are: 1.09 MB in the map
+# HTML would be paid on every rerun, and the browser caches a file.
+HIGHWAY_GEOJSON_NAME = "dv_highways.geojson"
+
+
+def add_highway_layer(m, path, url, show=False):
+    """TIGER primary roads as a served overlay. Returns the layer name."""
+    import folium as _f
+    _name = "🛣 Highways (I- and US)"
+    _gj = _f.GeoJson(
+        path, embed=False, show=show, name=_name,
+        style_function=lambda _f_: {
+            # A ROAD IS A LINE, NOT A REGION: no fill, and a casing so it
+            # reads over both the pale topo basemap and the satellite one.
+            "color": "#1f2937", "weight": 4.0, "opacity": 0.35,
+        },
+        on_each_feature=_f.JsCode("""
+            function(feature, layer) {
+                var p = feature.properties || {};
+                // The visible line, drawn over its own casing.
+                layer.setStyle({color: '#1f2937', weight: 4.0, opacity: 0.35});
+                var inner = L.polyline(layer.getLatLngs(), {
+                    color: '#fbbf24', weight: 1.8, opacity: 0.95,
+                    interactive: false
+                });
+                layer.on('add', function () {
+                    if (layer._map) { inner.addTo(layer._map); }
+                });
+                layer.on('remove', function () {
+                    if (inner._map) { inner.remove(); }
+                });
+                if (p.nm) {
+                    layer.bindTooltip(p.nm, {sticky: true});
+                }
+            }"""),
+    )
+    _gj.embed_link = url
+    _gj.add_to(m)
     return _name
