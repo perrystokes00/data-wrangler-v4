@@ -15595,6 +15595,70 @@ def run(engine=None):
             _cell_steps.append(("gom", 0.36))
 
         _coord_click = map_data.get("last_object_clicked") if map_data else None
+
+        # ── A TOWNSHIP CLICK EXPANDS INTO ITS LEASES ────────────────────
+        # BY COORDINATE, NOT BY POPUP. The first version parsed the PLSS id
+        # out of last_object_clicked_popup, which never arrives for a
+        # GeoJSON POLYGON -- only the click's lat/lng does. Measured: three
+        # township clicks in a row produced a rerun and no popup text at all,
+        # so the handler could not even log that it had been reached. Leases
+        # behave the same way, which is why their popups are opened by
+        # Leaflet in the browser and never round-trip.
+        #
+        # So this asks the question the click actually carries: which
+        # township contains this point? dv_plss_township stores each box, so
+        # it is a BETWEEN on the centroid columns -- indexed, and the same
+        # shape as the H3 cell handler that has always worked.
+        #
+        # NO NEW DRILL: it sets _clip_box, exactly as drawing a rectangle
+        # round the township would, and every layer clips the way it already
+        # knows how.
+        if (_coord_click and "geo_townships" in active_db
+                and not st.session_state.get("_twp_click_busy")):
+            try:
+                _cla = float(_coord_click.get("lat"))
+                _clo = float(_coord_click.get("lng"))
+                _sig = "%.5f|%.5f" % (_cla, _clo)
+                if st.session_state.get("_twp_drill_for") != _sig:
+                    from sqlalchemy import text as _t4
+                    with engine.connect() as _c4:
+                        _tw = _c4.execute(_t4("""
+                            SELECT TOP 1 plss_id, township_label, bbox_wkt
+                              FROM dataview.dv_plss_township
+                             WHERE bbox_wkt IS NOT NULL
+                               AND :la BETWEEN centroid_latitude  - 0.06
+                                           AND centroid_latitude  + 0.06
+                               AND :lo BETWEEN centroid_longitude - 0.09
+                                           AND centroid_longitude + 0.09
+                             ORDER BY ABS(centroid_latitude - :la)
+                                    + ABS(centroid_longitude - :lo)"""),
+                            {"la": _cla, "lo": _clo}).first()
+                    st.session_state["_twp_drill_for"] = _sig
+                    if _tw:
+                        import re as _re4
+                        _nn4 = [float(x) for x in
+                                _re4.findall(r"-?\d+\.?\d*", _tw[2])]
+                        _xs4, _ys4 = _nn4[0::2], _nn4[1::2]
+                        st.session_state["_clip_box"] = [
+                            [min(_ys4), min(_xs4)], [max(_ys4), max(_xs4)]]
+                        st.session_state["_drawn_bounds"] = \
+                            st.session_state["_clip_box"]
+                        st.session_state["_drawn_bounds_oneshot"] = True
+                        if not st.session_state.get("wm_clip_to_box"):
+                            st.session_state["_clip_request"] = True
+                        _say("[map] township %s (%s) -> clip %s"
+                             % (_tw[0], _tw[1],
+                                st.session_state["_clip_box"]))
+                        st.success(
+                            "▦ **%s** — clipped to this township. Every "
+                            "layer now shows only what is inside it; "
+                            "✗ Clear box lets go." % (_tw[1] or _tw[0]))
+                        st.rerun()
+                    else:
+                        _say("[map] township click at %.4f,%.4f matched no "
+                             "township" % (_cla, _clo))
+            except Exception as _texc4:
+                _say("[map] township drill failed: %s" % _texc4)
         # If the same click also returned popup content, it was a well marker
         # click (markers have popups, cells don't). Skip the cell-click path
         # in that case — otherwise floor-dividing the marker's coords would
@@ -15910,12 +15974,22 @@ def run(engine=None):
             # _clip_box to it is exactly what drawing a rectangle round the
             # township would do, so every layer clips the way it already
             # knows how. Reusing the box is the whole reason this is small.
-            elif "PLSS id" in _clicked_str:
-                _pid = None
-                for _ln2 in _clicked_str.splitlines():
-                    if "PLSS id" in _ln2:
-                        _pid = _ln2.split("PLSS id")[-1].strip(" \t:")
-                        break
+            elif False:   # see the coordinate handler below
+                # A REGEX, NOT splitlines(). streamlit-folium strips the
+                # popup to VISIBLE TEXT, so the table collapses onto ONE
+                # line -- splitting on "PLSS id" then carried the rest of the
+                # popup with it: "WY060400N0770W0 Leases 17 Leased acres
+                # 16,439". That matches no township, the lookup returned
+                # nothing, and the click did NOTHING AT ALL with no line in
+                # the log to say why. The id has a shape; match the shape.
+                import re as _re3
+                _m3 = _re3.search(
+                    r"PLSS id[:\s]*([A-Za-z]{2}[A-Za-z0-9]{6,20})",
+                    _clicked_str)
+                _pid = _m3.group(1) if _m3 else None
+                if not _pid:
+                    _say("[map] township click: no id parsed from %r"
+                         % _clicked_str[:120])
                 if _pid and st.session_state.get("_twp_drill_for") != _pid:
                     st.session_state["_twp_drill_for"] = _pid
                     try:
@@ -15952,6 +16026,12 @@ def run(engine=None):
                                 "is inside it; ✗ Clear box lets go."
                                 % (_bw[1] or _pid))
                             st.rerun()
+                        else:
+                            # SAY SO. The first version returned quietly when
+                            # the lookup missed, which is how a broken parse
+                            # looked exactly like a click that never happened.
+                            _say("[map] township %r not in dv_plss_township "
+                                 "-- no clip" % _pid)
                     except Exception as _texc2:
                         _say("[map] township drill failed: %s" % _texc2)
                 clicked = None
