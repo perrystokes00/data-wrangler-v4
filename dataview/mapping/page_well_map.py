@@ -13966,7 +13966,18 @@ def run(engine=None):
         # rest") was the widest thing on screen. Leaflet expands it on hover,
         # so nothing is hidden, and the names are short now because the
         # explanation belongs in the status line, not in a legend entry.
-        folium.LayerControl(collapsed=True).add_to(m)
+        # ── HANDED TO st_folium, NOT ADDED HERE ─────────────────────────
+        # folium's LayerControl emits `let layer_control_div_5 = ...`, and
+        # the whole folium block is injected into the component TWICE -- so
+        # that `let` is redeclared, which is a SyntaxError, which kills the
+        # entire script tag at parse time. Everything riding in that block
+        # dies with it, including the map's saved view.
+        #
+        # st_folium takes the control as a parameter and adds it on its own
+        # terms, so our copy is not in the duplicated text. This does not fix
+        # the duplication -- that lives in streamlit_folium and is recorded
+        # separately -- it removes the one construct in it that is fatal.
+        _layer_control = folium.LayerControl(collapsed=True)
 
         # ── WETLANDS, AFTER THE CONTROL EXISTS ──────────────────────────
         # It registers itself through the control rather than as a folium
@@ -14224,24 +14235,28 @@ def run(engine=None):
         _reset_saved_view = bool(st.session_state.pop("_reset_saved_view", False))
         view_persist = MacroElement()
         view_persist._name = "dv_view_persist"
-        # ── ITS OWN <script> TAG, NOT FOLIUM'S SHARED ONE ───────────────
-        # m.add_child() emits the `script` macro INTO folium's main script
-        # block -- the same block that carries the layer control. That block
-        # is currently emitted TWICE into the component iframe, so it
-        # contains "let layer_control_div_5" twice, which is a SyntaxError.
-        # A SyntaxError is a PARSE failure: nothing in that tag runs, so this
-        # persistence never installed at all. Measured in the browser --
-        # __dv_view_persist_bound false while the source was plainly present,
-        # and the console showing the redeclaration.
+        # ── A `script` MACRO, AND IT HAS TO BE ─────────────────────────
+        # This was briefly moved to an `html` macro on the figure root, to
+        # escape a SyntaxError in folium's shared block. It made things
+        # strictly worse and the counter proved it: window.__dv_vp_ran read
+        # 0, meaning the tag never executed AT ALL.
         #
-        # An `html` macro on the figure ROOT gets a tag of its own, which is
-        # the pattern the legend blocks in this file already use and the one
-        # dv_seis_picker's comment recommends. Somebody else's parse error
-        # can no longer take the map's view with it.
+        # A <script> that arrives inside injected HTML DOES NOT RUN. That is
+        # a DOM rule, not a folium quirk -- innerHTML never executes scripts.
+        # st_folium extracts folium's JS and runs it deliberately; anything
+        # riding in as markup is inert. So a `script` macro is the only way
+        # in, and the SyntaxError has to be fixed at its source instead --
+        # see the layer control below.
         view_persist._template = Template(u"""
-            {% macro html(this, kwargs) %}
-            <script>
+            {% macro script(this, kwargs) %}
             (function() {
+                // DID THIS TAG EVEN RUN? A counter on window, because the
+                // alternative is inferring it from a feature that has three
+                // other reasons to look broken. Cheap, harmless, and it
+                // distinguishes "never executed" from "executed and failed".
+                try {
+                    window.__dv_vp_ran = (window.__dv_vp_ran || 0) + 1;
+                } catch (e) {}
                 var SKIP_FLAG  = """ + ("true" if _has_active_fit else "false") + u""";
                 var RESET_FLAG = """ + ("true" if _reset_saved_view else "false") + u""";
                 var STORAGE_KEY = 'dv_map_view';
@@ -14410,14 +14425,11 @@ def run(engine=None):
                 }
                 install();
             })();
-            </script>
             {% endmacro %}
         """)
         _mark("build: view_persist JS")
         view_persist._parent = m
-        # ROOT, not the map: an html macro added to the map is silently
-        # dropped -- the trap dv_seis_picker's comment records.
-        m.get_root().add_child(view_persist)
+        m.add_child(view_persist)
 
         # -- Click-to-centre: walk the map without dragging -----------------
         # A REAL LEAFLET CONTROL, not a floating div. Every corner of this map
@@ -15455,6 +15467,7 @@ def run(engine=None):
                     map_data = st_folium(
                         m, height=500, use_container_width=True,
                         returned_objects=_ret,
+                        layer_control=_layer_control,
                         key=_map_widget_key,
                     )
                 except TypeError:
