@@ -1683,6 +1683,64 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                     if (!mp) { return; }
                     var b = layer.getBounds();
                     try { L.DomEvent.stopPropagation(ev); } catch (e) {}
+
+                    // ── THE EXPLODE, ENTIRELY IN THE BROWSER ────────────
+                    // Python cannot hear this click. Three channels were
+                    // tried and each was ruled out with evidence: a polygon
+                    // reports no popup text, last_object_clicked never
+                    // changes, and firing draw:created makes st_folium's own
+                    // onDraw throw on sourceTarget.getPopup.
+                    //
+                    // None of that matters, because THE BROWSER ALREADY HAS
+                    // EVERY LEASE. The served file carries all 24,178
+                    // polygons with their geometry -- it was downloaded to
+                    // draw them. Expanding a township is therefore a
+                    // question about data already in this page: zoom to it,
+                    // and let its leases stand out from the rest.
+                    //
+                    // No rerun, no re-download, no 27 MB round trip, and it
+                    // works whether or not Freeze is on -- because nothing
+                    // leaves the browser at all.
+                    mp.fitBounds(b, {padding: [12, 12], animate: true});
+                    window.DV_TWP_FOCUS = b;
+                    var inside = 0;
+                    mp.eachLayer(function (grp) {
+                        if (!grp || !grp.eachLayer) { return; }
+                        try {
+                            grp.eachLayer(function (c) {
+                                var p = c.feature && c.feature.properties;
+                                if (!p || p.ln === undefined) { return; }
+                                var cb = c.getBounds && c.getBounds();
+                                if (!cb) { return; }
+                                var hit = b.contains(cb.getCenter());
+                                if (hit) { inside++; }
+                                // The leases outside do not vanish -- they
+                                // fade. A township with nothing around it
+                                // looks the same as a broken filter, and
+                                // context is what makes the zoom readable.
+                                c.setStyle({
+                                    opacity:     hit ? 1.0  : 0.10,
+                                    fillOpacity: hit ? 0.62 : 0.04,
+                                    weight:      hit ? 1.4  : 0.4
+                                });
+                                if (hit && c.bringToFront) { c.bringToFront(); }
+                            });
+                        } catch (e) { /* not a lease group */ }
+                    });
+                    // Say what happened, on the map, where the click was.
+                    try {
+                        L.popup({closeButton: true, autoPan: false})
+                         .setLatLng(b.getCenter())
+                         .setContent(
+                            '<div style="font:600 13px system-ui">' + p.lab +
+                            '</div><div style="font:12px system-ui">' +
+                            p.n + ' lease(s) &middot; ' +
+                            p.ac.toLocaleString() + ' ac leased</div>' +
+                            '<div style="font:11px system-ui;color:#64748b;' +
+                            'margin-top:4px">' + inside +
+                            ' drawn here &middot; zoom out to reset</div>')
+                         .openOn(mp);
+                    } catch (e) {}
                     // OUT OF THE CLICK'S CALL STACK, and this is the whole
                     // reason it did not work. Fired inline, streamlit-folium's
                     // onDraw runs while the click event is still live, reads
@@ -1696,6 +1754,35 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                     // setTimeout lets the click finish first; onDraw then
                     // sees an ordinary programmatic draw, exactly like the
                     // ⛶ control's, which has always worked.
+                    // ZOOMING OUT PUTS EVERYTHING BACK. A focus you cannot
+                    // leave is a trap, and the gesture people already use to
+                    // mean "show me more" is the zoom -- so that is the
+                    // gesture that clears it, rather than a button they have
+                    // to find. Bound once per map, not once per township.
+                    if (!mp.__dv_twp_reset_bound) {
+                        mp.__dv_twp_reset_bound = true;
+                        mp.on('zoomend', function () {
+                            if (!window.DV_TWP_FOCUS) { return; }
+                            if (mp.getZoom() > 10) { return; }
+                            window.DV_TWP_FOCUS = null;
+                            mp.eachLayer(function (grp) {
+                                if (!grp || !grp.eachLayer) { return; }
+                                try {
+                                    grp.eachLayer(function (c) {
+                                        var q = c.feature && c.feature.properties;
+                                        if (!q || q.ln === undefined) { return; }
+                                        c.setStyle({opacity: 0.9,
+                                                    fillOpacity: 0.38,
+                                                    weight: 1.0});
+                                    });
+                                } catch (e) {}
+                            });
+                        });
+                    }
+
+                    // The drawing channel is still attempted, so that Python
+                    // ALSO learns the box when st_folium allows it -- but the
+                    // explode above no longer depends on it.
                     setTimeout(function () {
                         var rect = L.rectangle(b);
                         try {
@@ -1703,8 +1790,10 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                                 drawnItems.addLayer(rect);
                             } else { rect.addTo(mp); }
                         } catch (e) { try { rect.addTo(mp); } catch (e2) {} }
-                        mp.fire('draw:created',
-                                {layer: rect, layerType: 'rectangle'});
+                        try {
+                            mp.fire('draw:created',
+                                    {layer: rect, layerType: 'rectangle'});
+                        } catch (e) { /* st_folium's onDraw may throw */ }
                     }, 0);
                 });
             }"""),
