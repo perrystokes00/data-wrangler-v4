@@ -626,8 +626,13 @@ S = st.session_state
 # the dispatch below; assigning it after a widget was drawn from it is
 # Streamlit scar #7, and the crash would land on whatever page drew next.
 try:
-    if str(st.query_params.get("view") or "").lower() == "seis":
+    _v = str(st.query_params.get("view") or "").lower()
+    if _v == "seis":
         S.app_mode = "seis_view"
+    elif _v == "lease":
+        # SAME DOOR AS THE SEISMIC SCREEN. ?view=lease opens the lease panel
+        # alone, so it can live on a second monitor beside the map.
+        S.app_mode = "lease_view"
 except Exception:
     pass
 
@@ -1322,6 +1327,21 @@ elif S.app_mode == "seis_view":
             _pwm.render_seis_view(S.engine)
     except Exception as e:
         st.error(f"Seismic view error: {e}")
+
+# ── LEASE SECOND SCREEN ───────────────────────────────────────────────
+elif S.app_mode == "lease_view":
+    try:
+        from dataview.mapping import page_well_map as _pwm2
+        if S.engine is None:
+            st.info("This window needs its own connection — press "
+                    "**Connect** in the sidebar. A second window is a second "
+                    "session, so it cannot inherit the map's.")
+        else:
+            _pwm2.render_lease_view(S.engine)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        st.error(f"Lease view error: {e}")
 
 # ── WELL MAP ──────────────────────────────────────────────────────────
 elif S.app_mode == "well_map":

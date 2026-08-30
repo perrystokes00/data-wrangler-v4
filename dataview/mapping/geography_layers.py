@@ -1328,8 +1328,20 @@ def write_lease_geojson(engine, out_dir, limit=200000):
     have = _table_columns(engine, "dv_land_tract")
     if not have or "geog" not in have:
         return None, 0, {}
-    _c = lambda n: n if n in have else "NULL"            # noqa: E731
+    # QUALIFIED, because this query joins dv_land_tract_geom and that table
+    # carries geog, area_km2, province_state, source and quality_note under
+    # the same names. Prefixing in the lambda rather than at each call site
+    # means a column added later cannot be the one that forgot.
+    _c = lambda n: ("lt." + n) if n in have else "NULL"  # noqa: E731
     with engine.connect() as con:
+        _has_twp = con.execute(text(
+            "SELECT CASE WHEN OBJECT_ID('dataview.dv_land_tract_geom') "
+            "IS NOT NULL AND COL_LENGTH('dataview.dv_land_tract_geom',"
+            "'plss_id') IS NOT NULL THEN 1 ELSE 0 END")).scalar()
+        _twcol = "tg.plss_id" if _has_twp else "NULL"
+        _twjoin = ("LEFT JOIN dataview.dv_land_tract_geom tg "
+                   "ON tg.tract_id = lt.land_tract_id"
+                   if _has_twp else "")
         rows = con.execute(text(f"""
             SELECT TOP {int(limit)}
                    {_c('tract_name')}     AS nm,
@@ -1343,9 +1355,18 @@ def write_lease_geojson(engine, out_dir, limit=200000):
                    {_c('province_state')} AS st,
                    {_c('source')}         AS src,
                    {_c('quality_note')}   AS qly,
-                   geog.STAsText()        AS wkt
-              FROM dataview.dv_land_tract
-             WHERE geog IS NOT NULL AND ISNULL(active_ind, 'Y') = 'Y'
+                   -- THE TOWNSHIP THE TRACT WAS STAMPED WITH, so a township
+                   -- click can select on the same fact its tooltip counted.
+                   -- LEFT JOIN and a guard: dv_land_tract is a VIEW and does
+                   -- not expose plss_id, and COL_LENGTH alone returns NULL
+                   -- for a missing TABLE and a missing COLUMN alike -- so it
+                   -- is paired with OBJECT_ID, or the guard skips silently.
+                   {_twcol}               AS twp,
+                   lt.geog.STAsText()     AS wkt
+              FROM dataview.dv_land_tract lt
+              {_twjoin}
+             WHERE lt.geog IS NOT NULL
+               AND ISNULL(lt.active_ind, 'Y') = 'Y'
         """)).fetchall()
 
     DIMS = ("owner", "producing", "status", "vintage", "size")
@@ -1371,6 +1392,7 @@ def write_lease_geojson(engine, out_dir, limit=200000):
             "src": _t(r.src), "qly": _t(r.qly),
             "ac": ("%s ac" % format(int(float(r.km2) * 247.105), ",")
                    if r.km2 is not None else ""),
+            "_tw": _t(r.twp),
             "km": ("%.2f km2" % float(r.km2) if r.km2 is not None else ""),
         }
         for k, v in lab.items():
@@ -1554,7 +1576,8 @@ def _twp_bounds(wkt):
     return (min(ys), min(xs), max(ys), max(xs))
 
 
-def add_township_layer(m, engine, show=True, state="WY", bounds=None):
+def add_township_layer(m, engine, show=True, state="WY", bounds=None,
+                       lease_url=None, lease_by="producing"):
     """PLSS townships shaded by leased acreage. (drawn, leased_townships).
 
     ONE QUERY, AGGREGATED IN SQL. Pulling 24,178 leases to count them in
@@ -1574,6 +1597,11 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
         except Exception:
             pass
     clause = " AND ".join(where)
+    # LOCAL, and named so: this module has no module-level `json`, and a bare
+    # name that resolves only when the line runs is the failure CLAUDE.md
+    # opens its list with.
+    import json as _json
+    _lkey = lease_by if lease_by in LEASE_COLOUR_BY else "producing"
     try:
         with engine.connect() as con:
             rows = con.execute(text(f"""
@@ -1647,7 +1675,7 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
         show=show,
         # STYLED IN THE BROWSER for the same reason the leases are: one
         # template instead of a style block per feature.
-        on_each_feature=_f.JsCode("""
+        on_each_feature=_f.JsCode(("""
             function(feature, layer) {
                 var p = feature.properties;
                 var c = p._c;
@@ -1707,6 +1735,11 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                 layer.on('click', function(ev) {
                     var mp = layer._map;
                     if (!mp) { return; }
+                    // DECLARED IN THE CLICK, not in on_each_feature: that
+                    // runs once per township and would build 2,888 copies of
+                    // the same function for a handler most never fire.
+                    var LEASE_URL = __LEASE_URL__;
+                    var LEASE_ONEACH = __LEASE_ONEACH__;
                     var b = layer.getBounds();
                     try { L.DomEvent.stopPropagation(ev); } catch (e) {}
 
@@ -1754,19 +1787,115 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                         } catch (e) { /* not a lease group */ }
                     });
                     // Say what happened, on the map, where the click was.
-                    try {
-                        L.popup({closeButton: true, autoPan: false})
-                         .setLatLng(b.getCenter())
-                         .setContent(
-                            '<div style="font:600 13px system-ui">' + p.lab +
-                            '</div><div style="font:12px system-ui">' +
-                            p.n + ' lease(s) &middot; ' +
-                            p.ac.toLocaleString() + ' ac leased</div>' +
-                            '<div style="font:11px system-ui;color:#64748b;' +
-                            'margin-top:4px">' + inside +
-                            ' drawn here &middot; zoom out to reset</div>')
-                         .openOn(mp);
-                    } catch (e) {}
+                    // ONE POPUP THAT CAN BE REWRITTEN, because the load below
+                    // is asynchronous: the click has to answer immediately
+                    // ("loading...") and then again with the result. A second
+                    // popup would leave the first one standing and stale.
+                    var pop = null;
+                    function say(extra) {
+                        try {
+                            var html =
+                                '<div style="font:600 13px system-ui">' + p.lab +
+                                '</div><div style="font:12px system-ui">' +
+                                p.n + ' lease(s) &middot; ' +
+                                p.ac.toLocaleString() + ' ac leased</div>' +
+                                '<div style="font:11px system-ui;color:#64748b;' +
+                                'margin-top:4px">' + extra + '</div>';
+                            if (pop) { pop.setContent(html); }
+                            else {
+                                pop = L.popup({closeButton: true,
+                                               autoPan: false})
+                                       .setLatLng(b.getCenter())
+                                       .setContent(html).openOn(mp);
+                            }
+                        } catch (e) {}
+                    }
+                    say(inside + ' drawn here &middot; zoom out to reset');
+
+                    // ── NOTHING TO EXPAND? FETCH THE LEASES ──────────────
+                    // The grid can be drawn with the lease layer off -- the
+                    // second screen's "townships" mode does exactly that --
+                    // and then this click had nothing to highlight. It zoomed
+                    // to an empty rectangle and reported "0 drawn here",
+                    // which reads as a broken feature rather than as "you did
+                    // not ask for leases".
+                    //
+                    // Fetching here keeps the bargain the rest of this
+                    // handler keeps: NOTHING REACHES PYTHON, so no rerun
+                    // rebuilds the map and wipes the highlight the click just
+                    // made -- the failure that killed the first version of
+                    // this feature. It is the same file the lease layer
+                    // serves, so it is usually already in the browser cache,
+                    // and it is fetched at most once per page.
+                    if (inside === 0 && LEASE_URL) {
+                        say('loading leases for this township...');
+                        var got = window.__dv_lease_gj
+                            ? Promise.resolve(window.__dv_lease_gj)
+                            : fetch(LEASE_URL).then(function (r) {
+                                  if (!r.ok) {
+                                      throw new Error('HTTP ' + r.status);
+                                  }
+                                  return r.json();
+                              }).then(function (gj) {
+                                  window.__dv_lease_gj = gj;
+                                  return gj;
+                              });
+                        got.then(function (gj) {
+                            // The previous expansion goes when the next one
+                            // arrives. Two townships' worth of leases on the
+                            // map at once is the smear this layer exists to
+                            // avoid.
+                            if (mp.__dv_twp_leases) {
+                                try { mp.removeLayer(mp.__dv_twp_leases); }
+                                catch (e) {}
+                                mp.__dv_twp_leases = null;
+                            }
+                            // THE STAMP, NOT A SECOND GEOMETRY RULE.
+                            // The tooltip's count comes from the stamped
+                            // plss_id; filtering here by "centre inside the
+                            // box" is a DIFFERENT rule that nearly agrees --
+                            // 28N 113W read 69 in the tooltip and 70 here,
+                            // because a centre in the overlap of two adjacent
+                            // township boxes is stamped once but matches both.
+                            // Two numbers for one fact, and whichever the
+                            // reader trusted less would look like the bug.
+                            //
+                            // Centre-in-box remains the FALLBACK, for a file
+                            // written before the stamp was carried -- near
+                            // enough to be useful, and it says so below.
+                            var byStamp = (gj.features || []).length > 0 &&
+                                (gj.features[0].properties || {})._tw !== undefined;
+                            var picked = (gj.features || []).filter(
+                                function (f) {
+                                    var q = f.properties || {};
+                                    if (byStamp) { return q._tw === p.pid; }
+                                    if (q._la === undefined ||
+                                        q._lo === undefined) { return false; }
+                                    return b.contains(L.latLng(q._la, q._lo));
+                                });
+                            if (!picked.length) {
+                                say('no leases fall in this township');
+                                return;
+                            }
+                            var lyr = L.geoJSON(
+                                {type: 'FeatureCollection', features: picked},
+                                {style: function (f) {
+                                     return (f.properties &&
+                                             f.properties.style) || {};
+                                 },
+                                 onEachFeature: LEASE_ONEACH});
+                            lyr.addTo(mp);
+                            mp.__dv_twp_leases = lyr;
+                            say(picked.length + ' lease(s) drawn' +
+                                (byStamp ? '' : ' (approx)') +
+                                ' &middot; zoom out to reset');
+                        }).catch(function (e) {
+                            // SAID, NOT SWALLOWED: a silent failure here is
+                            // indistinguishable from a township that simply
+                            // holds no leases.
+                            say('could not load leases: ' + e);
+                        });
+                    }
                     // OUT OF THE CLICK'S CALL STACK, and this is the whole
                     // reason it did not work. Fired inline, streamlit-folium's
                     // onDraw runs while the click event is still live, reads
@@ -1791,6 +1920,15 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                             if (!window.DV_TWP_FOCUS) { return; }
                             if (mp.getZoom() > 10) { return; }
                             window.DV_TWP_FOCUS = null;
+                            // The zoom-out means "show me more", so the
+                            // fetched expansion goes with the highlight --
+                            // otherwise one township's leases stay drawn
+                            // across a state-wide view.
+                            if (mp.__dv_twp_leases) {
+                                try { mp.removeLayer(mp.__dv_twp_leases); }
+                                catch (e) {}
+                                mp.__dv_twp_leases = null;
+                            }
                             mp.eachLayer(function (grp) {
                                 if (!grp || !grp.eachLayer) { return; }
                                 try {
@@ -1823,7 +1961,16 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                     // clipping server-side is what ⛶ Use current view and the
                     // box tool are for.
                 });
-            }"""),
+            }""")
+        # THE LEASE STYLING IS NOT COPIED, IT IS THE SAME TEMPLATE. An
+        # on-demand lease has to look and behave exactly like a drawn one --
+        # same colours, same tooltip, same popup -- and a second style block
+        # here would be one more list that must agree with another.
+        .replace("__LEASE_URL__",
+                 _json.dumps(lease_url) if lease_url else "null")
+        .replace("__LEASE_ONEACH__",
+                 _LEASE_ON_EACH.replace("__BY__", _lkey)
+                               .replace("__CLIP__", "null"))),
     ).add_to(m)
 
     # ── ZOOM IN FAR ENOUGH AND THE GRID GETS OUT OF THE WAY ─────────────

@@ -9253,6 +9253,85 @@ def _render_saved_places(engine):
             st.warning(_emsg)
 
 
+def _ensure_lease_geojson(engine, say=None):
+    """Make static/dv_leases.geojson current, and say where it is.
+
+    ONE PLACE DECIDES WHETHER THAT FILE IS FRESH, because two paths now
+    need it: the lease layer draws it, and a township click loads it on
+    demand when the lease layer is switched off. A freshness rule written
+    twice is the "lists that must agree" failure this file already pays for
+    in four places -- and the two copies would diverge in the worst possible
+    way, one path rebuilding while the other served a stale 28 MB file.
+
+    THE STAMP LIVES BESIDE THE FILE. session_state does not outlive the
+    session the way the file does, so a new window rebuilt a file already on
+    disk and correct, and an interrupted render lost the stamp after paying
+    for the write -- 24,178 leases, ~2.5 minutes, repeated for nothing.
+
+    Returns (path, url, count, legend). path is None when it could not be
+    built, and the caller falls back to embedding.
+    """
+    from dataview.mapping.geography_layers import (
+        write_lease_geojson, lease_data_signature, LEASE_GEOJSON_NAME)
+
+    def _log(msg):
+        if say:
+            say(msg)
+
+    # THE SIGNATURE ANSWERS "HAS THE DATA MOVED", NOT "WAS THIS FILE
+    # WRITTEN BY THIS CODE". Adding a property to the file changes neither
+    # the row count nor the newest stamp, so an existing geojson would have
+    # been judged current forever and the new property would never appear --
+    # the change would look applied and do nothing. Bump on any change to
+    # what write_lease_geojson PUTS IN the file.
+    _FMT = 2
+    _sdir = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))), "static")
+    _path = os.path.join(_sdir, LEASE_GEOJSON_NAME)
+    _sigpath = _path + ".sig"
+    _url = "/app/static/" + LEASE_GEOJSON_NAME
+    try:
+        _sig = lease_data_signature(engine)
+        _known = st.session_state.get("_lease_gj_sig")
+        if _known is None and os.path.exists(_sigpath):
+            try:
+                with open(_sigpath, encoding="utf-8") as _sf:
+                    _side = json.load(_sf)
+                _known = (_side.get("sig")
+                          if _side.get("fmt") == _FMT else None)
+                st.session_state["_lease_gj_legend"] = _side.get("legend") or {}
+                st.session_state["_lease_gj_n"] = _side.get("n") or 0
+                _log("[map] lease geojson: reusing the file on disk, "
+                     "no rebuild")
+            except Exception as _se:
+                # Not swallowed: an unreadable sidecar must rebuild, and
+                # must say why it is about to spend two minutes.
+                _log("[map] lease sidecar unreadable, rebuilding: %s"
+                     % str(_se)[:120])
+                _known = None
+        if _sig and (_known != _sig or not os.path.exists(_path)):
+            _path, _n, _lgd = write_lease_geojson(engine, _sdir)
+            st.session_state["_lease_gj_legend"] = _lgd
+            st.session_state["_lease_gj_n"] = _n
+            try:
+                with open(_path + ".sig", "w", encoding="utf-8") as _sf:
+                    json.dump({"sig": _sig, "fmt": _FMT, "n": _n,
+                               "legend": _lgd}, _sf)
+            except Exception as _se:
+                _log("[map] lease sidecar not written (next run rebuilds): %s"
+                     % str(_se)[:120])
+            _log("[map] lease geojson rebuilt: %d feature(s)" % _n)
+        # STAMPED ONLY AFTER THE WRITE SUCCEEDED, so a failed build cannot
+        # leave a stamp claiming a file it did not produce.
+        st.session_state["_lease_gj_sig"] = _sig
+        return (_path, _url,
+                int(st.session_state.get("_lease_gj_n") or 0),
+                st.session_state.get("_lease_gj_legend") or {})
+    except Exception as _exc:
+        _log("[map] lease geojson unavailable: %s" % str(_exc)[:160])
+        return (None, None, 0, {})
+
+
 def run(engine=None):
     if not HAS_FOLIUM:
         st.error("pip install folium streamlit-folium")
@@ -9311,6 +9390,10 @@ def run(engine=None):
     # nothing. Its own guard still applies: with no recorded mtime it returns
     # immediately, which is the first render's case.
     _watch_seis_choice()
+    # SAME PLACE, SAME REASON. Registered at the top of run(), not near the
+    # map: 36 statements between here and there can end a render early, and
+    # each one left the browser polling a fragment that no longer existed.
+    _watch_lease_choice()
 
     # The top padding and the CSS-only-element collapse now live in
     # app_v4.py's stylesheet, which is injected before any page dispatch.
@@ -12828,6 +12911,7 @@ def run(engine=None):
         # leaves the stamp behind the file and the watcher fires once more.
         # An extra rebuild is the right price; a stuck map is not.
         st.session_state["_seis_pref_seen"] = _seis_pref_mtime()
+        st.session_state["_lease_pref_seen"] = _lease_pref_mtime()
 
         if _show_h3_layer:
             # ── H3 hex density mode (Session 3) ─────────────────────────
@@ -13224,7 +13308,19 @@ def run(engine=None):
         # chips, so the guard reads it and a chip added there can no longer
         # be missing here. The inner blocks each still test their own flag,
         # so a chip with no renderer costs one skipped branch.
-        if any(_k in active_db for _k, _lbl in _geo_defs):
+        # THE SECOND SCREEN'S MODE IS READ ONCE, HERE, and the guard below
+        # honours it. Read twice it becomes two lists that must agree, which
+        # is the debt this file already pays in four places.
+        #
+        # It has to widen the guard, not just sit inside it. With no chip
+        # ticked this whole block was skipped, so "Send to map: townships"
+        # wrote the file, reran the map, and drew NOTHING -- the screen said
+        # sent, the map said nothing, and no message explained the gap. A
+        # request that cannot be seen to fail is worse than one that errors.
+        _lv_choice = _map_lease_choice()
+        _lv_mode = (_lv_choice.get("mode") or "")
+        if (any(_k in active_db for _k, _lbl in _geo_defs)
+                or _lv_mode in ("leases", "townships", "both")):
             try:
                 from dataview.mapping.geography_layers import add_geography_layer, add_well_points
                 # AN EMPTY LAYER LOOKS EXACTLY LIKE A BROKEN ONE. Both adders
@@ -13234,6 +13330,21 @@ def run(engine=None):
                 # when dv_land_tract simply has none. On this database five of
                 # the ten chips are in that state.
                 _flag_to_label = {f: l for f, l in _geo_defs}
+                # THE SECOND SCREEN'S MODE, applied to the lease layer the
+                # same way it is applied to the townships: it can switch the
+                # layer OFF, so "townships" really means townships alone.
+                # Unset changes nothing.
+                _lv2 = _lv_choice
+                # BOTH DIRECTIONS. Removing "geo_leases" was half a control:
+                # asking for leases from a map with the chip off selected a
+                # colour, a source and a status and then drew none of them.
+                # A mode names what the map shows, so it turns the layer on
+                # too. Unset still changes nothing.
+                if _lv_mode in ("leases", "both"):
+                    if "geo_leases" not in _geo_on:
+                        _geo_on = _geo_on + ["geo_leases"]
+                elif _lv_mode:
+                    _geo_on = [k for k in _geo_on if k != "geo_leases"]
                 for _ak in _geo_on:
                     _drew = 0
                     if _ak == "geo_leases":
@@ -13251,47 +13362,38 @@ def run(engine=None):
                         # fires is the cost being removed. Both are silent, so
                         # the rebuild says so in the log.
                         from dataview.mapping.geography_layers import (
-                            add_lease_layer, add_lease_layer_file,
-                            write_lease_geojson, lease_data_signature,
-                            LEASE_GEOJSON_NAME)
-                        _by = st.session_state.get("wm_lease_color_by",
-                                                   "producing")
+                            add_lease_layer, add_lease_layer_file)
+                        # The screen's choice wins when it made one --
+                        # it is the window with room to explain the five
+                        # dimensions, and the map's dropdown is the fallback.
+                        _by = (_lv2.get("colour_by")
+                               or st.session_state.get("wm_lease_color_by",
+                                                       "producing"))
                         _lg_on = bool(st.session_state.get("wm_show_legend",
                                                            True))
                         # DW_MAP_LEASE_FILE=0 falls back to embedding, so a
                         # static-serving problem is one env var from a fix
                         # rather than a redeploy.
                         _use_file = os.environ.get("DW_MAP_LEASE_FILE", "1") != "0"
-                        _sdir = os.path.join(os.path.dirname(os.path.dirname(
-                            os.path.dirname(os.path.abspath(__file__)))), "static")
-                        _lpath = os.path.join(_sdir, LEASE_GEOJSON_NAME)
                         _drew = 0
                         if _use_file:
-                            try:
-                                _sig = lease_data_signature(engine)
-                                if _sig and (
-                                        st.session_state.get("_lease_gj_sig") != _sig
-                                        or not os.path.exists(_lpath)):
-                                    _lpath, _n, _lgd = write_lease_geojson(
-                                        engine, _sdir)
-                                    st.session_state["_lease_gj_sig"] = _sig
-                                    st.session_state["_lease_gj_legend"] = _lgd
-                                    st.session_state["_lease_gj_n"] = _n
-                                    _say("[map] lease geojson rebuilt: %d "
-                                         "feature(s)" % _n)
-                                _lgd = st.session_state.get("_lease_gj_legend") or {}
+                            # ONE HELPER DECIDES FRESHNESS -- see
+                            # _ensure_lease_geojson. The township click needs
+                            # the same file, and a second copy of the rule
+                            # here is how the two would drift apart.
+                            _lpath, _lurl, _ln, _lgd = _ensure_lease_geojson(
+                                engine, _say)
+                            if _lpath:
                                 add_lease_layer_file(
-                                    m, _lpath, "/app/static/" + LEASE_GEOJSON_NAME,
+                                    m, _lpath, _lurl,
                                     by=_by, show=True,
                                     legend=(_lgd.get(_by) if _lg_on else None),
                                     clip=_clip_bounds_now())
-                                _drew = int(st.session_state.get("_lease_gj_n") or 0)
-                            except Exception as _lfe:
+                                _drew = _ln
+                            else:
                                 # NOT swallowed: a discarded diagnostic makes
                                 # the next failure undiagnosable, and this
                                 # falls back silently otherwise.
-                                _say("[map] lease file layer failed, embedding "
-                                     "instead: %s" % str(_lfe)[:160])
                                 _use_file = False
                         if not _use_file:
                             _drew = add_lease_layer(
@@ -13498,7 +13600,16 @@ def run(engine=None):
                                   "apply to compute them.")
                     except Exception as _pe:
                         _mapmsg.warning(f"Well paths skipped: {_pe}")
-                if "geo_townships" in active_db:
+                # ── THE SECOND SCREEN DECIDES, WHEN IT HAS SPOKEN ──
+                # Its mode overrides the chips, because drawing townships
+                # and leases together is the thing that makes the middle
+                # zooms unreadable -- and a chip cannot express "one or the
+                # other" while a radio can. An UNSET mode changes nothing:
+                # a screen nobody has opened must not alter the map.
+                _twp_on = ("geo_townships" in active_db)
+                if _lv_mode:
+                    _twp_on = _lv_mode in ("townships", "both")
+                if _twp_on:
                     # THE LEASES, AGGREGATED ONTO THE GRID THEY WERE WRITTEN
                     # ON. 24,178 lease polygons render as a smear below about
                     # zoom 9; 2,888 townships do not, and unlike a hexagon a
@@ -13507,9 +13618,36 @@ def run(engine=None):
                     try:
                         from dataview.mapping.geography_layers import (
                             add_township_layer)
+                        # ── LEASES ON DEMAND, WHEN THE GRID IS ALONE ──
+                        # Clicking a township expands it by highlighting the
+                        # leases the BROWSER already holds. In "townships"
+                        # mode there are none, so the click zoomed to an
+                        # empty rectangle and reported "0 drawn here" -- the
+                        # gesture appeared broken when it was simply asking
+                        # about data that had not been sent.
+                        #
+                        # So hand the page the URL. The browser fetches the
+                        # file only if a township is actually clicked; a run
+                        # where nobody clicks costs nothing beyond this
+                        # freshness check, and the fetch is cached for every
+                        # click after the first.
+                        #
+                        # CURRENT BEFORE IT IS OFFERED. Passing a URL to a
+                        # stale file would draw leases that no longer match
+                        # the database, and a confident wrong lease plots,
+                        # exports and gets quoted. The helper rebuilds only
+                        # when the signature moved -- the sidecar makes the
+                        # usual answer "no".
+                        _tw_leases = None
+                        if "geo_leases" not in _geo_on:
+                            _tw_leases = _ensure_lease_geojson(engine, _say)[1]
                         _tn, _tl = add_township_layer(
                             m, engine, show=True,
-                            bounds=_layer_bounds)
+                            bounds=_layer_bounds,
+                            lease_url=_tw_leases,
+                            lease_by=(_lv_choice.get("colour_by")
+                                      or st.session_state.get(
+                                          "wm_lease_color_by", "producing")))
                         _say("[map] geo layer geo_townships  drew %s "
                              "(%s leased)" % (_tn, _tl))
                         _mapmsg.info(
@@ -14695,6 +14833,16 @@ def run(engine=None):
         # see one result. Held, the options still rerun (they are cheap; the
         # map serialize is what costs) and the map is simply not drawn until
         # Apply. Off restores the draw-on-every-change behaviour.
+        # THE DOOR TO THE SECOND SCREEN, beside the map controls it
+        # replaces. A NAMED window (target=dwlease) so pressing it
+        # twice reuses the one window instead of opening tabs -- the
+        # same choice the seismic screen made and for the same
+        # reason.
+        _rvf.markdown(
+            '<a href="?view=lease" target="dwlease" rel="noopener" '
+            'style="font:600 12px system-ui;color:#f59e0b;'
+            'text-decoration:none">▦ Lease screen ↗</a>',
+            unsafe_allow_html=True)
         _rvh.toggle(
             "⏸ Hold for Map", key="wm_hold_map",
             help="Don't redraw the map on every option change. Pick your "
@@ -16354,3 +16502,251 @@ def run(engine=None):
 # so every _qry_/_add_ has to be defined before it runs.
 _install_timers()
 _install_rerun_trace()
+
+
+# ── THE LEASE SECOND SCREEN ────────────────────────────────────────────────
+# A separate window that decides WHAT THE MAP DRAWS, so the map page does not
+# have to carry a query builder it has no room for.
+#
+# THE CHANNEL IS THE PREFS FILE, exactly as the seismic screen uses. A second
+# window is a SECOND STREAMLIT SESSION: session_state is keyed to the browser
+# connection, so no amount of shared Python reaches across. The seismic screen
+# already solved this and the solution is a file plus an mtime poll; a second
+# mechanism beside it would be the failure this codebase keeps writing down.
+#
+# ONE MODULE OWNS THE SHAPE. Both sides read and write {mode, colour_by,
+# source, status, operator, min_acres} through the two functions below and
+# nowhere else -- the "lists that must agree" problem, headed off by there
+# being only one list.
+MAP_LEASE_PREF = "map_lease"
+
+# What the map can be asked to draw. Not a free-text mode: the map switches on
+# it, and a typo in a prefs file should not silently mean "draw nothing".
+LEASE_MODES = ("leases", "townships", "both", "off")
+
+
+def _lease_pref_mtime() -> float:
+    """Timestamp of the prefs file, or 0. The poll compares THIS, not the
+    contents -- reading and parsing the file every two seconds to notice a
+    change that usually has not happened is work for nothing."""
+    try:
+        return float(_USER_PREFS_PATH.stat().st_mtime)
+    except Exception:
+        return 0.0
+
+
+def _map_lease_choice() -> dict:
+    """What the second screen asked the map to show. Always a full dict.
+
+    DEFAULTS THAT MATCH TODAY'S BEHAVIOUR, so a database with no prefs file
+    draws what it drew before this existed. A screen nobody has opened must
+    not change the map.
+    """
+    try:
+        _p = (_load_user_prefs().get(MAP_LEASE_PREF) or {})
+    except Exception:
+        _p = {}
+    _mode = str(_p.get("mode") or "").strip().lower()
+    return {
+        "mode": _mode if _mode in LEASE_MODES else "",
+        "colour_by": str(_p.get("colour_by") or "").strip(),
+        "source": list(_p.get("source") or []),
+        "status": list(_p.get("status") or []),
+        "operator": str(_p.get("operator") or "").strip(),
+        "min_acres": _p.get("min_acres") or 0,
+    }
+
+
+def _write_map_lease(**kw) -> None:
+    """Tell the map what to draw. THE ONLY WRITER OF MAP_LEASE_PREF.
+
+    Merges rather than replaces, so a screen that only changes the colour
+    does not silently clear the filters -- the shape is one dict and every
+    key in it means something to the map.
+    """
+    _p = _load_user_prefs()
+    _cur = dict(_p.get(MAP_LEASE_PREF) or {})
+    _cur.update({k: v for k, v in kw.items() if v is not None})
+    _p[MAP_LEASE_PREF] = _cur
+    _save_user_prefs(_p)
+
+
+@st.fragment(run_every=2)
+def _watch_lease_choice():
+    """Rebuild the map when the lease screen changes what it should draw.
+
+    A COPY OF _watch_seis_choice, INCLUDING ITS SCAR. That watcher polls every
+    two seconds while a map render takes two to eight, so it fired again
+    before the render could stamp the mtime it drew -- one save produced 246
+    reruns and the map never finished. Remembering WHICH mtime was asked for
+    makes a second ask impossible for the same value, while a genuine later
+    change still gets its own rerun.
+
+    Do not re-derive this. It is written down because it was expensive.
+    """
+    _seen = st.session_state.get("_lease_pref_seen")
+    if _seen is None:
+        return
+    _now = _lease_pref_mtime()
+    if _now == _seen:
+        return
+    if st.session_state.get("_lease_rerun_for") == _now:
+        return
+    st.session_state["_lease_rerun_for"] = _now
+    st.rerun()
+
+
+def render_lease_view(engine):
+    """The lease query panel ALONE, sized for a second monitor.
+
+    It draws no map. That is the point: the map page had no room for a query
+    over fifty attributes, and every control added to it pushed the map
+    further down the page -- which is where this day started.
+    """
+    from sqlalchemy import text as _lt
+    # IMPORTED HERE, not assumed. LEASE_COLOUR_BY lives in
+    # geography_layers; referencing it bare failed only when this
+    # page was first OPENED -- "name 'LEASE_COLOUR_BY' is not
+    # defined" -- which is the module-level-import trap CLAUDE.md
+    # opens with, and it surfaced here because app_v4 prints the
+    # traceback rather than swallowing it.
+    from dataview.mapping.geography_layers import LEASE_COLOUR_BY
+    st.markdown("### Leases — second screen")
+    st.caption("Choose what the map draws. It follows within two seconds; "
+               "no need to touch the map window.")
+
+    _cur = _map_lease_choice()
+
+    # ── the vocabulary comes from the DATA, not a hard-coded list ───────
+    # A status list typed here would drift the first time a source was
+    # loaded that spells one differently -- which has already happened once
+    # today: BLM says Authorized, Wyoming says Prospecting.
+    try:
+        with engine.connect() as _c:
+            _srcs = [r[0] for r in _c.execute(_lt(
+                "SELECT DISTINCT source FROM dataview.dv_land_right "
+                "WHERE source IS NOT NULL ORDER BY source"))]
+            _stats = [r[0] for r in _c.execute(_lt(
+                "SELECT DISTINCT lease_status FROM dataview.dv_land_right "
+                "WHERE lease_status IS NOT NULL ORDER BY lease_status"))]
+    except Exception as _e:
+        st.error("Cannot read the lease vocabulary: %s" % _e)
+        return
+
+    _c1, _c2 = st.columns([1, 1])
+    with _c1:
+        _mode = st.radio(
+            "What the map draws", LEASE_MODES,
+            index=(LEASE_MODES.index(_cur["mode"])
+                   if _cur["mode"] in LEASE_MODES else 0),
+            key="lv_mode",
+            help="townships is the overview, leases is the detail. Drawing "
+                 "both at once is what makes the map unreadable in the "
+                 "middle zooms.")
+        _by = st.selectbox(
+            "Colour leases by", list(LEASE_COLOUR_BY),
+            index=(list(LEASE_COLOUR_BY).index(_cur["colour_by"])
+                   if _cur["colour_by"] in LEASE_COLOUR_BY else 0),
+            key="lv_by")
+    with _c2:
+        _src = st.multiselect("Source", _srcs,
+                              default=[s for s in _cur["source"] if s in _srcs],
+                              key="lv_src")
+        _st_ = st.multiselect("Status", _stats,
+                              default=[s for s in _cur["status"] if s in _stats],
+                              key="lv_status")
+
+    _op = st.text_input("Operator contains", value=_cur["operator"],
+                        key="lv_op", placeholder="e.g. Kirkwood")
+    _ac = st.number_input("Minimum acres", min_value=0, step=40,
+                          value=int(_cur["min_acres"] or 0), key="lv_acres")
+
+    # ── THE COUNT, BEFORE ANYTHING IS SENT ──────────────────────────────
+    # "Wrong is worse than missing": a filter that silently matches nothing
+    # is a map that looks broken. Say what it will draw while there is still
+    # a chance to change it.
+    _where, _params = ["1=1"], {}
+    if _src:
+        _where.append("r.source IN (%s)"
+                      % ",".join(":s%d" % i for i in range(len(_src))))
+        _params.update({"s%d" % i: v for i, v in enumerate(_src)})
+    if _st_:
+        _where.append("r.lease_status IN (%s)"
+                      % ",".join(":t%d" % i for i in range(len(_st_))))
+        _params.update({"t%d" % i: v for i, v in enumerate(_st_)})
+    if _op:
+        _where.append("r.operator_name LIKE :op")
+        _params["op"] = "%" + _op + "%"
+    if _ac:
+        _where.append("g.area_km2 * 247.105 >= :ac")
+        _params["ac"] = float(_ac)
+    # COUNT WHAT THE LABEL SAYS. A plain COUNT(*) over this join counts
+    # right-TRACT PAIRS, and the label beside it says "lease(s)". Today every
+    # lease has exactly one tract (24,178 / 24,178 / 24,178) so the two agree
+    # by accident -- and the split into LAND_RIGHT / LAND_RIGHT_TRACT /
+    # LAND_TRACT exists precisely so a lease CAN hold several tracts. The
+    # first multi-tract lease loaded would inflate the number silently, which
+    # is the confident-wrong-value failure this repo keeps paying for.
+    # The acreage has the mirror-image bug: SUM over the join adds a tract
+    # once per lease that touches it, so a shared tract is counted twice.
+    # Sum over DISTINCT tracts instead. Both sub-selects reuse the same bound
+    # parameters, which named binds allow.
+    _from = ("""
+          FROM dataview.dv_land_right r
+          JOIN dataview.dv_land_right_tract x
+            ON x.land_right_id = r.land_right_id
+          JOIN dataview.dv_land_tract_geom g
+            ON g.tract_id = x.tract_id
+         WHERE """ + " AND ".join(_where))
+    try:
+        with engine.connect() as _c:
+            _n, _acres = _c.execute(_lt(
+                "SELECT (SELECT COUNT(DISTINCT r.land_right_id) " + _from + "),"
+                "       (SELECT ISNULL(SUM(a.area_km2), 0) * 247.105"
+                "          FROM (SELECT DISTINCT g.tract_id, g.area_km2 "
+                + _from + ") a)"), _params).first()
+    except Exception as _e:
+        st.error("Count failed: %s" % _e)
+        return
+
+    if _n:
+        st.success("**%s** lease(s) match  ·  %s acres"
+                   % (format(_n, ","), format(int(_acres or 0), ",")))
+    else:
+        st.warning("No leases match. The map would draw nothing.")
+
+    _panel = {"mode": _mode, "colour_by": _by, "source": sorted(_src),
+              "status": sorted(_st_), "operator": _op, "min_acres": int(_ac)}
+
+    if st.button("▶ Send to map", type="primary", use_container_width=True,
+                 disabled=not _n, key="lv_send"):
+        _write_map_lease(**_panel)
+        st.rerun()
+
+    # WHAT THE MAP IS DRAWING, READ BACK FROM THE FILE -- never a memory of
+    # having pressed the button.
+    #
+    # The caption here used to be st.session_state["lv_sent"], set beside the
+    # write. It survived changes to the panel, so a press that did NOT land
+    # left "Sent: townships, 24,178" standing above a panel reading leases /
+    # 6,131 -- a confident statement about the map that the map did not
+    # agree with, and no way for the reader to tell which was true. Caught
+    # exactly that way: the count updated, the caption did not, and the
+    # prefs file had not been written at all.
+    #
+    # Read back from the one place that decides, the panel can only ever say
+    # what is actually out there, and an unsent change is visible instead of
+    # silent.
+    _live = _map_lease_choice()
+    _live_cmp = dict(_live, source=sorted(_live["source"]),
+                     status=sorted(_live["status"]),
+                     min_acres=int(_live["min_acres"] or 0))
+    if not _live.get("mode"):
+        st.caption("The map has not been told anything yet — it is drawing "
+                   "whatever its own chips say. Press ▶ Send to map.")
+    elif _live_cmp == _panel:
+        st.caption("✓ The map is drawing this: **%s**, coloured by %s."
+                   % (_live["mode"], _live["colour_by"] or "producing"))
+    else:
+        st.warning("The map is still drawing **%s**. This panel has unsent "
+                   "changes — press ▶ Send to map." % _live["mode"])
