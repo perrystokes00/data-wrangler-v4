@@ -1042,12 +1042,47 @@ def _clear_wells_state() -> None:
 MAP_SEIS_PREF = "map_seis"
 
 
-def _seis_pref_mtime() -> float:
-    """When the shared choice file last changed. 0.0 if it is not there."""
+def _seis_pref_mtime():
+    """A fingerprint of the SEISMIC choice -- not the file's timestamp.
+
+    THE MIRROR IMAGE OF THE LEASE WATCHER'S BUG, left standing when that one
+    was fixed in bf012d5 and noted there as "waiting". It did not wait long.
+
+    user_prefs.json carries BOTH second screens' choices AND the saved
+    places. Keyed on the file's mtime, this watcher read every write to any
+    of them as "a seismic instruction arrived" and answered with a FULL APP
+    RERUN -- st.rerun() at the end of _watch_seis_choice -- which rebuilds
+    the entire map, 2-4 s a time.
+
+    Measured 30 Aug 2026 from a single session's render log: 32 renders, of
+    which 12 did no work at all, and this line was the largest single source
+    of them. Reported as "the well viewer very, very slow, multiple
+    re-runs" -- and, crucially, "it was only one well". It was never about
+    how many wells: a map showing one well rebuilds just as often as a map
+    showing five thousand.
+
+    Reads the seismic section only, so a lease write or a saved place is now
+    invisible to it and a seismic write still isn't. The mtime stays as a
+    cheap first gate, so the parse only happens when something moved.
+    """
     try:
-        return float(_USER_PREFS_PATH.stat().st_mtime)
-    except OSError:
-        return 0.0
+        _m = float(_USER_PREFS_PATH.stat().st_mtime)
+    except Exception:
+        return ""
+    _cache = getattr(_seis_pref_mtime, "_cache", None)
+    if _cache and _cache[0] == _m:
+        return _cache[1]
+    try:
+        _sig = json.dumps(_map_seis_choice(), sort_keys=True)
+    except Exception:
+        # A UNIQUE VALUE, NOT A CONSTANT. Returning "" on a transient
+        # unreadable file would equal the no-file case, so the next good
+        # read would look like a change and force a rebuild. Tie it to the
+        # mtime instead: unreadable-now and unreadable-later differ only if
+        # the file actually moved.
+        _sig = "unreadable:%r" % _m
+    _seis_pref_mtime._cache = (_m, _sig)
+    return _sig
 def _collapse_sidebar_once():
     """Fold the nav sidebar away, ONCE per session.
 
