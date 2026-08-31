@@ -9918,6 +9918,21 @@ def run(engine=None):
     # into _summary_rows, where they are already in hand.
     _summary_uwis = list(st.session_state.get("_summary_uwis") or [])
     if st.session_state.get("show_summary") and _summary_uwis:
+        # ── OPEN AT THE TOP OF THE TICKET ───────────────────────────────
+        # "The scout ticket opens at the bottom, it needs to open at the top
+        # of the scout ticket." The Scout Tickets button sits near the FOOT
+        # of the map page and Streamlit keeps the scroll position across the
+        # rerun, so a page that replaces the map opens scrolled to wherever
+        # the button was. Documents and Export both already do this; when
+        # this became a page I copied their state-persistence block and not
+        # this line, which is the half that is visible.
+        #
+        # ONE-SHOT, so it fires on entry and not on every in-page rerun --
+        # otherwise paging through a ticket would keep yanking the view back
+        # to the top. components.html runs in an iframe, so the helper
+        # scrolls the PARENT document.
+        if st.session_state.pop("_export_scroll_pending", False):
+            _scroll_main_to_top()
         _summary_rows = st.session_state.get("_summary_rows") or {}
         # PERSIST MAP STATE ACROSS THE ROUND TRIP, exactly as the Documents
         # and Export pages do. Streamlit drops widget-backed session keys
@@ -17388,6 +17403,12 @@ def run(engine=None):
                             _u: uwi_index.get(_u)
                             for _u in selected_in_results
                             if uwi_index.get(_u)}
+                        # OPEN AT THE TOP. This button sits near the foot of
+                        # the map page and Streamlit keeps the scroll across
+                        # the rerun, so without this the ticket opens
+                        # scrolled to the bottom. Same flag Documents and
+                        # Export set, consumed once by the page on entry.
+                        st.session_state["_export_scroll_pending"] = True
                         # scope="app": the page decision is read above this
                         # fragment, so a fragment-scoped rerun cannot reach
                         # it. The app rerun is cheap -- run() returns at the
