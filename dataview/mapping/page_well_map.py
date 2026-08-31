@@ -9979,9 +9979,17 @@ def run(engine=None):
     # seis_basket_sel is deliberately NOT here. Its index= is recomputed each
     # render to follow the current pick, so it is not a static default at all;
     # seeding it would freeze the seismic basket on whatever was showing first.
+    # ESRI TOPO IS THE DEFAULT BACKGROUND, on request -- contours and relief
+    # under the leases, rather than the road map. Named rather than indexed:
+    # _BASEMAPS_SHOWN[0] is whatever happens to be first in the dict, so a
+    # basemap added at the top of BASEMAPS would silently become the default.
+    # Falls back to the first entry if the name is ever removed, because a
+    # missing default here means the selectbox raises rather than picks.
+    _DEFAULT_BASEMAP = ("Esri Topo" if "Esri Topo" in _BASEMAPS_SHOWN
+                        else _BASEMAPS_SHOWN[0])
     for _wk, _wv in (("wm_near_dist", 500), ("wm_show_legend", True),
                      ("wm_ppdm_symbols", False), ("wm_shp_fill", True),
-                     ("wm_basemap", _BASEMAPS_SHOWN[0])):
+                     ("wm_basemap", _DEFAULT_BASEMAP)):
         st.session_state.setdefault(_wk, _wv)
 
     # Clock starts here, after the two guards that return without drawing.
@@ -14856,9 +14864,12 @@ def run(engine=None):
                 os.path.dirname(os.path.abspath(__file__)))), "static")
             _hpath = os.path.join(_hdir, HIGHWAY_GEOJSON_NAME)
             if os.path.exists(_hpath):
+                # ON BY DEFAULT, on request. It is a served file the browser
+                # caches, so the cost of having it on is one fetch per
+                # session rather than per render.
                 add_highway_layer(m, _hpath,
                                   "/app/static/" + HIGHWAY_GEOJSON_NAME,
-                                  show=False)
+                                  show=True)
             else:
                 _say("[map] highways layer skipped: %s not built "
                      "(tools/build_road_geojson.py --apply)" % _hpath)
@@ -14867,7 +14878,12 @@ def run(engine=None):
 
         try:
             from dataview.mapping.geography_layers import add_wetlands_layer
-            add_wetlands_layer(m, show=False)
+            # ON BY DEFAULT, on request. Costs nothing when it cannot draw:
+            # the NWI service has minScale 100000, so below zoom 12 it
+            # returns nothing and the layer name says so. It is a WMS, so
+            # "on" means the browser asks for tiles it is already showing
+            # ground for -- no query and no payload from this side.
+            add_wetlands_layer(m, show=True)
         except Exception as _we:
             # Not swallowed: a missing overlay should say so once, not leave
             # the reader hunting for a switch that never appears.
