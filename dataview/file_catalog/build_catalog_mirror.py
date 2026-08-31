@@ -271,7 +271,7 @@ def build_ddl(cur, dv_table: str, drop: bool) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--server",   default=r"PERRY\SQLEXPRESS")
-    ap.add_argument("--database", default="DataView")
+    ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--apply",  action="store_true", help="execute (else print DDL)")
     ap.add_argument("--drop",   action="store_true", help="drop + recreate mirrors")
     a = ap.parse_args()

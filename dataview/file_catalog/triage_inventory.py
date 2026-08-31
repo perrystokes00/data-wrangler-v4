@@ -583,7 +583,7 @@ def run_all_engine(engine, ref=DEFAULT_REF, dry=False, log=say):
 def main():
     ap = argparse.ArgumentParser(description="File inventory triage (Stage 1).")
     ap.add_argument("--server", default=r"PERRY\SQLEXPRESS")
-    ap.add_argument("--database", default="DataView")
+    ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--driver", default="ODBC Driver 17 for SQL Server")
     ap.add_argument("--ref", default="WELL_REF.well_ref.well_master_gold")
     ap.add_argument("--dry-run", action="store_true",

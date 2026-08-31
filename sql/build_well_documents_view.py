@@ -143,7 +143,7 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--server",   default=r"PERRY\SQLEXPRESS")
-    ap.add_argument("--database", default="DataView")
+    ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--materialize", action="store_true",
                     help="also (re)build dataview.well_documents physical table")
     a = ap.parse_args()

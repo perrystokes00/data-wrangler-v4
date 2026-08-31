@@ -45,7 +45,7 @@ DEFAULT_DBF_DIR = Path(
     r"\data_wrangler\training\Texas\dbf"
 )
 DEFAULT_CONN = (
-    "mssql+pyodbc://127.0.0.1\\SQLEXPRESS/DataView"
+    "mssql+pyodbc://127.0.0.1\\SQLEXPRESS/DataView_Demo"
     "?driver=ODBC+Driver+17+for+SQL+Server"
     "&trusted_connection=yes"
     "&TrustServerCertificate=yes"

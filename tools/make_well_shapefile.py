@@ -273,7 +273,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Export DataView wells to a color-coded shapefile."
     )
-    parser.add_argument("--db",       default="DataView",
+    parser.add_argument("--db",       default="DataView_Demo",
                         help="Database name (default: DataView)")
     parser.add_argument("--server",   default=r"127.0.0.1\SQLEXPRESS",
                         help=r"SQL Server instance (default: 127.0.0.1\SQLEXPRESS)")

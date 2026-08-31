@@ -64,7 +64,7 @@ except ImportError:
     pyodbc = None
 
 DEFAULT_SERVER = r"PERRY\SQLEXPRESS"
-DEFAULT_DB     = "DataView"
+DEFAULT_DB     = "DataView_Demo"
 DEFAULT_DRIVER = "ODBC Driver 17 for SQL Server"
 DEFAULT_REF    = "WELL_REF.well_ref.well_master_gold"
 ZERO_UWI = "00000000000000"

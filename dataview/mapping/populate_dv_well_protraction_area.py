@@ -59,7 +59,7 @@ SHAPEFILE_PATH = r"C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\wrangler
 
 # SQL Server connection (adjust if your V3 DSN differs)
 SQL_CONN = (
-    "mssql+pyodbc://@PERRY\\SQLEXPRESS/DataView"
+    "mssql+pyodbc://@PERRY\\SQLEXPRESS/DataView_Demo"
     "?driver=ODBC+Driver+17+for+SQL+Server"
     "&trusted_connection=yes"
 )

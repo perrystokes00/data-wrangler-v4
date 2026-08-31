@@ -28,7 +28,7 @@ from sqlalchemy import create_engine, text
 
 
 CONN_STR = (
-    "mssql+pyodbc://@localhost\\SQLEXPRESS/DataView"
+    "mssql+pyodbc://@localhost\\SQLEXPRESS/DataView_Demo"
     "?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
 )
 

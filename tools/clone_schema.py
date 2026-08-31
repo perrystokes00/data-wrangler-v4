@@ -198,7 +198,7 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--server", default=r"PERRY\SQLEXPRESS")
-    ap.add_argument("--source", default="DataView")
+    ap.add_argument("--source", default="DataView_Demo")
     ap.add_argument("--target", default="DataView_Demo")
     ap.add_argument("--schemas", nargs="+", default=["dataview", "file_catalog"])
     ap.add_argument("--no-indexes", action="store_true",

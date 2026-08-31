@@ -125,7 +125,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Copy dv_r_* + spatial reference data between databases.")
     ap.add_argument("--server", default=r"PERRY\SQLEXPRESS")
-    ap.add_argument("--source", default="DataView")
+    ap.add_argument("--source", default="DataView_Demo")
     ap.add_argument("--target", default="DataView_Demo")
     ap.add_argument("--tables", nargs="*", default=None,
                     help="explicit dataview table names to copy (overrides the "

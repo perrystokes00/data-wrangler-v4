@@ -242,7 +242,7 @@ def main():
     ap = argparse.ArgumentParser(description="Sync a schema from one DB to another.")
     ap.add_argument("--server", default=DEFAULT_SERVER)
     ap.add_argument("--driver", default=DEFAULT_DRIVER)
-    ap.add_argument("--source", default="DataView", help="source (authoritative) DB")
+    ap.add_argument("--source", default="DataView_Demo", help="source (authoritative) DB")
     ap.add_argument("--target", default="DataView_Demo", help="DB to bring into line")
     ap.add_argument("--schema", default="file_catalog")
     ap.add_argument("--out", default="schema_sync.sql", help="write generated DDL here")

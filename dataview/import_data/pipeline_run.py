@@ -2853,7 +2853,7 @@ def main():
     ap = argparse.ArgumentParser(description="Scan→extract→triage→vault→report")
     ap.add_argument("--root", required=True, help="share / folder to crawl")
     ap.add_argument("--server", default=r"PERRY\SQLEXPRESS")
-    ap.add_argument("--database", default="DataView")
+    ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--schema", default="file_catalog")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--exts", default=None,

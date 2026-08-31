@@ -2272,7 +2272,7 @@ def enrich_from_uwi(cur, uwis=None, log=print):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--server",   default=r"PERRY\SQLEXPRESS")
-    ap.add_argument("--database", default="DataView")
+    ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--uwi", default=None, help="promote only this UWI")
     ap.add_argument("--apply", action="store_true",
                     help="execute (else report eligible counts)")

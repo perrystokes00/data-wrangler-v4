@@ -40,7 +40,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Clone a database via BACKUP/RESTORE on one instance.")
     ap.add_argument("--server", default=r"PERRY\SQLEXPRESS")
-    ap.add_argument("--source", default="DataView")
+    ap.add_argument("--source", default="DataView_Demo")
     ap.add_argument("--target", default="DataView_Demo")
     ap.add_argument("--bak", default=None,
                     help=r"backup file path (default C:\Bulk\<source>_clone.bak)")

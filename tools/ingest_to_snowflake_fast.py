@@ -31,7 +31,7 @@ CSV_DIR = Path(r"C:\Bulk")
 
 def get_sqlserver():
     return create_engine(
-        "mssql+pyodbc://127.0.0.1\\SQLEXPRESS/DataView"
+        "mssql+pyodbc://127.0.0.1\\SQLEXPRESS/DataView_Demo"
         "?driver=ODBC+Driver+17+for+SQL+Server"
         "&trusted_connection=yes"
         "&TrustServerCertificate=yes"

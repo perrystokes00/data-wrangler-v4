@@ -432,7 +432,7 @@ def place(src, dst, mode):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--server", default=r"PERRY\SQLEXPRESS")
-    ap.add_argument("--database", default="DataView")
+    ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--schema", default="file_catalog")
     ap.add_argument("--vault-root", required=True)
     ap.add_argument("--tier", default="curated")

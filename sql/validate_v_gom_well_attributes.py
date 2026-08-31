@@ -34,7 +34,7 @@ from sqlalchemy import create_engine, text
 # Adjust if running against a different instance.
 # -----------------------------------------------------------------------------
 CONN_STR = (
-    "mssql+pyodbc://@localhost\\SQLEXPRESS/DataView"
+    "mssql+pyodbc://@localhost\\SQLEXPRESS/DataView_Demo"
     "?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
 )
 

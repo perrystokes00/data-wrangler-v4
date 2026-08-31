@@ -420,7 +420,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Clear the document-pipeline tables (+ optional vault).")
     ap.add_argument("--server", default=r"PERRY\SQLEXPRESS")
-    ap.add_argument("--database", default="DataView")
+    ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--apply", action="store_true",
                     help="actually delete (default: dry-run, counts only)")
     ap.add_argument("--no-dv", action="store_true",

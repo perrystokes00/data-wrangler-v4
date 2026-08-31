@@ -616,7 +616,7 @@ def _summary(con):
 def _parse_args():
     p = argparse.ArgumentParser(description="Seed DataView political reference tables.")
     p.add_argument("--server",       default="")
-    p.add_argument("--database",     default="DataView")
+    p.add_argument("--database",     default="DataView_Demo")
     p.add_argument("--windows-auth", action="store_true")
     p.add_argument("--username",     default="")
     p.add_argument("--password",     default="")

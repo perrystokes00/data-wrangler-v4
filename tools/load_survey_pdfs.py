@@ -351,7 +351,7 @@ def _build_engine(args):
 def main():
     ap = argparse.ArgumentParser(description="Load survey PDFs into DataView")
     ap.add_argument("--server",       default=r"127.0.0.1\SQLEXPRESS")
-    ap.add_argument("--database",     default="DataView")
+    ap.add_argument("--database",     default="DataView_Demo")
     ap.add_argument("--windows-auth", action="store_true")
     ap.add_argument("--username",     default="")
     ap.add_argument("--password",     default="")
