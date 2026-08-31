@@ -2435,6 +2435,25 @@ def add_wetlands_layer(m, show=False):
     """
     import folium as _f
     _name = "🟩 Wetlands (NWI, zoom 12+)"
+    # ── ON TOP OF TOWNSHIPS AND LEASES, WHICH IS A PANE, NOT AN ORDER ───
+    # "Can I put wetlands on top of Townships and Leases." Not by reordering
+    # the layer control: this is a RASTER, and Leaflet puts tile layers in
+    # tilePane (z-index 200) while GeoJson vectors go in overlayPane (400).
+    # Raster is structurally underneath vector however the control lists
+    # them, so there is no toggle that could have done it.
+    #
+    # 450 clears the vectors and stays below shadowPane (500), markerPane
+    # (600), tooltipPane (650) and popupPane (700) -- so well symbols,
+    # tooltips and every popup still read over the top of it. Sliding it
+    # above those would hide the thing you clicked.
+    #
+    # POINTER EVENTS OFF, AND THIS IS THE HALF THAT BREAKS SILENTLY. A pane
+    # laid over the vectors swallows the clicks aimed at them: township
+    # click-to-expand and lease clicks would simply stop, with no error and
+    # nothing on screen to say the raster ate them. The overlay is a
+    # picture; it has no business receiving a click.
+    _f.map.CustomPane("wetlands", z_index=450,
+                      pointer_events=False).add_to(m)
     _f.raster_layers.WmsTileLayer(
         url=NWI_WMS,
         layers="0",
@@ -2445,7 +2464,11 @@ def add_wetlands_layer(m, show=False):
         overlay=True,
         control=True,
         show=show,
-        opacity=0.75,
+        # 0.75 WAS CHOSEN WHEN THIS DREW UNDERNEATH, where washing out the
+        # basemap was the whole cost. Over the leases it washes out the
+        # colour that says which lease is which, so it comes down.
+        opacity=0.5,
+        pane="wetlands",
         attr="Wetlands: USFWS National Wetlands Inventory",
     ).add_to(m)
     return _name
