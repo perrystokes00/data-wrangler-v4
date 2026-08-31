@@ -17782,6 +17782,36 @@ def render_lease_view(engine, compact=False, default_mode=None):
                               help="Interstates and US highways (TIGER "
                                    "S1100). 0 means no limit.")
 
+    # ── A NAME WITHOUT A DISTANCE FILTERS NOTHING, AND SAID NOTHING ─────
+    # "I didn't see matching leases moving at all." Picking Casper on its
+    # own does nothing: both the count and the map ask
+    #
+    #     if _mi_city and _twnsel:
+    #
+    # so the name is only ever used to qualify a DISTANCE. With the miles
+    # box left at its default of 0 -- documented as "no limit" -- neither
+    # that branch nor the nearest-town fallback below it fires, and the
+    # filter is silently absent. The control appears to work, the count
+    # does not move, and nothing on screen connects the two.
+    #
+    # NOT FIXED BY PICKING A RADIUS HERE. "Within some miles of Casper" is a
+    # question only the operator can answer, and guessing five would put a
+    # number nobody chose behind a count they will quote. Automation may
+    # skip ceremony, never a decision. So it says what is wrong and what to
+    # do about it, next to the box that needs changing.
+    _dead = []
+    if _twnsel and not _mi_city:
+        _dead.append("%s selected, but **Within miles of a town** is 0"
+                     % ", ".join(_twnsel[:3])
+                     + (" …" if len(_twnsel) > 3 else ""))
+    if _rdsel and not _mi_hwy:
+        _dead.append("%s selected, but **Within miles of a highway** is 0"
+                     % ", ".join(_rdsel[:3])
+                     + (" …" if len(_rdsel) > 3 else ""))
+    if _dead:
+        st.warning("Not filtering by distance yet — " + "; ".join(_dead)
+                   + ". Set a distance above 0, or clear the name.")
+
     # ── THE COUNT, BEFORE ANYTHING IS SENT ──────────────────────────────
     # "Wrong is worse than missing": a filter that silently matches nothing
     # is a map that looks broken. Say what it will draw while there is still
