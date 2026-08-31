@@ -8494,6 +8494,34 @@ def _ai_filter_wells(question: str, sample_wells: list[dict],
                     _lease_hint = "in use: " + ", ".join(_lns[:40])
             except Exception:
                 _lease_hint = ""
+        # ── WHAT "NEAR LINE A" HAD NO WAY TO SAY ────────────────────────
+        # There was no proximity vocabulary in this prompt at all, so a
+        # question containing "near line A" could only come back as an
+        # ordinary column comparison -- the model chose area = 'lineA'.
+        # "area" is not a well column, _apply_ai_filter correctly refuses to
+        # pass a clause it cannot evaluate, and every well failed it: zero
+        # wells under a confident green description.
+        #
+        # NAME THE FEATURES THAT EXIST, for the reason lease_number is named
+        # above. The seismic lines are catalogued as 'lineA.sgy', so a model
+        # told nothing invents 'lineA' and the exact-match JOIN in
+        # _wells_near_feature finds no feature row. Listing them removes the
+        # guess; _resolve_near_name forgives it if one gets through anyway.
+        _near_hint = ""
+        if _engine is not None:
+            _nh = []
+            for _fk in ("seismic_line", "seismic_survey", "field", "lease",
+                        "pipeline"):
+                try:
+                    _nms = _near_feature_names(_engine, _fk)
+                except Exception:
+                    _nms = []
+                if _nms:
+                    _nh.append("    %s: %s%s"
+                               % (_fk, ", ".join(_nms[:12]),
+                                  " …" if len(_nms) > 12 else ""))
+            if _nh:
+                _near_hint = "\n".join(_nh)
         _col_list = ", ".join(sorted(_db_cols)) if _db_cols else col_summary
         _has_list = "\n".join(
             f"  {k} — true if the well has {lbl}"
@@ -8530,12 +8558,23 @@ def _ai_filter_wells(question: str, sample_wells: list[dict],
                "  lease_operator: who holds the lease, which is NOT\n"
                "    necessarily the well's operator_name\n"
                if _lease_hint else "")
+            + (("\n"
+                "PROXIMITY. If the question says wells NEAR / close to / "
+                "within some distance of a named feature, do NOT invent a "
+                "column for it -- there is none, and a made-up column matches "
+                "nothing. Use the separate \"near\" key. Name the feature "
+                "EXACTLY as listed here:\n" + _near_hint + "\n"
+                "Default to 5 miles when the question gives no distance.\n")
+               if _near_hint else "")
             + "\n"
             'Return this exact JSON structure:\n'
             '{\n'
             '  "filters": [\n'
             '    {"field": "<column_name>", "op": "<eq|ne|gt|gte|lt|lte|contains|in>", "value": <value>}\n'
             '  ],\n'
+            '  "near": {"feature": "<seismic_line|seismic_survey|field|lease|pipeline>",\n'
+            '           "name": "<exact name from the list above>",\n'
+            '           "miles": <number>},        // OPTIONAL - omit when not asked\n'
             '  "description": "<short human description of the filter>"\n'
             '}\n\n'
             "Rules:\n"
@@ -8551,7 +8590,15 @@ def _ai_filter_wells(question: str, sample_wells: list[dict],
             '               {"field": "has_core", "op": "eq", "value": true}],\n'
             '   "description": "Wells over 10,000 ft by Anadarko with core data"}\n'
             "- final_td, lat, lon are numeric (float)\n"
-            '- If the question cannot be answered, return {"filters": [], "description": "Could not interpret query"}'
+            + ("- Example WITH proximity: 'wells deeper than 5000 ft drilled\n"
+               "  after 1980 near line A' ->\n"
+               '  {"filters": [{"field": "final_td", "op": "gt", "value": 5000},\n'
+               '               {"field": "spud_date", "op": "gt", "value": "1980-01-01"}],\n'
+               '   "near": {"feature": "seismic_line", "name": "lineA.sgy", "miles": 5},\n'
+               '   "description": "Wells over 5,000 ft spudded after 1980 within 5 mi of lineA.sgy"}\n'
+               "- the proximity goes in \"near\", NEVER in filters\n"
+               if _near_hint else "")
+            + '- If the question cannot be answered, return {"filters": [], "description": "Could not interpret query"}'
         )
 
         import os
@@ -8701,6 +8748,52 @@ def _near_feature_names(_engine, feature: str) -> list[str]:
         return [r[0] for r in rows if r[0]]
     except Exception:
         return []
+
+
+def _resolve_near_name(_engine, feature: str, name: str):
+    """The catalogued name closest to what was asked for, or None.
+
+    THE JOIN IN _wells_near_feature IS AN EXACT MATCH, and the things it
+    matches against are file names: the seismic lines are 'lineA.sgy', not
+    'lineA'. So "near line A" -- however sensibly a human or a model renders
+    it -- misses, returns no uwis, and is indistinguishable from "no wells
+    are near that line". Naming the real values in the prompt stops the
+    model guessing; this is the backstop for when something guesses anyway.
+
+    Deliberately CONSERVATIVE. It will fold case, spaces and a file
+    extension, and it will accept an unambiguous prefix -- but if a loose
+    match is ambiguous it returns None rather than picking one. A filter
+    that quietly answers about lineB when you asked about lineA is the
+    "wrong is worse than missing" failure, and it would be invisible: the
+    description would still say what you asked for.
+    """
+    _want = str(name or "").strip()
+    if not _want:
+        return None
+    try:
+        _names = _near_feature_names(_engine, feature)
+    except Exception:
+        return None
+    if not _names:
+        return None
+    if _want in _names:
+        return _want
+
+    def _key(s):
+        s = str(s).strip().lower()
+        for _ext in (".sgy", ".segy", ".sgd"):
+            if s.endswith(_ext):
+                s = s[:-len(_ext)]
+        return "".join(s.split())
+
+    _wk = _key(_want)
+    _exact = [n for n in _names if _key(n) == _wk]
+    if len(_exact) == 1:
+        return _exact[0]
+    if len(_exact) > 1:
+        return None
+    _pre = [n for n in _names if _key(n).startswith(_wk)]
+    return _pre[0] if len(_pre) == 1 else None
 
 
 def _wells_near_feature(_engine, feature: str, name: str,
@@ -11520,6 +11613,51 @@ def run(engine=None):
             with st.spinner("Asking Claude…"):
                 _spec, _err = _ai_filter_wells(_ai_q.strip(), _wells_raw,
                                            _engine=engine)
+            # ── "NEAR LINE A" NOW RUNS THE NEAR LOOKUP ITSELF ───────────
+            # "The AI filter only worked if I used the Near function for
+            # line A then the wells deeper than 5000 ft drilled after 1980
+            # ... I don't like having to split it up." Nor should you: the
+            # split only worked because Near produces a uwi list, which is
+            # the one shape the filter could evaluate.
+            #
+            # Resolved HERE rather than inside _apply_ai_filter because that
+            # function is pure -- it takes rows and a spec and has no engine
+            # to ask. Turning proximity into `uwi in (...)` at the door keeps
+            # it that way, and keeps every downstream surface (the per-clause
+            # diagnostics, the drill shadow, the results grid) working on a
+            # shape it already understands. Exactly what the manual 📍 Find
+            # button does with its result.
+            if _spec is not None and isinstance(_spec.get("near"), dict):
+                _nr = _spec.pop("near")
+                _nfeat = str(_nr.get("feature") or "").strip()
+                _nname = str(_nr.get("name") or "").strip()
+                try:
+                    _nmi = float(_nr.get("miles") or 5)
+                except (TypeError, ValueError):
+                    _nmi = 5.0
+                _hit = _resolve_near_name(engine, _nfeat, _nname)
+                if _hit is None:
+                    # NAMED, NOT SHRUGGED AT. "No wells found" for a feature
+                    # that was never located sends you looking at the wells.
+                    _spec = None
+                    _err = ("There is no %s called %r to measure from. "
+                            "Check the name — the seismic lines are "
+                            "catalogued with their file extension."
+                            % (_nfeat.replace("_", " ") or "feature", _nname))
+                else:
+                    _uwis_near = _wells_near_feature(
+                        engine, _nfeat, _hit, _nmi * 1609.344)
+                    if not _uwis_near:
+                        _spec = None
+                        _err = ("No wells within %g miles of %s. (A well "
+                                "needs a surface coordinate to be found.)"
+                                % (_nmi, _hit))
+                    else:
+                        _spec.setdefault("filters", []).append(
+                            {"field": "uwi", "op": "in", "value": _uwis_near})
+                        _spec["description"] = "%s — %d well(s) within %g mi of %s" % (
+                            _spec.get("description", "").split(" — ")[0],
+                            len(_uwis_near), _nmi, _hit)
             if _spec is not None:
                 st.session_state["ai_filter_spec"] = _spec
                 st.session_state["ai_filter_desc"] = _spec.get("description", "")
