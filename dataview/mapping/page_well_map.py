@@ -17031,225 +17031,255 @@ def run(engine=None):
             st.session_state.pop("_pending_drill_label", None)
 
 
-        # ── Results — the current query / draw IS the object set ─────────
-        # Results = the drilled/clicked set, else the current viewport /
-        # draw selection, so Documents / Export reflect the wells chosen
-        # on the map (viewport toggle or a drawn box).
-        result_uwis = (list(st.session_state.get("clicked_uwis") or [])
-                       or list(st.session_state.get("viewport_uwis") or []))
-        _n = len(result_uwis)
-        st.markdown(f"#### 📋 Results — {_n} well(s)" if result_uwis
-                    else "#### 📋 Results")
+        # ── THE RESULTS PANEL IS A FRAGMENT ─────────────────────────────
+        # "There should be no reruns of the map or any communication with
+        # the map. The sole purpose I was selecting wells is to view the
+        # documents for those wells."
+        #
+        # Right, and it could not hold before: this panel sat directly in
+        # run(), so ANY submit inside it -- ticking wells and pressing Apply
+        # selection -- re-entered run() and rebuilt the whole map, 2-4 s, for
+        # an action that never touches it. Removing the handler's own
+        # st.rerun() took that from two rebuilds to one; only a fragment
+        # removes the last.
+        #
+        # SAFE BECAUSE THE PANEL IS SELF-CONTAINED. Everything that reads the
+        # selection -- selected_in_results, the Documents scoping, the Scout
+        # Tickets button -- lives inside it, and result_uwis is not referenced
+        # anywhere after it. It closes over uwi_index read-only. The Scout
+        # Ticket panel below reads _summary_uwis from session_state, not from
+        # here, so it is unaffected.
+        #
+        # THE FOUR REruns THAT STILL NEED THE WHOLE APP say so with
+        # scope="app": Scout Tickets, Documents and Export change the page,
+        # and Clear empties viewport_uwis, which the map draws from. A
+        # fragment-scoped rerun there would leave the page or the map showing
+        # the old thing -- the button would look like it had done nothing.
+        # Select all / None deliberately keep the fragment scope: they only
+        # re-default the editor.
+        @st.fragment
+        def _results_panel():
+            # ── Results — the current query / draw IS the object set ─────────
+            # Results = the drilled/clicked set, else the current viewport /
+            # draw selection, so Documents / Export reflect the wells chosen
+            # on the map (viewport toggle or a drawn box).
+            result_uwis = (list(st.session_state.get("clicked_uwis") or [])
+                           or list(st.session_state.get("viewport_uwis") or []))
+            _n = len(result_uwis)
+            st.markdown(f"#### 📋 Results — {_n} well(s)" if result_uwis
+                        else "#### 📋 Results")
 
-        if not result_uwis:
-            st.markdown(
-                "<div style='padding:6px 0'>"
-                "<span style='color:#aaa;font-size:12px'>— No wells —&nbsp;&nbsp;"
-                "Filter the wells or draw a circle / rectangle on the map to "
-                "build a result set.</span></div>",
-                unsafe_allow_html=True)
-        else:
-            _res_mode = st.radio(
-                "Results view", ["🛢 Wells", "📄 Documents"],
-                horizontal=True, key="results_mode:v1",
-                label_visibility="collapsed")
-
-            # PICKING "Documents" GOES TO THE DOCUMENTS PAGE.
-            #
-            # It used to render a scannable table here plus an "Open in
-            # Documents page →" button underneath — two clicks to reach the
-            # thing the radio already named, and a preview of the page you
-            # were about to open. The radio is a destination, so treat it
-            # as one.
-            #
-            # _render_results_documents is left in place, unused: it is a
-            # perfectly good compact list and may be wanted somewhere that
-            # is NOT a navigation control.
-            if _res_mode == "📄 Documents":
-                st.session_state["selected_entities"] = [
-                    {"type": "well", "id": _u, "name": _u}
-                    for _u in result_uwis]
-                st.session_state["wm_docs_page"] = True
-                st.session_state["_export_scroll_pending"] = True
-                st.rerun()
-
-            selected_in_results = []
-            if _res_mode == "🛢 Wells":
-                # Tray grid — tick wells to scope Scout Tickets / Documents.
-                _grid_rows = []
-                for cu in list(result_uwis):
-                    well = uwi_index.get(cu, {})
-                    _wn_base = well.get("well_name") or cu
-                    _wn_sfx  = well.get("well_name_suffix") or ""
-                    wn = (f"{_wn_base} {_wn_sfx}".strip() if _wn_sfx else _wn_base)
-                    op = (well.get("operator_name") or well.get("company_name") or "")
-                    _grid_rows.append({"Select": False, "UWI": str(cu),
-                                       "Well": wn, "Operator": op})
-                # THE GRID LIVES IN A FORM, AND THAT IS THE WHOLE POINT.
-                # A data_editor outside a form reruns the entire page on every
-                # cell change — so on a long result set, ticking ten wells
-                # re-rendered the map ten times and each tick fought the
-                # redraw. Inside a form, edits accumulate in the browser and
-                # nothing reruns until a submit button is pressed.
-                #
-                # Selection therefore has to live somewhere that survives the
-                # rerun: st.session_state["tray_selected_uwis"], keyed by UWI
-                # rather than by row, so it stays correct when the result set
-                # changes underneath it.
-                _sel_key = "tray_selected_uwis"
-                _all_uwis = [str(r["UWI"]) for r in _grid_rows]
-                # Intersect with what is actually on screen: a stale tick from
-                # a previous draw must not silently scope Documents to a well
-                # that is no longer in the results.
-                _selected = [u for u in (st.session_state.get(_sel_key) or [])
-                             if u in set(_all_uwis)]
-
-                # The editor key carries a nonce so Select all / Clear can
-                # re-default it. Streamlit refuses a write to a widget's own
-                # key once that widget exists, so those buttons CANNOT just
-                # assign the ticks — they record the new selection, bump the
-                # nonce, and rerun; this rebuild then seeds the frame from it.
-                # The key still ENDS IN ':sel' because _is_action_key() keys
-                # off that suffix — 'tray_grid:v2:sel', never 'tray_grid:sel:v2'.
-                _nonce = st.session_state.get("tray_grid_nonce", 0)
-
-                _grid_df = pd.DataFrame(_grid_rows)
-                _grid_df["Select"] = _grid_df["UWI"].isin(set(_selected))
-
-                with st.form(key=f"tray_form_{_nonce}", border=False):
-                    _tray_edit = st.data_editor(
-                        _grid_df,
-                        column_config={"Select": st.column_config.CheckboxColumn(
-                            "Select", width="small")},
-                        disabled=["UWI", "Well", "Operator"],
-                        hide_index=True, use_container_width=True,
-                        height=min(360, 40 + 35 * max(1, len(_grid_df))),
-                        key=f"tray_grid:{_nonce}:sel",
-                    )
-                    _f1, _f2, _f3, _f4 = st.columns([2, 1, 1, 3])
-                    _apply = _f1.form_submit_button(
-                        "✓ Apply selection", type="primary",
-                        use_container_width=True)
-                    # Select all / Clear are SUBMIT buttons, not plain ones, so
-                    # pressing either still harvests the form first — a plain
-                    # button would discard whatever was ticked but not applied.
-                    _pick_all = _f2.form_submit_button(
-                        f"All {len(_all_uwis)}", use_container_width=True)
-                    _pick_none = _f3.form_submit_button(
-                        "None", use_container_width=True)
-                    # _f4 is left empty on purpose -- it holds the buttons to
-                    # their width. The count that used to live here is drawn
-                    # BELOW the form now; see the Apply handler.
-
-                if _pick_all or _pick_none:
-                    st.session_state[_sel_key] = _all_uwis if _pick_all else []
-                    st.session_state["tray_grid_nonce"] = _nonce + 1
-                    # These two DO need the rerun: they re-default the editor,
-                    # and Streamlit refuses a write to a live widget's key, so
-                    # the nonce bump only takes effect on a fresh run.
-                    st.rerun()
-                if _apply:
-                    _selected = [str(r["UWI"]) for _, r in _tray_edit.iterrows()
-                                 if bool(r["Select"])]
-                    st.session_state[_sel_key] = _selected
-
-                # ── THE COUNT, BELOW THE FORM, WHICH IS WHY APPLY IS FREE ───
-                # It used to sit INSIDE the form, so it was drawn before the
-                # Apply handler ran and reported the PREVIOUS selection --
-                # reading as though Apply had done nothing. The answer was an
-                # st.rerun(), described in the comment here as "the deliberate
-                # cost" of one repaint.
-                #
-                # That price was set before the map got expensive. On this page
-                # a rerun is not a repaint: it rebuilds the whole map, 2-4 s,
-                # and Apply has nothing to do with the map. Reported as "the
-                # results well apply selection is really slow for some unknown
-                # reason" -- the reason is that it was redrawing the map.
-                #
-                # Nothing needed the rerun. `_selected` is already reassigned
-                # from the editor above, so every reader below this line --
-                # selected_in_results, Documents scoping, Scout Tickets -- sees
-                # the new selection in THIS run. Only the caption was stale,
-                # and a caption drawn after the handler cannot be.
+            if not result_uwis:
                 st.markdown(
-                    f"<div style='font-size:11px;color:#888;padding:2px 0 6px 6px'>"
-                    f"{len(_selected)} of {len(_all_uwis)} selected</div>",
+                    "<div style='padding:6px 0'>"
+                    "<span style='color:#aaa;font-size:12px'>— No wells —&nbsp;&nbsp;"
+                    "Filter the wells or draw a circle / rectangle on the map to "
+                    "build a result set.</span></div>",
                     unsafe_allow_html=True)
+            else:
+                _res_mode = st.radio(
+                    "Results view", ["🛢 Wells", "📄 Documents"],
+                    horizontal=True, key="results_mode:v1",
+                    label_visibility="collapsed")
 
-                selected_in_results = list(_selected)
-                st.markdown(
-                    "<div style='font-size:11px;color:#555;padding:4px 0 6px 0'>"
-                    "<b>Export</b> sends <b>all</b> results. Tick wells and press "
-                    "<b>Apply selection</b> to scope <b>Documents</b> / "
-                    "<b>Scout Tickets</b> to just those — ticking no longer "
-                    "reloads the map on every box."
-                    "</div>",
-                    unsafe_allow_html=True)
-            # (no else: picking "Documents" navigated away above, so this
-            # branch could only ever be reached by a third radio option
-            # that does not exist. Leaving a second Documents path here is
-            # how the next person ends up debugging the wrong one.)
-
-            #   Scout Tickets → picked wells only
-            #   Documents     → picked wells (fallback all results)
-            #   Export        → all results
-            p1, p2, p3, p4 = st.columns(4)
-            with p1:
-                if st.button("📋 Scout Tickets",
-                             key="view_summary",
-                             use_container_width=True, type="primary",
-                             disabled=not selected_in_results):
-                    st.session_state["show_summary"] = True
-                    st.session_state["_summary_uwis"] = selected_in_results
-                    st.rerun()
-            with p2:
-                _docs_uwis = selected_in_results or result_uwis
-                if st.button("📄 Documents", key="open_docs_btn",
-                             use_container_width=True,
-                             disabled=not _docs_uwis):
-                    # Entity-aware selection the documents page consumes. Wells
-                    # now; seismic/fields can be added as other entity types.
+                # PICKING "Documents" GOES TO THE DOCUMENTS PAGE.
+                #
+                # It used to render a scannable table here plus an "Open in
+                # Documents page →" button underneath — two clicks to reach the
+                # thing the radio already named, and a preview of the page you
+                # were about to open. The radio is a destination, so treat it
+                # as one.
+                #
+                # _render_results_documents is left in place, unused: it is a
+                # perfectly good compact list and may be wanted somewhere that
+                # is NOT a navigation control.
+                if _res_mode == "📄 Documents":
                     st.session_state["selected_entities"] = [
                         {"type": "well", "id": _u, "name": _u}
-                        for _u in _docs_uwis
-                    ]
+                        for _u in result_uwis]
                     st.session_state["wm_docs_page"] = True
                     st.session_state["_export_scroll_pending"] = True
-                    st.rerun()
-            with p3:
-                if st.button("📊 Export", key="export_xlsx_btn",
-                             use_container_width=True,
-                             disabled=not result_uwis):
-                    st.session_state["wm_export_page"] = True
-                    # Scroll to the top once on entry — the Export button sits
-                    # at the bottom of the page, and Streamlit keeps the scroll
-                    # position across the rerun, so the export page would
-                    # otherwise open scrolled to the bottom.
-                    st.session_state["_export_scroll_pending"] = True
-                    st.rerun()
-            with p4:
-                if st.button("🗑 Clear", key="clear_tray",
-                             use_container_width=True):
-                    st.session_state.clicked_uwis = []
-                    st.session_state.scout_uwi    = None
-                    st.session_state["show_summary"] = False
-                    st.session_state["_summary_uwis"] = []
-                    st.session_state["_auto_tray_uwis"] = []
-                    # Also clear viewport markers and the drawing dedupe set
-                    st.session_state["viewport_uwis"] = []
-                    st.session_state["processed_drawings"] = set()
-                    # Clear grid-click dedupe so the same cell can be
-                    # re-clicked, and the drawn bounds so the map
-                    # repositions correctly next time
-                    st.session_state.pop("_last_grid_click", None)
-                    st.session_state.pop("_drawn_bounds", None)
-                    st.session_state.pop("_active_drill_bbox", None)
-                    # Also clear the multi-cell selection buffer, and
-                    # bring the grid back so the user can pick again.
-                    st.session_state["selected_cells"] = []
-                    st.session_state["grid_visible"] = True
-                    st.session_state.pop("grid_visible_toggle", None)
-                    st.rerun()
+                    st.rerun(scope="app")   # Documents view: page/map
+
+                selected_in_results = []
+                if _res_mode == "🛢 Wells":
+                    # Tray grid — tick wells to scope Scout Tickets / Documents.
+                    _grid_rows = []
+                    for cu in list(result_uwis):
+                        well = uwi_index.get(cu, {})
+                        _wn_base = well.get("well_name") or cu
+                        _wn_sfx  = well.get("well_name_suffix") or ""
+                        wn = (f"{_wn_base} {_wn_sfx}".strip() if _wn_sfx else _wn_base)
+                        op = (well.get("operator_name") or well.get("company_name") or "")
+                        _grid_rows.append({"Select": False, "UWI": str(cu),
+                                           "Well": wn, "Operator": op})
+                    # THE GRID LIVES IN A FORM, AND THAT IS THE WHOLE POINT.
+                    # A data_editor outside a form reruns the entire page on every
+                    # cell change — so on a long result set, ticking ten wells
+                    # re-rendered the map ten times and each tick fought the
+                    # redraw. Inside a form, edits accumulate in the browser and
+                    # nothing reruns until a submit button is pressed.
+                    #
+                    # Selection therefore has to live somewhere that survives the
+                    # rerun: st.session_state["tray_selected_uwis"], keyed by UWI
+                    # rather than by row, so it stays correct when the result set
+                    # changes underneath it.
+                    _sel_key = "tray_selected_uwis"
+                    _all_uwis = [str(r["UWI"]) for r in _grid_rows]
+                    # Intersect with what is actually on screen: a stale tick from
+                    # a previous draw must not silently scope Documents to a well
+                    # that is no longer in the results.
+                    _selected = [u for u in (st.session_state.get(_sel_key) or [])
+                                 if u in set(_all_uwis)]
+
+                    # The editor key carries a nonce so Select all / Clear can
+                    # re-default it. Streamlit refuses a write to a widget's own
+                    # key once that widget exists, so those buttons CANNOT just
+                    # assign the ticks — they record the new selection, bump the
+                    # nonce, and rerun; this rebuild then seeds the frame from it.
+                    # The key still ENDS IN ':sel' because _is_action_key() keys
+                    # off that suffix — 'tray_grid:v2:sel', never 'tray_grid:sel:v2'.
+                    _nonce = st.session_state.get("tray_grid_nonce", 0)
+
+                    _grid_df = pd.DataFrame(_grid_rows)
+                    _grid_df["Select"] = _grid_df["UWI"].isin(set(_selected))
+
+                    with st.form(key=f"tray_form_{_nonce}", border=False):
+                        _tray_edit = st.data_editor(
+                            _grid_df,
+                            column_config={"Select": st.column_config.CheckboxColumn(
+                                "Select", width="small")},
+                            disabled=["UWI", "Well", "Operator"],
+                            hide_index=True, use_container_width=True,
+                            height=min(360, 40 + 35 * max(1, len(_grid_df))),
+                            key=f"tray_grid:{_nonce}:sel",
+                        )
+                        _f1, _f2, _f3, _f4 = st.columns([2, 1, 1, 3])
+                        _apply = _f1.form_submit_button(
+                            "✓ Apply selection", type="primary",
+                            use_container_width=True)
+                        # Select all / Clear are SUBMIT buttons, not plain ones, so
+                        # pressing either still harvests the form first — a plain
+                        # button would discard whatever was ticked but not applied.
+                        _pick_all = _f2.form_submit_button(
+                            f"All {len(_all_uwis)}", use_container_width=True)
+                        _pick_none = _f3.form_submit_button(
+                            "None", use_container_width=True)
+                        # _f4 is left empty on purpose -- it holds the buttons to
+                        # their width. The count that used to live here is drawn
+                        # BELOW the form now; see the Apply handler.
+
+                    if _pick_all or _pick_none:
+                        st.session_state[_sel_key] = _all_uwis if _pick_all else []
+                        st.session_state["tray_grid_nonce"] = _nonce + 1
+                        # These two DO need the rerun: they re-default the editor,
+                        # and Streamlit refuses a write to a live widget's key, so
+                        # the nonce bump only takes effect on a fresh run.
+                        st.rerun()
+                    if _apply:
+                        _selected = [str(r["UWI"]) for _, r in _tray_edit.iterrows()
+                                     if bool(r["Select"])]
+                        st.session_state[_sel_key] = _selected
+
+                    # ── THE COUNT, BELOW THE FORM, WHICH IS WHY APPLY IS FREE ───
+                    # It used to sit INSIDE the form, so it was drawn before the
+                    # Apply handler ran and reported the PREVIOUS selection --
+                    # reading as though Apply had done nothing. The answer was an
+                    # st.rerun(), described in the comment here as "the deliberate
+                    # cost" of one repaint.
+                    #
+                    # That price was set before the map got expensive. On this page
+                    # a rerun is not a repaint: it rebuilds the whole map, 2-4 s,
+                    # and Apply has nothing to do with the map. Reported as "the
+                    # results well apply selection is really slow for some unknown
+                    # reason" -- the reason is that it was redrawing the map.
+                    #
+                    # Nothing needed the rerun. `_selected` is already reassigned
+                    # from the editor above, so every reader below this line --
+                    # selected_in_results, Documents scoping, Scout Tickets -- sees
+                    # the new selection in THIS run. Only the caption was stale,
+                    # and a caption drawn after the handler cannot be.
+                    st.markdown(
+                        f"<div style='font-size:11px;color:#888;padding:2px 0 6px 6px'>"
+                        f"{len(_selected)} of {len(_all_uwis)} selected</div>",
+                        unsafe_allow_html=True)
+
+                    selected_in_results = list(_selected)
+                    st.markdown(
+                        "<div style='font-size:11px;color:#555;padding:4px 0 6px 0'>"
+                        "<b>Export</b> sends <b>all</b> results. Tick wells and press "
+                        "<b>Apply selection</b> to scope <b>Documents</b> / "
+                        "<b>Scout Tickets</b> to just those — ticking no longer "
+                        "reloads the map on every box."
+                        "</div>",
+                        unsafe_allow_html=True)
+                # (no else: picking "Documents" navigated away above, so this
+                # branch could only ever be reached by a third radio option
+                # that does not exist. Leaving a second Documents path here is
+                # how the next person ends up debugging the wrong one.)
+
+                #   Scout Tickets → picked wells only
+                #   Documents     → picked wells (fallback all results)
+                #   Export        → all results
+                p1, p2, p3, p4 = st.columns(4)
+                with p1:
+                    if st.button("📋 Scout Tickets",
+                                 key="view_summary",
+                                 use_container_width=True, type="primary",
+                                 disabled=not selected_in_results):
+                        st.session_state["show_summary"] = True
+                        st.session_state["_summary_uwis"] = selected_in_results
+                        st.rerun(scope="app")   # Scout Tickets: page/map
+                with p2:
+                    _docs_uwis = selected_in_results or result_uwis
+                    if st.button("📄 Documents", key="open_docs_btn",
+                                 use_container_width=True,
+                                 disabled=not _docs_uwis):
+                        # Entity-aware selection the documents page consumes. Wells
+                        # now; seismic/fields can be added as other entity types.
+                        st.session_state["selected_entities"] = [
+                            {"type": "well", "id": _u, "name": _u}
+                            for _u in _docs_uwis
+                        ]
+                        st.session_state["wm_docs_page"] = True
+                        st.session_state["_export_scroll_pending"] = True
+                        st.rerun(scope="app")   # Documents button: page/map
+                with p3:
+                    if st.button("📊 Export", key="export_xlsx_btn",
+                                 use_container_width=True,
+                                 disabled=not result_uwis):
+                        st.session_state["wm_export_page"] = True
+                        # Scroll to the top once on entry — the Export button sits
+                        # at the bottom of the page, and Streamlit keeps the scroll
+                        # position across the rerun, so the export page would
+                        # otherwise open scrolled to the bottom.
+                        st.session_state["_export_scroll_pending"] = True
+                        st.rerun(scope="app")   # Export: page/map
+                with p4:
+                    if st.button("🗑 Clear", key="clear_tray",
+                                 use_container_width=True):
+                        st.session_state.clicked_uwis = []
+                        st.session_state.scout_uwi    = None
+                        st.session_state["show_summary"] = False
+                        st.session_state["_summary_uwis"] = []
+                        st.session_state["_auto_tray_uwis"] = []
+                        # Also clear viewport markers and the drawing dedupe set
+                        st.session_state["viewport_uwis"] = []
+                        st.session_state["processed_drawings"] = set()
+                        # Clear grid-click dedupe so the same cell can be
+                        # re-clicked, and the drawn bounds so the map
+                        # repositions correctly next time
+                        st.session_state.pop("_last_grid_click", None)
+                        st.session_state.pop("_drawn_bounds", None)
+                        st.session_state.pop("_active_drill_bbox", None)
+                        # Also clear the multi-cell selection buffer, and
+                        # bring the grid back so the user can pick again.
+                        st.session_state["selected_cells"] = []
+                        st.session_state["grid_visible"] = True
+                        st.session_state.pop("grid_visible_toggle", None)
+                        st.rerun(scope="app")   # Clear tray: page/map
+
+        _results_panel()
 
         # ── Scout Ticket panel — renders below the Object Tray ──────────
         _summary_uwis = st.session_state.get("_summary_uwis", [])
