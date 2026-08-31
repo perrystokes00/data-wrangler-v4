@@ -10819,7 +10819,40 @@ def run(engine=None):
             _ai_spec, _ai_db_columns(engine))
         st.session_state["ai_filter_rejected"] = _ai_rejected
         st.session_state["ai_filter_sql_where"] = _ai_where
-        if _ai_where:
+        # ── A DROPPED CLAUSE MEANS THE ANSWER IS WRONG, NOT SMALLER ─────
+        # _ai_spec_to_where skips any clause it cannot build -- an invented
+        # column, an unusable literal, an unsupported operator -- and used to
+        # run the query with whatever survived. Every one of those drops
+        # WIDENS the result: ask for three conditions, get wells matching
+        # two, under a green banner still describing all three.
+        #
+        # That is how "wells deeper than 5000 ft after 1980 near line A"
+        # appeared to work. The proximity clause was not a column, so it was
+        # dropped, and the map filled with wells that satisfied the depth and
+        # the date and nothing else. CLAUDE.md's rule is the whole point
+        # here: wrong is worse than missing. A confident wrong set plots,
+        # exports and gets quoted.
+        #
+        # So a rejected clause now refuses the filter instead of quietly
+        # relaxing it. The reasons were already collected and shown -- as a
+        # warning UNDER a success banner, which reads as a footnote rather
+        # than "a third of your question was discarded". Raised to the error
+        # slot, which suppresses the success.
+        if _ai_rejected:
+            _display_wells = []
+            st.session_state["ai_filter_match"] = (0, None)
+            st.session_state["ai_filter_empty_fields"] = []
+            st.session_state["ai_filter_clauses"] = []
+            st.session_state["ai_filter_no_source"] = False
+            st.session_state["ai_filter_map_empty"] = False
+            st.session_state["ai_filter_error"] = (
+                "This filter was NOT run: %d of its condition(s) could not be "
+                "applied, and running without them would return MORE wells "
+                "than you asked for.\n\n%s\n\nRephrase using a column that "
+                "exists, or use 📍 Wells near a feature for proximity."
+                % (len(_ai_rejected),
+                   "\n".join("• " + r for r in _ai_rejected)))
+        elif _ai_where:
             try:
                 _display_wells = _qry_wells_bcp(
                     engine, limit=AI_DB_LIMIT, where_extra=_ai_where) or []
@@ -10832,6 +10865,10 @@ def run(engine=None):
             st.session_state["ai_filter_clauses"] = []
             st.session_state["ai_filter_no_source"] = False
             st.session_state["ai_filter_map_empty"] = False
+            # A REFUSAL FROM A PREVIOUS SPEC MUST NOT OUTLIVE IT. The error
+            # slot suppresses the success banner, so a stale one would leave a
+            # filter that ran perfectly reporting that it had not been run.
+            st.session_state.pop("ai_filter_error", None)
     elif _ai_spec and _wells_raw:
         _display_wells = _apply_ai_filter(_wells_raw, _ai_spec)
         # Diagnostics so a 0-match isn't a silent blank map. Record how many
