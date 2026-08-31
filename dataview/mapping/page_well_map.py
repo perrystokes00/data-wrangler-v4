@@ -419,9 +419,21 @@ def _timed(name, fn):
 # themselves, and the tools that carry their own Run or Send button, where the
 # map should redraw when the action fires rather than while a box is being
 # filled in.
+# The workflow recorder. Imported at module level and NOT inside the toggle:
+# a bare name that only resolves when its line runs is the extract_core scar
+# -- `import uuid` missing at module level made every enrichment write raise
+# NameError, and it surfaced only because a test read the log.
+from dataview.mapping import workflow_capture
+
 _OPT_PREFIXES = ("wm_", "h3_", "wells_", "seis_")
 _OPT_DENY = frozenset({
     "wm_hold_map", "wm_freeze_map", "wm_reset_page",
+    # Recording is not a map option. Its key starts with wm_ so the persist
+    # loop carries it across a page switch, which also puts it inside
+    # _OPT_PREFIXES -- and without this line, switching the recorder on
+    # would register as an option change and HOLD the map. A recorder that
+    # alters what it records is worse than none.
+    workflow_capture.ON_KEY,
     "wm_ai_question", "wm_ai_scope", "wm_ai_run", "wm_ai_clear",
     "wm_near_dist", "wm_near_feat", "wm_near_run", "wm_near_open",
     "wm_compute_paths",
@@ -8335,9 +8347,15 @@ def _ai_spec_to_where(spec, columns=None):
             parts.append(f"{expr} {_AI_SQL_OPS[op]} {lit}")
         else:
             rejected.append(f"{field} — operator {op!r} not supported")
-    if not parts:
-        return "", rejected
-    return " AND (" + " AND ".join(parts) + ")", rejected
+    _where = (" AND (" + " AND ".join(parts) + ")") if parts else ""
+    # THE WHERE AND THE REJECTIONS TOGETHER ARE THE ANSWER. A change that
+    # starts silently dropping a clause moves the second without moving the
+    # first, so digesting only the SQL would miss exactly the regression
+    # this filter has already had once.
+    _wf_op("ai_spec_to_where", {"spec": json.dumps(spec, sort_keys=True,
+                                                   default=str)},
+           [_where] + sorted(rejected), replayable=True)
+    return _where, rejected
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -8750,6 +8768,23 @@ def _near_feature_names(_engine, feature: str) -> list[str]:
         return []
 
 
+def _wf_op(name, args, result=None, replayable=False):
+    """Hand one core operation to the workflow recorder, if it is running.
+
+    A SHIM, SO THE RECORDER CANNOT REACH THE PAGE. workflow_capture already
+    refuses to raise, but it is imported lazily and reached from inside query
+    functions -- the two places where a new import failing would take out
+    something that was working before the recorder existed. Costs one dict
+    lookup when recording is off.
+    """
+    try:
+        from dataview.mapping import workflow_capture as _wf
+        if _wf.is_on():
+            _wf.record_op(name, args, result=result, replayable=replayable)
+    except Exception:
+        pass
+
+
 def _resolve_near_name(_engine, feature: str, name: str):
     """The catalogued name closest to what was asked for, or None.
 
@@ -8777,6 +8812,8 @@ def _resolve_near_name(_engine, feature: str, name: str):
     if not _names:
         return None
     if _want in _names:
+        _wf_op("resolve_near_name", {"feature": feature, "name": _want},
+               [_want], replayable=True)
         return _want
 
     def _key(s):
@@ -8788,12 +8825,18 @@ def _resolve_near_name(_engine, feature: str, name: str):
 
     _wk = _key(_want)
     _exact = [n for n in _names if _key(n) == _wk]
+    _hit = None
     if len(_exact) == 1:
-        return _exact[0]
-    if len(_exact) > 1:
-        return None
-    _pre = [n for n in _names if _key(n).startswith(_wk)]
-    return _pre[0] if len(_pre) == 1 else None
+        _hit = _exact[0]
+    elif not _exact:
+        _pre = [n for n in _names if _key(n).startswith(_wk)]
+        _hit = _pre[0] if len(_pre) == 1 else None
+    # RECORDED EVEN WHEN IT RESOLVES TO NOTHING. A refusal is a result: if a
+    # later change starts resolving an ambiguous name to one of its
+    # candidates, the digest moves from empty to a value and --check says so.
+    _wf_op("resolve_near_name", {"feature": feature, "name": _want},
+           [] if _hit is None else [_hit], replayable=True)
+    return _hit
 
 
 def _wells_near_feature(_engine, feature: str, name: str,
@@ -8833,7 +8876,11 @@ def _wells_near_feature(_engine, feature: str, name: str,
            AND w.geog.STDistance(f.{geom}) <= :d""")
     try:
         with _engine.connect() as cx:
-            return [r[0] for r in cx.execute(sql, {"nm": name, "d": d}).fetchall()]
+            _uwis = [r[0] for r in cx.execute(sql, {"nm": name, "d": d}).fetchall()]
+        _wf_op("wells_near_feature",
+               {"feature": feature, "name": name, "distance_m": d},
+               _uwis, replayable=True)
+        return _uwis
     except Exception:
         return []
 
@@ -9673,6 +9720,10 @@ def run(engine=None):
         st.session_state.get("h3_layer_on"),
         st.session_state.get("wm_freeze_map"),
         st.session_state.get("wm_hold_map")))
+    # The render boundary, with the state that produced it -- so the ops
+    # below can be read against what was on screen when they ran. Costs one
+    # dict lookup when the recorder is off.
+    workflow_capture.record_render("map")
 
     # ── the second-screen watcher, registered FIRST ────────────────────
     # "The fragment with id ... does not exist anymore - it might have been
@@ -15458,8 +15509,8 @@ def run(engine=None):
         # symbols, the clip toggle. Clearing the drawn box is an action,
         # the same kind of thing as ✗ Clear wells and 🎯 Reset view, and
         # it belongs next to them where those are looked for.
-        _rv1, _rvc, _rvb, _rvf, _rvh = st.columns(
-            [1.0, 1.1, 1.0, 1.2, 1.2])
+        _rv1, _rvc, _rvb, _rvf, _rvh, _rvr = st.columns(
+            [1.0, 1.1, 1.0, 1.2, 1.2, 0.9])
         # HOLD THE MAP UNTIL THE SELECTIONS ARE MADE. Every option on this
         # page reruns the script, and the script rebuilds the map -- so
         # picking an area, then a query, then a layer costs three rebuilds to
@@ -15504,6 +15555,30 @@ def run(engine=None):
                  "scout ticket. OFF by default: a click opening what you "
                  "clicked is what people expect, and freezing is the "
                  "deliberate trade of that for speed.")
+        # ── RECORD WHAT THIS SESSION DOES ───────────────────────────────
+        # Writes the core operations -- the spatial lookups, the WHERE the
+        # AI filter built, what each returned -- to a JSONL in C:\Bulk\
+        # reports. tools/replay_workflow.py reads it as a workflow, and
+        # --check re-runs the replayable ones and compares by digest.
+        #
+        # The toggle only opens and closes the file; the recording itself
+        # happens inside the operations, so nothing here has to be kept in
+        # step with what the page draws.
+        _rec_on = _rvr.toggle(
+            "🎬 Record", key=workflow_capture.ON_KEY,
+            help="Write what this session asks the database to C:\\Bulk\\"
+                 "reports, so it can be replayed and re-checked later. "
+                 "Records operations and their results, not keystrokes.")
+        if _rec_on and not workflow_capture.current_path():
+            _p = workflow_capture.start()
+            if _p:
+                workflow_capture.record_note("recording started from the map")
+        elif not _rec_on and workflow_capture.current_path():
+            workflow_capture.stop()
+        if _rec_on:
+            _wfp = workflow_capture.current_path()
+            if _wfp:
+                st.caption("🎬 recording → `%s`" % os.path.basename(_wfp))
         if _rvc.button("✗ Clear wells", key="wells_clear_viewport",
                        use_container_width=True,
                        disabled=not _wells_on_map(),
