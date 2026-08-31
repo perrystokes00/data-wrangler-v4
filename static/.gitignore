@@ -1,3 +1,7 @@
 # Generated map layers -- rebuilt from the database on demand.
 *.geojson
 *.json
+# The freshness sidecar has the same lifetime as the file it describes, and
+# that file is ignored above. Committed, it would travel to a checkout where
+# the geojson does not exist and claim it was current.
+*.geojson.sig

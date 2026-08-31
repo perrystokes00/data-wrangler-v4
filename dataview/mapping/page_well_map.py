@@ -419,9 +419,21 @@ def _timed(name, fn):
 # themselves, and the tools that carry their own Run or Send button, where the
 # map should redraw when the action fires rather than while a box is being
 # filled in.
+# The workflow recorder. Imported at module level and NOT inside the toggle:
+# a bare name that only resolves when its line runs is the extract_core scar
+# -- `import uuid` missing at module level made every enrichment write raise
+# NameError, and it surfaced only because a test read the log.
+from dataview.mapping import workflow_capture
+
 _OPT_PREFIXES = ("wm_", "h3_", "wells_", "seis_")
 _OPT_DENY = frozenset({
     "wm_hold_map", "wm_freeze_map", "wm_reset_page",
+    # Recording is not a map option. Its key starts with wm_ so the persist
+    # loop carries it across a page switch, which also puts it inside
+    # _OPT_PREFIXES -- and without this line, switching the recorder on
+    # would register as an option change and HOLD the map. A recorder that
+    # alters what it records is worse than none.
+    workflow_capture.ON_KEY,
     "wm_ai_question", "wm_ai_scope", "wm_ai_run", "wm_ai_clear",
     "wm_near_dist", "wm_near_feat", "wm_near_run", "wm_near_open",
     "wm_compute_paths",
@@ -1042,12 +1054,133 @@ def _clear_wells_state() -> None:
 MAP_SEIS_PREF = "map_seis"
 
 
-def _seis_pref_mtime() -> float:
-    """When the shared choice file last changed. 0.0 if it is not there."""
+def _seis_pref_mtime():
+    """A fingerprint of the SEISMIC choice -- not the file's timestamp.
+
+    THE MIRROR IMAGE OF THE LEASE WATCHER'S BUG, left standing when that one
+    was fixed in bf012d5 and noted there as "waiting". It did not wait long.
+
+    user_prefs.json carries BOTH second screens' choices AND the saved
+    places. Keyed on the file's mtime, this watcher read every write to any
+    of them as "a seismic instruction arrived" and answered with a FULL APP
+    RERUN -- st.rerun() at the end of _watch_seis_choice -- which rebuilds
+    the entire map, 2-4 s a time.
+
+    Measured 30 Aug 2026 from a single session's render log: 32 renders, of
+    which 12 did no work at all, and this line was the largest single source
+    of them. Reported as "the well viewer very, very slow, multiple
+    re-runs" -- and, crucially, "it was only one well". It was never about
+    how many wells: a map showing one well rebuilds just as often as a map
+    showing five thousand.
+
+    Reads the seismic section only, so a lease write or a saved place is now
+    invisible to it and a seismic write still isn't. The mtime stays as a
+    cheap first gate, so the parse only happens when something moved.
+    """
     try:
-        return float(_USER_PREFS_PATH.stat().st_mtime)
-    except OSError:
-        return 0.0
+        _m = float(_USER_PREFS_PATH.stat().st_mtime)
+    except Exception:
+        return ""
+    _cache = getattr(_seis_pref_mtime, "_cache", None)
+    if _cache and _cache[0] == _m:
+        return _cache[1]
+    try:
+        _sig = json.dumps(_map_seis_choice(), sort_keys=True)
+    except Exception:
+        # A UNIQUE VALUE, NOT A CONSTANT. Returning "" on a transient
+        # unreadable file would equal the no-file case, so the next good
+        # read would look like a change and force a rebuild. Tie it to the
+        # mtime instead: unreadable-now and unreadable-later differ only if
+        # the file actually moved.
+        _sig = "unreadable:%r" % _m
+    _seis_pref_mtime._cache = (_m, _sig)
+    return _sig
+def _collapse_sidebar_once():
+    """Fold the nav sidebar away, ONCE per session.
+
+    The strip needs the width and the sidebar is holding ~300px of nav that
+    is not being used while reading a map. Streamlit has no API for this
+    after the session starts -- initial_sidebar_state applies only to the
+    first render, and by the time the map page is reached that moment is
+    long gone -- so it clicks the control the user would click, in the
+    PARENT document, the same reach _scroll_main_to_top already makes from
+    inside a components iframe.
+
+    ONCE, AND NEVER AGAIN -- but the "once" is recorded IN THE BROWSER, and
+    only after it actually worked.
+
+    The first version set a session_state flag in Python and then emitted
+    the script. That stamps success before anything has happened: if the
+    sidebar was not mounted yet, or the page was still loading, every retry
+    missed and the flag said "done" for the rest of the session. Reported as
+    "the sidebar doesn't collapse", with nothing in any log, because from
+    Python's side it had been handled. It is the same error the lease
+    sidecar has a comment warning against -- stamp only after the write
+    succeeds -- made three hundred lines away from that comment.
+
+    Emitted on every render now, and the WINDOW flag decides: set only when
+    the sidebar is observed collapsed, so a failed attempt is retried by the
+    next render, and a success is never repeated. That also means a sidebar
+    the user re-opens by hand stays open -- the flag is already set, and a
+    control that fights back is worse than the problem it solves.
+
+    If the selector ever stops matching, nothing happens and the sidebar
+    stays open -- a cosmetic no-op, not a broken page. Guarded on the
+    testids Streamlit 1.45 actually emits, checked against the shipped
+    bundle rather than assumed.
+    """
+    st.components.v1.html(
+        """
+        <script>
+        (function(){
+          var w = window.parent, d = w.document;
+          // ALREADY DONE FOR THIS PAGE? The flag lives on the parent window
+          // and is set only on observed success, so a missed attempt is
+          // retried by the next render and a sidebar re-opened by hand is
+          // left alone.
+          if (w.__dv_sidebar_collapsed) { return; }
+          var done = false;
+          // COLLAPSED IS A STATE TO TEST, NOT A CLICK TO COUNT. The retry
+          // schedule exists because the sidebar may not be mounted yet --
+          // but a schedule that just clicks four times TOGGLES four times,
+          // and an even number of toggles leaves it exactly where it
+          // started. Ask whether it is collapsed; stop as soon as it is.
+          //
+          // ARIA-EXPANDED, NOT THE PRESENCE OF THE COLLAPSED CONTROL.
+          // Measured in the browser: [data-testid="stSidebarCollapsedControl"]
+          // is in the DOM while the sidebar is OPEN -- so testing for it
+          // reported "already collapsed" on the first try and the click
+          // never happened. The sidebar simply stayed open, silently and
+          // with no error. Width is no better: collapsing translates the
+          // section off-canvas and getBoundingClientRect still reads 336px.
+          // aria-expanded flips true -> false, verified both ways.
+          function collapsed(){
+            var sb = d.querySelector('[data-testid="stSidebar"]');
+            return !!sb && sb.getAttribute('aria-expanded') === 'false';
+          }
+          function go(){
+            if (done) { return; }
+            // STAMPED ON OBSERVED STATE, never on "we clicked something".
+            if (collapsed()) { done = true; w.__dv_sidebar_collapsed = 1; return; }
+            var btn = d.querySelector(
+              '[data-testid="stSidebarCollapseButton"] button')
+              || d.querySelector('[data-testid="stSidebarCollapseButton"]');
+            if (btn && btn.click) { btn.click(); }
+            // NOT done yet -- the next tick re-reads aria-expanded and only
+            // then calls it finished. A click that did not land (button not
+            // mounted, React not listening yet) is retried rather than
+            // recorded as a success.
+          }
+          // Out to 4s: the sidebar mounts late on a cold load, and the old
+          // 900ms ceiling is what a slower machine was losing the race to.
+          [0, 150, 400, 900, 1600, 2500, 4000].forEach(
+            function(t){ setTimeout(go, t); });
+        })();
+        </script>
+        """,
+        height=0)
+
+
 def _scroll_main_to_top():
     """Put the main scroll container back at the top.
 
@@ -5402,6 +5535,15 @@ def _render_seis_gallery(picks):
     three lines that failed.
     """
     _shown = [h for h in picks if h.get("path")][:SEIS_GALLERY_MAX]
+    # NOTHING TO STACK IS A SENTENCE, NOT AN EMPTY PAGE. Every pick can lack
+    # a path -- geometry is catalogued separately from files -- and the loop
+    # below then draws nothing at all, which is indistinguishable from the
+    # gallery being broken. Say which, and say how to get back.
+    if not _shown:
+        st.info("None of the %d picked line(s) has a file behind it, so "
+                "there is no section to stack. Untick **Show all** to go "
+                "back to the single view." % len(picks))
+        return
     if len(picks) > len(_shown):
         st.info("Showing the first %d of %d. Clear some, or step through "
                 "them with ◀ ▶." % (len(_shown), len(picks)))
@@ -5477,6 +5619,21 @@ def _render_seis_basket():
     """
     _multi = list(st.session_state.get("_seis_multi") or [])
     if len(_multi) < 2:
+        # ── THE CHECKBOX BELOW IS NOT DRAWN ON THIS PATH ────────────────
+        # ...so a True left in its key can never be turned off again from
+        # the page, and `seis_basket_all` is in the persist set, which
+        # self-assigns it on every run precisely so it survives. The two
+        # together stranded the viewer: Show all with a basket that later
+        # emptied left the flag set with no control anywhere to clear it,
+        # and _render_seis_pick returns after the gallery, so the single
+        # section never drew again. Reported as a blank page after Show
+        # all, and again as "we need to put the seismic viewer back
+        # inline".
+        #
+        # Cleared HERE because here is before any widget on this path
+        # exists -- setting a widget's own key before it is instantiated
+        # is the legal half of scar #6; after, it raises on a later run.
+        st.session_state["seis_basket_all"] = False
         return
     st.caption("%d lines picked from the map." % len(_multi))
     _labels = [_seis_label(h) for h in _multi]
@@ -5726,8 +5883,14 @@ def _render_seis_pick(lines=None, df3d=None):
 
     _render_seis_area_add(lines, df3d)
     _render_seis_basket()
-    if st.session_state.get("seis_basket_all"):
-        _render_seis_gallery(st.session_state.get("_seis_multi") or [])
+    # THE GALLERY REPLACES THE SINGLE VIEW, so it may only do that when it
+    # actually has something to draw. Gated on the flag ALONE, an empty
+    # basket rendered nothing and returned, and the whole viewer -- header,
+    # trace headers, section -- silently vanished. A branch that can produce
+    # no output must not also be a return.
+    _gal = list(st.session_state.get("_seis_multi") or [])
+    if st.session_state.get("seis_basket_all") and _gal:
+        _render_seis_gallery(_gal)
         return
 
     _pick = st.session_state.get("_seis_pick")
@@ -8184,9 +8347,15 @@ def _ai_spec_to_where(spec, columns=None):
             parts.append(f"{expr} {_AI_SQL_OPS[op]} {lit}")
         else:
             rejected.append(f"{field} — operator {op!r} not supported")
-    if not parts:
-        return "", rejected
-    return " AND (" + " AND ".join(parts) + ")", rejected
+    _where = (" AND (" + " AND ".join(parts) + ")") if parts else ""
+    # THE WHERE AND THE REJECTIONS TOGETHER ARE THE ANSWER. A change that
+    # starts silently dropping a clause moves the second without moving the
+    # first, so digesting only the SQL would miss exactly the regression
+    # this filter has already had once.
+    _wf_op("ai_spec_to_where", {"spec": json.dumps(spec, sort_keys=True,
+                                                   default=str)},
+           [_where] + sorted(rejected), replayable=True)
+    return _where, rejected
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -8343,6 +8512,34 @@ def _ai_filter_wells(question: str, sample_wells: list[dict],
                     _lease_hint = "in use: " + ", ".join(_lns[:40])
             except Exception:
                 _lease_hint = ""
+        # ── WHAT "NEAR LINE A" HAD NO WAY TO SAY ────────────────────────
+        # There was no proximity vocabulary in this prompt at all, so a
+        # question containing "near line A" could only come back as an
+        # ordinary column comparison -- the model chose area = 'lineA'.
+        # "area" is not a well column, _apply_ai_filter correctly refuses to
+        # pass a clause it cannot evaluate, and every well failed it: zero
+        # wells under a confident green description.
+        #
+        # NAME THE FEATURES THAT EXIST, for the reason lease_number is named
+        # above. The seismic lines are catalogued as 'lineA.sgy', so a model
+        # told nothing invents 'lineA' and the exact-match JOIN in
+        # _wells_near_feature finds no feature row. Listing them removes the
+        # guess; _resolve_near_name forgives it if one gets through anyway.
+        _near_hint = ""
+        if _engine is not None:
+            _nh = []
+            for _fk in ("seismic_line", "seismic_survey", "field", "lease",
+                        "pipeline"):
+                try:
+                    _nms = _near_feature_names(_engine, _fk)
+                except Exception:
+                    _nms = []
+                if _nms:
+                    _nh.append("    %s: %s%s"
+                               % (_fk, ", ".join(_nms[:12]),
+                                  " …" if len(_nms) > 12 else ""))
+            if _nh:
+                _near_hint = "\n".join(_nh)
         _col_list = ", ".join(sorted(_db_cols)) if _db_cols else col_summary
         _has_list = "\n".join(
             f"  {k} — true if the well has {lbl}"
@@ -8379,12 +8576,23 @@ def _ai_filter_wells(question: str, sample_wells: list[dict],
                "  lease_operator: who holds the lease, which is NOT\n"
                "    necessarily the well's operator_name\n"
                if _lease_hint else "")
+            + (("\n"
+                "PROXIMITY. If the question says wells NEAR / close to / "
+                "within some distance of a named feature, do NOT invent a "
+                "column for it -- there is none, and a made-up column matches "
+                "nothing. Use the separate \"near\" key. Name the feature "
+                "EXACTLY as listed here:\n" + _near_hint + "\n"
+                "Default to 5 miles when the question gives no distance.\n")
+               if _near_hint else "")
             + "\n"
             'Return this exact JSON structure:\n'
             '{\n'
             '  "filters": [\n'
             '    {"field": "<column_name>", "op": "<eq|ne|gt|gte|lt|lte|contains|in>", "value": <value>}\n'
             '  ],\n'
+            '  "near": {"feature": "<seismic_line|seismic_survey|field|lease|pipeline>",\n'
+            '           "name": "<exact name from the list above>",\n'
+            '           "miles": <number>},        // OPTIONAL - omit when not asked\n'
             '  "description": "<short human description of the filter>"\n'
             '}\n\n'
             "Rules:\n"
@@ -8400,7 +8608,15 @@ def _ai_filter_wells(question: str, sample_wells: list[dict],
             '               {"field": "has_core", "op": "eq", "value": true}],\n'
             '   "description": "Wells over 10,000 ft by Anadarko with core data"}\n'
             "- final_td, lat, lon are numeric (float)\n"
-            '- If the question cannot be answered, return {"filters": [], "description": "Could not interpret query"}'
+            + ("- Example WITH proximity: 'wells deeper than 5000 ft drilled\n"
+               "  after 1980 near line A' ->\n"
+               '  {"filters": [{"field": "final_td", "op": "gt", "value": 5000},\n'
+               '               {"field": "spud_date", "op": "gt", "value": "1980-01-01"}],\n'
+               '   "near": {"feature": "seismic_line", "name": "lineA.sgy", "miles": 5},\n'
+               '   "description": "Wells over 5,000 ft spudded after 1980 within 5 mi of lineA.sgy"}\n'
+               "- the proximity goes in \"near\", NEVER in filters\n"
+               if _near_hint else "")
+            + '- If the question cannot be answered, return {"filters": [], "description": "Could not interpret query"}'
         )
 
         import os
@@ -8552,6 +8768,77 @@ def _near_feature_names(_engine, feature: str) -> list[str]:
         return []
 
 
+def _wf_op(name, args, result=None, replayable=False):
+    """Hand one core operation to the workflow recorder, if it is running.
+
+    A SHIM, SO THE RECORDER CANNOT REACH THE PAGE. workflow_capture already
+    refuses to raise, but it is imported lazily and reached from inside query
+    functions -- the two places where a new import failing would take out
+    something that was working before the recorder existed. Costs one dict
+    lookup when recording is off.
+    """
+    try:
+        from dataview.mapping import workflow_capture as _wf
+        if _wf.is_on():
+            _wf.record_op(name, args, result=result, replayable=replayable)
+    except Exception:
+        pass
+
+
+def _resolve_near_name(_engine, feature: str, name: str):
+    """The catalogued name closest to what was asked for, or None.
+
+    THE JOIN IN _wells_near_feature IS AN EXACT MATCH, and the things it
+    matches against are file names: the seismic lines are 'lineA.sgy', not
+    'lineA'. So "near line A" -- however sensibly a human or a model renders
+    it -- misses, returns no uwis, and is indistinguishable from "no wells
+    are near that line". Naming the real values in the prompt stops the
+    model guessing; this is the backstop for when something guesses anyway.
+
+    Deliberately CONSERVATIVE. It will fold case, spaces and a file
+    extension, and it will accept an unambiguous prefix -- but if a loose
+    match is ambiguous it returns None rather than picking one. A filter
+    that quietly answers about lineB when you asked about lineA is the
+    "wrong is worse than missing" failure, and it would be invisible: the
+    description would still say what you asked for.
+    """
+    _want = str(name or "").strip()
+    if not _want:
+        return None
+    try:
+        _names = _near_feature_names(_engine, feature)
+    except Exception:
+        return None
+    if not _names:
+        return None
+    if _want in _names:
+        _wf_op("resolve_near_name", {"feature": feature, "name": _want},
+               [_want], replayable=True)
+        return _want
+
+    def _key(s):
+        s = str(s).strip().lower()
+        for _ext in (".sgy", ".segy", ".sgd"):
+            if s.endswith(_ext):
+                s = s[:-len(_ext)]
+        return "".join(s.split())
+
+    _wk = _key(_want)
+    _exact = [n for n in _names if _key(n) == _wk]
+    _hit = None
+    if len(_exact) == 1:
+        _hit = _exact[0]
+    elif not _exact:
+        _pre = [n for n in _names if _key(n).startswith(_wk)]
+        _hit = _pre[0] if len(_pre) == 1 else None
+    # RECORDED EVEN WHEN IT RESOLVES TO NOTHING. A refusal is a result: if a
+    # later change starts resolving an ambiguous name to one of its
+    # candidates, the digest moves from empty to a value and --check says so.
+    _wf_op("resolve_near_name", {"feature": feature, "name": _want},
+           [] if _hit is None else [_hit], replayable=True)
+    return _hit
+
+
 def _wells_near_feature(_engine, feature: str, name: str,
                         distance_m: float) -> list[str]:
     """UWIs within distance_m of a named feature. Server-side, parameterised.
@@ -8589,7 +8876,11 @@ def _wells_near_feature(_engine, feature: str, name: str,
            AND w.geog.STDistance(f.{geom}) <= :d""")
     try:
         with _engine.connect() as cx:
-            return [r[0] for r in cx.execute(sql, {"nm": name, "d": d}).fetchall()]
+            _uwis = [r[0] for r in cx.execute(sql, {"nm": name, "d": d}).fetchall()]
+        _wf_op("wells_near_feature",
+               {"feature": feature, "name": name, "distance_m": d},
+               _uwis, replayable=True)
+        return _uwis
     except Exception:
         return []
 
@@ -9253,6 +9544,247 @@ def _render_saved_places(engine):
             st.warning(_emsg)
 
 
+def _lease_filter_sql(filt, p="lf_"):
+    """The lease panel's filter as SQL, over r (dv_land_right) and g
+    (dv_land_tract_geom). Returns (clauses, params).
+
+    ONE DEFINITION, BECAUSE THE THIRD COPY IS WHERE IT GOES WRONG. The panel
+    counts leases with these predicates and the map draws leases by applying
+    the same choices in the BROWSER; the township shading did neither, so it
+    coloured every township by ALL its leases while the panel above it
+    reported a filtered number. "Lease filters don't filter townships?" --
+    they did not.
+
+    Spelling them a second time inside the township query would have fixed
+    the symptom and created a third list that must agree with two others.
+    That is the shape that cost two bugs in one evening: the mirror registry,
+    and the lease channel that read six of the sixteen keys it was sent.
+
+    PARAMETERS ARE PREFIXED, because these clauses get pasted into a query
+    that has bound names of its own -- the township aggregate already binds
+    :st, :s, :n, :w and :e. A silent collision would not raise; it would
+    answer a different question.
+
+    Every clause is over r or g, so this composes anywhere those two tables
+    are in scope -- as a WHERE in the panel's count, and as an EXISTS in the
+    township join.
+    """
+    _f = filt or {}
+    _c, _pm = [], {}
+
+    def _in(col, vals, tag):
+        if not vals:
+            return
+        _keys = ["%s%s%d" % (p, tag, i) for i in range(len(vals))]
+        _c.append("%s IN (%s)" % (col, ",".join(":" + k for k in _keys)))
+        _pm.update(dict(zip(_keys, vals)))
+
+    _in("r.source", list(_f.get("source") or []), "src")
+    _in("r.lease_status", list(_f.get("status") or []), "sts")
+    _in("g.province_state", list(_f.get("state") or []), "pst")
+
+    _co = list(_f.get("county") or [])
+    if _co:
+        # CONTAINMENT, NOT EQUALITY -- the same rule the browser uses. A
+        # straddling lease is stamped "Campbell & Converse", and county =
+        # 'Campbell' would miss it.
+        _bits = []
+        for _i, _v in enumerate(_co):
+            _k = "%sco%d" % (p, _i)
+            _bits.append("',' + LOWER(REPLACE(REPLACE(REPLACE("
+                         "g.county, ' & ', ','), '&', ','), ', ', ',')) + ',' "
+                         "LIKE :" + _k)
+            _pm[_k] = "%," + str(_v).strip().lower() + ",%"
+        _c.append("(" + " OR ".join(_bits) + ")")
+
+    if _f.get("wet_min_pct"):
+        _c.append("g.wetland_pct >= :%swpmin" % p)
+        _pm["%swpmin" % p] = float(_f["wet_min_pct"])
+    _in("g.wetland_type", list(_f.get("wet_types") or []), "wt")
+
+    if _f.get("elev_min") is not None:
+        _c.append("g.elevation_ft >= :%selmin" % p)
+        _pm["%selmin" % p] = float(_f["elev_min"])
+    if _f.get("elev_max") is not None:
+        _c.append("g.elevation_ft <= :%selmax" % p)
+        _pm["%selmax" % p] = float(_f["elev_max"])
+
+    # NAMED -> the precomputed pair table (distance to THAT town/route).
+    # UNNAMED -> the stamped nearest-anything column. Same control, two
+    # questions. A name with no distance filters nothing, which the panel
+    # now says out loud rather than leaving to be discovered.
+    _mc, _twn = _f.get("miles_city") or 0, list(_f.get("towns") or [])
+    if _mc and _twn:
+        _keys = ["%spn%d" % (p, i) for i in range(len(_twn))]
+        _c.append("EXISTS (SELECT 1 FROM dataview.dv_tract_place_dist d "
+                  "WHERE d.tract_id = g.tract_id AND d.dist_km <= :%sdcity "
+                  "AND d.place_name IN (%s))"
+                  % (p, ",".join(":" + k for k in _keys)))
+        _pm.update(dict(zip(_keys, _twn)))
+        _pm["%sdcity" % p] = float(_mc) * 1.609344
+    elif _mc:
+        _c.append("g.dist_city_km <= :%sdcity" % p)
+        _pm["%sdcity" % p] = float(_mc) * 1.609344
+
+    _mh, _rds = _f.get("miles_hwy") or 0, list(_f.get("roads") or [])
+    if _mh and _rds:
+        _keys = ["%srn%d" % (p, i) for i in range(len(_rds))]
+        _c.append("EXISTS (SELECT 1 FROM dataview.dv_tract_road_dist d "
+                  "WHERE d.tract_id = g.tract_id AND d.dist_km <= :%sdhwy "
+                  "AND d.road_name IN (%s))"
+                  % (p, ",".join(":" + k for k in _keys)))
+        _pm.update(dict(zip(_keys, _rds)))
+        _pm["%sdhwy" % p] = float(_mh) * 1.609344
+    elif _mh:
+        _c.append("g.dist_hwy_km <= :%sdhwy" % p)
+        _pm["%sdhwy" % p] = float(_mh) * 1.609344
+
+    if _f.get("operator"):
+        _c.append("r.operator_name LIKE :%sop" % p)
+        _pm["%sop" % p] = "%" + str(_f["operator"]) + "%"
+    if _f.get("min_acres"):
+        _c.append("g.area_km2 * 247.105 >= :%sac" % p)
+        _pm["%sac" % p] = float(_f["min_acres"])
+    return _c, _pm
+
+
+def _lease_ids_near(engine, towns, roads, miles_city, miles_hwy):
+    """Lease numbers within N miles of the NAMED towns/routes, or None.
+
+    "Within 5 miles of Casper" is not "nearest town is Casper" -- a lease four
+    miles from Glenrock and four and a half from Casper answers yes to the
+    first and no to the second, and the stamped dist_city_km can only answer
+    the second. So this asks the precomputed pair tables, which hold the
+    distance from every tract to every town within 50 miles and to all 16
+    routes.
+
+    PRECOMPUTED, BECAUSE THE OBVIOUS QUERY DOES NOT RETURN. STDistance inside
+    a correlated EXISTS gets no help from the spatial index: measured at 626
+    seconds without an answer, against 0.08-0.9s here.
+
+    Returns lease_number strings -- unique across all 24,178 features and
+    already in the served GeoJSON, so the browser filters on them without the
+    file being rebuilt. None means "no named filter", which is different from
+    an empty list ("named filter, nothing matched") and must stay different:
+    the first draws everything, the second draws nothing.
+    """
+    from sqlalchemy import text as _t
+    _km = 1.609344
+    _clauses, _params = [], {}
+    if towns and miles_city:
+        _clauses.append(
+            "EXISTS (SELECT 1 FROM dataview.dv_tract_place_dist d "
+            "WHERE d.tract_id = g.tract_id AND d.dist_km <= :mc AND "
+            "d.place_name IN (%s))"
+            % ",".join(":pn%d" % i for i in range(len(towns))))
+        _params.update({"pn%d" % i: v for i, v in enumerate(towns)})
+        _params["mc"] = float(miles_city) * _km
+    if roads and miles_hwy:
+        _clauses.append(
+            "EXISTS (SELECT 1 FROM dataview.dv_tract_road_dist d "
+            "WHERE d.tract_id = g.tract_id AND d.dist_km <= :mh AND "
+            "d.road_name IN (%s))"
+            % ",".join(":rn%d" % i for i in range(len(roads))))
+        _params.update({"rn%d" % i: v for i, v in enumerate(roads)})
+        _params["mh"] = float(miles_hwy) * _km
+    if not _clauses:
+        return None
+    try:
+        with engine.connect() as _c:
+            return [r[0] for r in _c.execute(_t("""
+                SELECT DISTINCT r.lease_number
+                  FROM dataview.dv_land_right r
+                  JOIN dataview.dv_land_right_tract x
+                    ON x.land_right_id = r.land_right_id
+                  JOIN dataview.dv_land_tract_geom g
+                    ON g.tract_id = x.tract_id
+                 WHERE r.lease_number IS NOT NULL AND """
+                + " AND ".join(_clauses)), _params)]
+    except Exception:
+        # A failure here must not silently widen the map to everything, so
+        # it returns "nothing matched" rather than "no filter".
+        return []
+
+
+def _ensure_lease_geojson(engine, say=None):
+    """Make static/dv_leases.geojson current, and say where it is.
+
+    ONE PLACE DECIDES WHETHER THAT FILE IS FRESH, because two paths now
+    need it: the lease layer draws it, and a township click loads it on
+    demand when the lease layer is switched off. A freshness rule written
+    twice is the "lists that must agree" failure this file already pays for
+    in four places -- and the two copies would diverge in the worst possible
+    way, one path rebuilding while the other served a stale 28 MB file.
+
+    THE STAMP LIVES BESIDE THE FILE. session_state does not outlive the
+    session the way the file does, so a new window rebuilt a file already on
+    disk and correct, and an interrupted render lost the stamp after paying
+    for the write -- 24,178 leases, ~2.5 minutes, repeated for nothing.
+
+    Returns (path, url, count, legend). path is None when it could not be
+    built, and the caller falls back to embedding.
+    """
+    from dataview.mapping.geography_layers import (
+        write_lease_geojson, lease_data_signature, LEASE_GEOJSON_NAME)
+
+    def _log(msg):
+        if say:
+            say(msg)
+
+    # THE SIGNATURE ANSWERS "HAS THE DATA MOVED", NOT "WAS THIS FILE
+    # WRITTEN BY THIS CODE". Adding a property to the file changes neither
+    # the row count nor the newest stamp, so an existing geojson would have
+    # been judged current forever and the new property would never appear --
+    # the change would look applied and do nothing. Bump on any change to
+    # what write_lease_geojson PUTS IN the file.
+    _FMT = 6
+    _sdir = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))), "static")
+    _path = os.path.join(_sdir, LEASE_GEOJSON_NAME)
+    _sigpath = _path + ".sig"
+    _url = "/app/static/" + LEASE_GEOJSON_NAME
+    try:
+        _sig = lease_data_signature(engine)
+        _known = st.session_state.get("_lease_gj_sig")
+        if _known is None and os.path.exists(_sigpath):
+            try:
+                with open(_sigpath, encoding="utf-8") as _sf:
+                    _side = json.load(_sf)
+                _known = (_side.get("sig")
+                          if _side.get("fmt") == _FMT else None)
+                st.session_state["_lease_gj_legend"] = _side.get("legend") or {}
+                st.session_state["_lease_gj_n"] = _side.get("n") or 0
+                _log("[map] lease geojson: reusing the file on disk, "
+                     "no rebuild")
+            except Exception as _se:
+                # Not swallowed: an unreadable sidecar must rebuild, and
+                # must say why it is about to spend two minutes.
+                _log("[map] lease sidecar unreadable, rebuilding: %s"
+                     % str(_se)[:120])
+                _known = None
+        if _sig and (_known != _sig or not os.path.exists(_path)):
+            _path, _n, _lgd = write_lease_geojson(engine, _sdir)
+            st.session_state["_lease_gj_legend"] = _lgd
+            st.session_state["_lease_gj_n"] = _n
+            try:
+                with open(_path + ".sig", "w", encoding="utf-8") as _sf:
+                    json.dump({"sig": _sig, "fmt": _FMT, "n": _n,
+                               "legend": _lgd}, _sf)
+            except Exception as _se:
+                _log("[map] lease sidecar not written (next run rebuilds): %s"
+                     % str(_se)[:120])
+            _log("[map] lease geojson rebuilt: %d feature(s)" % _n)
+        # STAMPED ONLY AFTER THE WRITE SUCCEEDED, so a failed build cannot
+        # leave a stamp claiming a file it did not produce.
+        st.session_state["_lease_gj_sig"] = _sig
+        return (_path, _url,
+                int(st.session_state.get("_lease_gj_n") or 0),
+                st.session_state.get("_lease_gj_legend") or {})
+    except Exception as _exc:
+        _log("[map] lease geojson unavailable: %s" % str(_exc)[:160])
+        return (None, None, 0, {})
+
+
 def run(engine=None):
     if not HAS_FOLIUM:
         st.error("pip install folium streamlit-folium")
@@ -9292,6 +9824,10 @@ def run(engine=None):
         st.session_state.get("h3_layer_on"),
         st.session_state.get("wm_freeze_map"),
         st.session_state.get("wm_hold_map")))
+    # The render boundary, with the state that produced it -- so the ops
+    # below can be read against what was on screen when they ran. Costs one
+    # dict lookup when the recorder is off.
+    workflow_capture.record_render("map")
 
     # ── the second-screen watcher, registered FIRST ────────────────────
     # "The fragment with id ... does not exist anymore - it might have been
@@ -9311,6 +9847,10 @@ def run(engine=None):
     # nothing. Its own guard still applies: with no recorded mtime it returns
     # immediately, which is the first render's case.
     _watch_seis_choice()
+    # SAME PLACE, SAME REASON. Registered at the top of run(), not near the
+    # map: 36 statements between here and there can end a render early, and
+    # each one left the browser polling a fragment that no longer existed.
+    _watch_lease_choice()
 
     # The top padding and the CSS-only-element collapse now live in
     # app_v4.py's stylesheet, which is injected before any page dispatch.
@@ -9465,6 +10005,165 @@ def run(engine=None):
         _source    = "gom" if "gom" in _area_lbl.lower() else "onshore"
         exporters.render_export_page(_header_df, engine, _tray_uwis, source=_source)
         return
+
+    # ── Scout ticket page ──────────────────────────────────────────────
+    # "I never wanted to see the scout ticket on the map." It used to render
+    # BELOW the map, which meant run() had to build the map before it could
+    # draw the ticket -- two to four seconds of querying and serialising to
+    # display a report that reads the database directly and never asks the
+    # map anything.
+    #
+    # Here, beside the Documents and Export pages, it returns before the map
+    # is built at all. All three reports now behave the same way: select,
+    # report, back.
+    #
+    # ITS INPUTS TRAVEL WITH IT. uwi_index is built from the well query far
+    # below this point, so the rows are captured by the Scout Tickets button
+    # into _summary_rows, where they are already in hand.
+    _summary_uwis = list(st.session_state.get("_summary_uwis") or [])
+    if st.session_state.get("show_summary") and _summary_uwis:
+        # ── OPEN AT THE TOP OF THE TICKET ───────────────────────────────
+        # "The scout ticket opens at the bottom, it needs to open at the top
+        # of the scout ticket." The Scout Tickets button sits near the FOOT
+        # of the map page and Streamlit keeps the scroll position across the
+        # rerun, so a page that replaces the map opens scrolled to wherever
+        # the button was. Documents and Export both already do this; when
+        # this became a page I copied their state-persistence block and not
+        # this line, which is the half that is visible.
+        #
+        # ONE-SHOT, so it fires on entry and not on every in-page rerun --
+        # otherwise paging through a ticket would keep yanking the view back
+        # to the top. components.html runs in an iframe, so the helper
+        # scrolls the PARENT document.
+        if st.session_state.pop("_export_scroll_pending", False):
+            _scroll_main_to_top()
+        _summary_rows = st.session_state.get("_summary_rows") or {}
+        # PERSIST MAP STATE ACROSS THE ROUND TRIP, exactly as the Documents
+        # and Export pages do. Streamlit drops widget-backed session keys
+        # when their widget is not rendered, and this page renders INSTEAD of
+        # the map, so without this the map comes back reset.
+        _skip_prefixes = (
+            "export_", "exp_", "sec_", "build_", "dl_", "osdu_", "db_",
+            "sf_", "pdf_btn_", "pdf_dl_", "docs_", "seldoc_",
+        )
+        _skip_keys = {
+            "wm_reset_page", "apply_uwi_filter", "wm_ai_run", "wm_ai_clear",
+            "wells_clear_viewport", "wells_reset_view", "view_summary",
+            "clear_tray", "close_summary", "close_summary_bottom",
+            "open_docs_btn", "export_xlsx_btn",
+        }
+        for _pk in list(st.session_state.keys()):
+            if (_pk.startswith(_skip_prefixes) or _pk in _skip_keys
+                    or _is_action_key(_pk)):
+                continue
+            try:
+                st.session_state[_pk] = st.session_state[_pk]
+            except Exception:
+                pass
+
+        if st.button("← Back to map", key="summary_back"):
+            st.session_state["show_summary"] = False
+            st.session_state["_summary_uwis"] = []
+            st.session_state.pop("_summary_rows", None)
+            st.rerun()
+
+        # Cache HTML — only rebuild when selection changes
+        cache_key = tuple(_summary_uwis)
+        if st.session_state.get("_summary_cache_key") != cache_key:
+            _html = ""
+            for uwi in _summary_uwis:
+                well_row = _summary_rows.get(uwi)
+                if not well_row:
+                    continue
+                # Dispatch by identifier shape: GOM wells are keyed by
+                # a UUID well_id (36 chars, dashed); dv_well wells use
+                # PPDM-style UWIs. A dict tagged _source="gom" (set by
+                # the GOM popup-click handler) is the explicit signal;
+                # the UUID-shape check is the fallback.
+                _is_gom = (
+                    well_row.get("_source") == "gom"
+                    or (isinstance(uwi, str)
+                        and len(uwi) == 36
+                        and uwi.count("-") == 4)
+                )
+                if _is_gom:
+                    _html += _build_gom_scout_ticket_html(uwi, well_row, engine)
+                else:
+                    _html += _build_scout_ticket_html(uwi, well_row, engine)
+                _html += "<div style='page-break-after:always'></div>"
+            st.session_state["_summary_html"]      = _html
+            st.session_state["_summary_cache_key"] = cache_key
+
+        all_html = st.session_state.get("_summary_html", "")
+        full_doc = _full_html_doc(all_html, f"Scout Tickets — {len(_summary_uwis)} wells")
+        fn       = f"Scout_Tickets_{len(_summary_uwis)}_wells.html"
+
+        _hdr = ("Scout Ticket" if len(_summary_uwis) == 1
+                else f"Scout Tickets — {len(_summary_uwis)} wells")
+        st.markdown(f"#### 📋 {_hdr}")
+        b1, bp, b2, _ = st.columns([1, 1, 1, 3])
+        b1.download_button(
+            "⬇ Save Report", data=full_doc.encode(),
+            file_name=fn, mime="text/html",
+            key="save_report_dl", use_container_width=True)
+
+        # ── PDF, generated not printed ──────────────────────────────────
+        # _build_batch_pdf() has existed since the multi-well panel was
+        # written and was never wired to a button, so the only route to a
+        # PDF was "Save Report" -> open the HTML -> browser Print. That
+        # path (and Windows' "Microsoft Print to PDF" in particular)
+        # flattens the text to vector outlines: the file looks right and
+        # has ZERO extractable characters, so the File Catalog can't read
+        # a single field out of it. WeasyPrint writes a real text layer.
+        #
+        # Cached in session_state against the same cache_key the HTML uses,
+        # so switching wells invalidates it and re-rendering the page
+        # doesn't regenerate a PDF nobody asked for.
+        _pdf_key = f"_summary_pdf_{cache_key}"
+        if bp.button("⬇ PDF", key="summary_pdf_btn",
+                     use_container_width=True,
+                     help="Generate a PDF with a real text layer. Prefer "
+                          "this over printing the saved HTML — printed "
+                          "PDFs contain no searchable or extractable text."):
+            with st.spinner(f"Rendering {len(_summary_uwis)} ticket(s)…"):
+                _pdf, _err = _scout_ticket_pdf(
+                    all_html, f"Scout Tickets — {len(_summary_uwis)} wells",
+                    return_error=True)
+            st.session_state[_pdf_key] = _pdf
+            st.session_state[f"{_pdf_key}_err"] = _err
+        if st.session_state.get(_pdf_key):
+            st.download_button(
+                "📄 Save PDF", data=st.session_state[_pdf_key],
+                file_name=f"Scout_Tickets_{len(_summary_uwis)}_wells.pdf",
+                mime="application/pdf", key="summary_pdf_dl")
+        elif st.session_state.get(f"{_pdf_key}_err"):
+            st.error(st.session_state[f"{_pdf_key}_err"])
+
+        if b2.button("✕ Close", key="close_summary", use_container_width=True):
+            st.session_state["show_summary"] = False
+            st.session_state["_summary_uwis"] = []
+            st.rerun()
+
+        st.markdown(all_html, unsafe_allow_html=True)
+        # The ticket's photos are thumbnails and always will be; this is
+        # where the full-size ones live. See _render_photo_gallery.
+        try:
+            for _u in _summary_uwis[:1]:
+                _render_mud_log(engine, _u)
+        except Exception as _mlexc:
+            st.caption("Mud log unavailable: %s" % _mlexc)
+        try:
+            _render_photo_gallery(engine, _summary_uwis)
+        except Exception as _galexc:
+            st.caption("Core photo gallery unavailable: %s" % _galexc)
+        if st.button("✕ Close scout ticket", key="close_summary_bottom",
+                     use_container_width=True):
+            st.session_state["show_summary"] = False
+            st.session_state["_summary_uwis"] = []
+            st.rerun()
+        st.markdown("---")
+        return
+
 
     # Module-level first-run flag must be declared global up front so the
     # reset block below can read and write it.
@@ -10434,7 +11133,40 @@ def run(engine=None):
             _ai_spec, _ai_db_columns(engine))
         st.session_state["ai_filter_rejected"] = _ai_rejected
         st.session_state["ai_filter_sql_where"] = _ai_where
-        if _ai_where:
+        # ── A DROPPED CLAUSE MEANS THE ANSWER IS WRONG, NOT SMALLER ─────
+        # _ai_spec_to_where skips any clause it cannot build -- an invented
+        # column, an unusable literal, an unsupported operator -- and used to
+        # run the query with whatever survived. Every one of those drops
+        # WIDENS the result: ask for three conditions, get wells matching
+        # two, under a green banner still describing all three.
+        #
+        # That is how "wells deeper than 5000 ft after 1980 near line A"
+        # appeared to work. The proximity clause was not a column, so it was
+        # dropped, and the map filled with wells that satisfied the depth and
+        # the date and nothing else. CLAUDE.md's rule is the whole point
+        # here: wrong is worse than missing. A confident wrong set plots,
+        # exports and gets quoted.
+        #
+        # So a rejected clause now refuses the filter instead of quietly
+        # relaxing it. The reasons were already collected and shown -- as a
+        # warning UNDER a success banner, which reads as a footnote rather
+        # than "a third of your question was discarded". Raised to the error
+        # slot, which suppresses the success.
+        if _ai_rejected:
+            _display_wells = []
+            st.session_state["ai_filter_match"] = (0, None)
+            st.session_state["ai_filter_empty_fields"] = []
+            st.session_state["ai_filter_clauses"] = []
+            st.session_state["ai_filter_no_source"] = False
+            st.session_state["ai_filter_map_empty"] = False
+            st.session_state["ai_filter_error"] = (
+                "This filter was NOT run: %d of its condition(s) could not be "
+                "applied, and running without them would return MORE wells "
+                "than you asked for.\n\n%s\n\nRephrase using a column that "
+                "exists, or use 📍 Wells near a feature for proximity."
+                % (len(_ai_rejected),
+                   "\n".join("• " + r for r in _ai_rejected)))
+        elif _ai_where:
             try:
                 _display_wells = _qry_wells_bcp(
                     engine, limit=AI_DB_LIMIT, where_extra=_ai_where) or []
@@ -10447,6 +11179,10 @@ def run(engine=None):
             st.session_state["ai_filter_clauses"] = []
             st.session_state["ai_filter_no_source"] = False
             st.session_state["ai_filter_map_empty"] = False
+            # A REFUSAL FROM A PREVIOUS SPEC MUST NOT OUTLIVE IT. The error
+            # slot suppresses the success banner, so a stale one would leave a
+            # filter that ran perfectly reporting that it had not been run.
+            st.session_state.pop("ai_filter_error", None)
     elif _ai_spec and _wells_raw:
         _display_wells = _apply_ai_filter(_wells_raw, _ai_spec)
         # Diagnostics so a 0-match isn't a silent blank map. Record how many
@@ -10748,6 +11484,27 @@ def run(engine=None):
         _cur = st.session_state.get("wm_map_db", _conn_db)
         if _cur and _cur not in _db_options:
             _db_options = [_cur] + _db_options
+        # ── OPEN ON THE DATABASE YOU CONNECTED TO ───────────────────────
+        # _db_options is every database holding dataview.dv_well, ORDERED BY
+        # NAME, and this selectbox has a key and no index -- so Streamlit
+        # picks the first option whenever the key is unset, i.e. on every
+        # fresh session. "DataView" sorts before "DataView_Demo", so the map
+        # opened on the older database while the connection was on the newer
+        # one, and nothing said so.
+        #
+        # It fails LATER and somewhere else, which is what makes it costly:
+        # DataView carries dv_well and most of the federation views, so the
+        # map draws. It is missing v_well_master_arm, so the H3 density query
+        # dies with "Invalid object name" naming a view that plainly exists
+        # -- in the other database. Reported exactly that way.
+        #
+        # SEEDED, NOT PASSED AS index=. Once a widget's key holds a value
+        # Streamlit ignores index= entirely; that is the same trap that made
+        # Disconnect preserve the wrong database in bf012d5. setdefault
+        # before the widget is drawn is the supported way to say "this is the
+        # default", and it leaves a deliberate later choice alone.
+        if _conn_db and _conn_db in _db_options:
+            st.session_state.setdefault("wm_map_db", _conn_db)
         _map_db = st.selectbox("📊 Database", _db_options, key="wm_map_db",
                                 help="Which database the map reads from "
                                      "(engine + bcp). Only databases carrying "
@@ -11228,6 +11985,51 @@ def run(engine=None):
             with st.spinner("Asking Claude…"):
                 _spec, _err = _ai_filter_wells(_ai_q.strip(), _wells_raw,
                                            _engine=engine)
+            # ── "NEAR LINE A" NOW RUNS THE NEAR LOOKUP ITSELF ───────────
+            # "The AI filter only worked if I used the Near function for
+            # line A then the wells deeper than 5000 ft drilled after 1980
+            # ... I don't like having to split it up." Nor should you: the
+            # split only worked because Near produces a uwi list, which is
+            # the one shape the filter could evaluate.
+            #
+            # Resolved HERE rather than inside _apply_ai_filter because that
+            # function is pure -- it takes rows and a spec and has no engine
+            # to ask. Turning proximity into `uwi in (...)` at the door keeps
+            # it that way, and keeps every downstream surface (the per-clause
+            # diagnostics, the drill shadow, the results grid) working on a
+            # shape it already understands. Exactly what the manual 📍 Find
+            # button does with its result.
+            if _spec is not None and isinstance(_spec.get("near"), dict):
+                _nr = _spec.pop("near")
+                _nfeat = str(_nr.get("feature") or "").strip()
+                _nname = str(_nr.get("name") or "").strip()
+                try:
+                    _nmi = float(_nr.get("miles") or 5)
+                except (TypeError, ValueError):
+                    _nmi = 5.0
+                _hit = _resolve_near_name(engine, _nfeat, _nname)
+                if _hit is None:
+                    # NAMED, NOT SHRUGGED AT. "No wells found" for a feature
+                    # that was never located sends you looking at the wells.
+                    _spec = None
+                    _err = ("There is no %s called %r to measure from. "
+                            "Check the name — the seismic lines are "
+                            "catalogued with their file extension."
+                            % (_nfeat.replace("_", " ") or "feature", _nname))
+                else:
+                    _uwis_near = _wells_near_feature(
+                        engine, _nfeat, _hit, _nmi * 1609.344)
+                    if not _uwis_near:
+                        _spec = None
+                        _err = ("No wells within %g miles of %s. (A well "
+                                "needs a surface coordinate to be found.)"
+                                % (_nmi, _hit))
+                    else:
+                        _spec.setdefault("filters", []).append(
+                            {"field": "uwi", "op": "in", "value": _uwis_near})
+                        _spec["description"] = "%s — %d well(s) within %g mi of %s" % (
+                            _spec.get("description", "").split(" — ")[0],
+                            len(_uwis_near), _nmi, _hit)
             if _spec is not None:
                 st.session_state["ai_filter_spec"] = _spec
                 st.session_state["ai_filter_desc"] = _spec.get("description", "")
@@ -11686,6 +12488,28 @@ def run(engine=None):
     # Everything that needed room (AI filter, layer registration) has already
     # moved above the split, so the rail was holding two items and costing the
     # map 25% of the page.
+    # ── THE LEASE STRIP, BESIDE THE MAP ────────────────────────────────
+    # The rail described above came back, and this time it has something to
+    # hold. It was removed for being EMPTY -- two items for a quarter of the
+    # page -- not for being the wrong shape, and a query panel is exactly
+    # what it was missing.
+    #
+    # A COLUMN CANNOT PUSH THE MAP DOWN. That is why this is allowed to sit
+    # on the map page at all: the push-down that cost a day was controls
+    # stacked ABOVE the map, and beside is a different axis.
+    #
+    # IT STANDS WHERE THE SIDEBAR WAS: same edge, same width. Collapsing the
+    # nav frees ~336px and the strip takes about that, so the page keeps one
+    # column of controls rather than gaining a second one.
+    #
+    # THE SPLIT ITSELF IS NOT HERE. It is made at the st_folium call, so the
+    # strip is a column beside the MAP rather than beside the whole control
+    # stack -- see the note there. Splitting at this level put the strip's
+    # top level with ⚙ Page controls, 200px above the map.
+    #
+    # In the SAME SESSION it needs no Connect and no two-second poll: the
+    # write and the redraw are one rerun.
+    st.session_state.setdefault("wm_lease_strip", False)
     mapcol = st.container()
     ctrl = st.container()
 
@@ -12521,9 +13345,39 @@ def run(engine=None):
         # serialise are PYTHON-side costs, and the 16x came from replacing
         # 14,727 folium.Polygon objects with one GeoJson layer; canvas only
         # changes how the browser paints what it is given. That change stays.
+        # ── THE ACTIVE BASEMAP IS ADDED BY NAME, NOT BY URL ─────────────
+        # "When I select Esri topo it puts a very long line so I can't get to
+        # the wetlands to turn it on."
+        #
+        # folium names a base layer after its TILES argument, and for every
+        # basemap here except OpenStreetMap that argument is a URL template.
+        # So the layer control listed the SELECTED basemap as
+        #
+        #   https://server.arcgisonline.com/arcgis/rest/services/
+        #   world_topo_map/mapserver/tile/{z}/{y}/{x}
+        #
+        # on one unbroken line, which stretched the expanded control to 568px
+        # -- measured -- and pushed the overlay entries below it out of
+        # reach. Only the ACTIVE one was affected: the alternatives loop below
+        # already passes name=, which is why they read correctly and this one
+        # did not.
+        #
+        # Map(name=...) does NOT fix it -- folium ignores it and still uses
+        # the URL; checked. The map is built with no tiles and the chosen
+        # basemap added as an explicit, named TileLayer instead, which is
+        # exactly what the loop below does for the others.
         m = folium.Map(location=[lat0, lon0], zoom_start=zoom0,
-                       tiles=bm["tiles"], attr=bm["attr"],
+                       tiles=None,
                        max_zoom=bm.get("max_zoom", 19))
+        try:
+            folium.TileLayer(
+                tiles=bm["tiles"], attr=bm["attr"], name=basemap,
+                max_zoom=bm.get("max_zoom", 19), overlay=False,
+                control=True, show=True).add_to(m)
+        except Exception as _bmexc:
+            # NOT SWALLOWED. A map with no basemap at all is a grey rectangle
+            # and reads as a broken page, so say which basemap failed.
+            _say("[map] basemap %r failed to add: %s" % (basemap, _bmexc))
 
         # ── shapes saved with a place ───────────────────────────────────
         # AN OUTLINE, NOT A DRAW-TOOL SHAPE. These come back as a GeoJson
@@ -12828,6 +13682,7 @@ def run(engine=None):
         # leaves the stamp behind the file and the watcher fires once more.
         # An extra rebuild is the right price; a stuck map is not.
         st.session_state["_seis_pref_seen"] = _seis_pref_mtime()
+        st.session_state["_lease_pref_seen"] = _lease_pref_mtime()
 
         if _show_h3_layer:
             # ── H3 hex density mode (Session 3) ─────────────────────────
@@ -13224,7 +14079,112 @@ def run(engine=None):
         # chips, so the guard reads it and a chip added there can no longer
         # be missing here. The inner blocks each still test their own flag,
         # so a chip with no renderer costs one skipped branch.
-        if any(_k in active_db for _k, _lbl in _geo_defs):
+        # THE SECOND SCREEN'S MODE IS READ ONCE, HERE, and the guard below
+        # honours it. Read twice it becomes two lists that must agree, which
+        # is the debt this file already pays in four places.
+        #
+        # It has to widen the guard, not just sit inside it. With no chip
+        # ticked this whole block was skipped, so "Send to map: townships"
+        # wrote the file, reran the map, and drew NOTHING -- the screen said
+        # sent, the map said nothing, and no message explained the gap. A
+        # request that cannot be seen to fail is worse than one that errors.
+        # ── SEED THE PANEL BEFORE THE MAP READS IT ──────────────────────
+        # The map decides its layers HERE, and the strip renders ~1,800
+        # lines later. So on the first run after the strip is switched on,
+        # lv_mode does not exist yet: the widget override below finds
+        # nothing, the prefs file wins, and the map draws whatever was last
+        # sent -- 24,178 leases from yesterday. The strip then seeds itself
+        # to "off" and the radio reads "off" over a map full of leases.
+        #
+        # Measured exactly that way: mode radio on index 3 ("off") with
+        # 24,178 lease paths on the map in the same render.
+        #
+        # Seeding here closes the window: the value exists before the first
+        # read, so the panel and the map agree from the very first render.
+        if (st.session_state.get("wm_lease_strip")
+                and "lv_mode" not in st.session_state):
+            st.session_state["lv_mode"] = (
+                "both" if ("geo_leases" in active_db
+                           and "geo_townships" in active_db)
+                else "leases" if "geo_leases" in active_db
+                else "townships" if "geo_townships" in active_db
+                else "off")
+        _lv_choice = _map_lease_choice()
+        # ── A STALE FILE MUST NOT DRIVE A FRESH SESSION ──────────────────
+        # "I opened a new session and the leases were on automatically."
+        # The prefs file outlives the session that wrote it, so one Send
+        # last night meant every launch afterwards drew leases before
+        # anyone asked -- the map obeying an instruction from a window that
+        # is not open and a person who is not there. It contradicts the
+        # rule this channel was built on: a screen nobody has opened must
+        # not change the map.
+        #
+        # THE CHANNEL IS LIVE ONLY ONCE SOMETHING HAPPENS IN THIS SESSION:
+        # the strip is switched on here, or the watcher sees the file
+        # actually CHANGE (a second window pressing Send). A file that
+        # merely already existed is history, not an instruction.
+        #
+        # The file is left alone rather than cleared -- the second window
+        # may be sitting on it, and destroying its state to fix the map's
+        # startup would trade one surprise for another.
+        if not (st.session_state.get("_lease_channel_live")
+                or st.session_state.get("wm_lease_strip")):
+            _lv_choice = dict(_lv_choice, mode="")
+        # ── THE STRIP APPLIES AT ONCE; ONLY THE OTHER WINDOW NEEDS SEND ──
+        # "I think I forgot to send to map. I expected it to be automatic."
+        # Correct -- and Send only ever existed because a SECOND WINDOW is a
+        # second session and a file was the only way across. The strip is in
+        # THIS session, so its widgets are already in session_state before
+        # this line runs, and reading them here means a click on the radio
+        # is drawn by the very same rerun the click caused. No Send, no file
+        # round trip, no second rebuild.
+        #
+        # THE WIDGET WINS OVER THE FILE, and only while the strip is on: it
+        # is the control the user is actually looking at. With the strip off
+        # the file is the only voice, which is what the separate window
+        # needs. Guarded on the vocabulary rather than truthiness, so a
+        # stale or hand-edited value cannot select a mode that does not
+        # exist.
+        if st.session_state.get("wm_lease_strip"):
+            # LOCAL IMPORT, not a bare name. LEASE_COLOUR_BY lives in
+            # geography_layers and is imported inside render_lease_view --
+            # referencing it here would raise NameError only on the runs
+            # where the strip is on, which is the module-level-import trap
+            # CLAUDE.md opens its list with and which this same feature has
+            # already tripped over once.
+            from dataview.mapping.geography_layers import (
+                LEASE_COLOUR_BY as _LCB)
+            _w_mode = st.session_state.get("lv_mode")
+            if _w_mode in LEASE_MODES:
+                _lv_choice = dict(_lv_choice, mode=_w_mode)
+            _w_by = st.session_state.get("lv_by")
+            if _w_by in _LCB:
+                _lv_choice = dict(_lv_choice, colour_by=_w_by)
+            # THE FILTERS TRAVEL WITH THE MODE. They used to reach the count
+            # and nothing else, so the panel read "6,131 lease(s) match"
+            # over a map drawing all 24,178.
+            _lv_choice = dict(
+                _lv_choice,
+                source=list(st.session_state.get("lv_src") or []),
+                status=list(st.session_state.get("lv_status") or []),
+                operator=str(st.session_state.get("lv_op") or ""),
+                min_acres=int(st.session_state.get("lv_acres") or 0),
+                state=list(st.session_state.get("lv_state") or []),
+                county=list(st.session_state.get("lv_county") or []),
+                miles_city=float(st.session_state.get("lv_micity") or 0),
+                miles_hwy=float(st.session_state.get("lv_mihwy") or 0),
+                towns=list(st.session_state.get("lv_towns") or []),
+                roads=list(st.session_state.get("lv_roads") or []),
+                wet_min_pct=float(st.session_state.get("lv_wetpct") or 0),
+                wet_types=list(st.session_state.get("lv_wetty") or []))
+            # The slider reports a SPAN; only a real narrowing is a filter.
+            _wel = st.session_state.get("lv_elev")
+            if isinstance(_wel, (tuple, list)) and len(_wel) == 2:
+                _lv_choice = dict(_lv_choice,
+                                  elev_min=_wel[0], elev_max=_wel[1])
+        _lv_mode = (_lv_choice.get("mode") or "")
+        if (any(_k in active_db for _k, _lbl in _geo_defs)
+                or _lv_mode in ("leases", "townships", "both")):
             try:
                 from dataview.mapping.geography_layers import add_geography_layer, add_well_points
                 # AN EMPTY LAYER LOOKS EXACTLY LIKE A BROKEN ONE. Both adders
@@ -13234,6 +14194,21 @@ def run(engine=None):
                 # when dv_land_tract simply has none. On this database five of
                 # the ten chips are in that state.
                 _flag_to_label = {f: l for f, l in _geo_defs}
+                # THE SECOND SCREEN'S MODE, applied to the lease layer the
+                # same way it is applied to the townships: it can switch the
+                # layer OFF, so "townships" really means townships alone.
+                # Unset changes nothing.
+                _lv2 = _lv_choice
+                # BOTH DIRECTIONS. Removing "geo_leases" was half a control:
+                # asking for leases from a map with the chip off selected a
+                # colour, a source and a status and then drew none of them.
+                # A mode names what the map shows, so it turns the layer on
+                # too. Unset still changes nothing.
+                if _lv_mode in ("leases", "both"):
+                    if "geo_leases" not in _geo_on:
+                        _geo_on = _geo_on + ["geo_leases"]
+                elif _lv_mode:
+                    _geo_on = [k for k in _geo_on if k != "geo_leases"]
                 for _ak in _geo_on:
                     _drew = 0
                     if _ak == "geo_leases":
@@ -13251,47 +14226,64 @@ def run(engine=None):
                         # fires is the cost being removed. Both are silent, so
                         # the rebuild says so in the log.
                         from dataview.mapping.geography_layers import (
-                            add_lease_layer, add_lease_layer_file,
-                            write_lease_geojson, lease_data_signature,
-                            LEASE_GEOJSON_NAME)
-                        _by = st.session_state.get("wm_lease_color_by",
-                                                   "producing")
+                            add_lease_layer, add_lease_layer_file)
+                        # The screen's choice wins when it made one --
+                        # it is the window with room to explain the five
+                        # dimensions, and the map's dropdown is the fallback.
+                        _by = (_lv2.get("colour_by")
+                               or st.session_state.get("wm_lease_color_by",
+                                                       "producing"))
                         _lg_on = bool(st.session_state.get("wm_show_legend",
                                                            True))
                         # DW_MAP_LEASE_FILE=0 falls back to embedding, so a
                         # static-serving problem is one env var from a fix
                         # rather than a redeploy.
                         _use_file = os.environ.get("DW_MAP_LEASE_FILE", "1") != "0"
-                        _sdir = os.path.join(os.path.dirname(os.path.dirname(
-                            os.path.dirname(os.path.abspath(__file__)))), "static")
-                        _lpath = os.path.join(_sdir, LEASE_GEOJSON_NAME)
                         _drew = 0
                         if _use_file:
-                            try:
-                                _sig = lease_data_signature(engine)
-                                if _sig and (
-                                        st.session_state.get("_lease_gj_sig") != _sig
-                                        or not os.path.exists(_lpath)):
-                                    _lpath, _n, _lgd = write_lease_geojson(
-                                        engine, _sdir)
-                                    st.session_state["_lease_gj_sig"] = _sig
-                                    st.session_state["_lease_gj_legend"] = _lgd
-                                    st.session_state["_lease_gj_n"] = _n
-                                    _say("[map] lease geojson rebuilt: %d "
-                                         "feature(s)" % _n)
-                                _lgd = st.session_state.get("_lease_gj_legend") or {}
+                            # ONE HELPER DECIDES FRESHNESS -- see
+                            # _ensure_lease_geojson. The township click needs
+                            # the same file, and a second copy of the rule
+                            # here is how the two would drift apart.
+                            _lpath, _lurl, _ln, _lgd = _ensure_lease_geojson(
+                                engine, _say)
+                            if _lpath:
                                 add_lease_layer_file(
-                                    m, _lpath, "/app/static/" + LEASE_GEOJSON_NAME,
+                                    m, _lpath, _lurl,
                                     by=_by, show=True,
                                     legend=(_lgd.get(_by) if _lg_on else None),
-                                    clip=_clip_bounds_now())
-                                _drew = int(st.session_state.get("_lease_gj_n") or 0)
-                            except Exception as _lfe:
+                                    clip=_clip_bounds_now(),
+                                    filt=dict(
+                                        _lv2,
+                                        # ONE QUERY ANSWERS BOTH the panel's
+                                        # count and the map's filter. ~0.1s
+                                        # against the precomputed pair
+                                        # tables; the version that asked
+                                        # STDistance directly ran 626s and
+                                        # had to be killed.
+                                        ids=_lease_ids_near(
+                                            engine,
+                                            _lv2.get("towns"),
+                                            _lv2.get("roads"),
+                                            _lv2.get("miles_city"),
+                                            _lv2.get("miles_hwy"))))
+                                _drew = _ln
+                                # SAY WHEN A FILTER IS HIDING SOME. _drew is
+                                # what the FILE holds, not what is visible,
+                                # and the browser is the only thing that
+                                # knows the difference -- so the log must not
+                                # imply the whole set is on screen. The
+                                # panel's own count is the number to read.
+                                if any((_lv2.get("source"), _lv2.get("status"),
+                                        _lv2.get("operator"),
+                                        _lv2.get("min_acres"))):
+                                    _say("[map] lease filter active -- fewer "
+                                         "than %s are visible; the strip's "
+                                         "count is the number drawn" % _ln)
+                            else:
                                 # NOT swallowed: a discarded diagnostic makes
                                 # the next failure undiagnosable, and this
                                 # falls back silently otherwise.
-                                _say("[map] lease file layer failed, embedding "
-                                     "instead: %s" % str(_lfe)[:160])
                                 _use_file = False
                         if not _use_file:
                             _drew = add_lease_layer(
@@ -13498,7 +14490,16 @@ def run(engine=None):
                                   "apply to compute them.")
                     except Exception as _pe:
                         _mapmsg.warning(f"Well paths skipped: {_pe}")
-                if "geo_townships" in active_db:
+                # ── THE SECOND SCREEN DECIDES, WHEN IT HAS SPOKEN ──
+                # Its mode overrides the chips, because drawing townships
+                # and leases together is the thing that makes the middle
+                # zooms unreadable -- and a chip cannot express "one or the
+                # other" while a radio can. An UNSET mode changes nothing:
+                # a screen nobody has opened must not alter the map.
+                _twp_on = ("geo_townships" in active_db)
+                if _lv_mode:
+                    _twp_on = _lv_mode in ("townships", "both")
+                if _twp_on:
                     # THE LEASES, AGGREGATED ONTO THE GRID THEY WERE WRITTEN
                     # ON. 24,178 lease polygons render as a smear below about
                     # zoom 9; 2,888 townships do not, and unlike a hexagon a
@@ -13507,9 +14508,45 @@ def run(engine=None):
                     try:
                         from dataview.mapping.geography_layers import (
                             add_township_layer)
+                        # ── LEASES ON DEMAND, WHEN THE GRID IS ALONE ──
+                        # Clicking a township expands it by highlighting the
+                        # leases the BROWSER already holds. In "townships"
+                        # mode there are none, so the click zoomed to an
+                        # empty rectangle and reported "0 drawn here" -- the
+                        # gesture appeared broken when it was simply asking
+                        # about data that had not been sent.
+                        #
+                        # So hand the page the URL. The browser fetches the
+                        # file only if a township is actually clicked; a run
+                        # where nobody clicks costs nothing beyond this
+                        # freshness check, and the fetch is cached for every
+                        # click after the first.
+                        #
+                        # CURRENT BEFORE IT IS OFFERED. Passing a URL to a
+                        # stale file would draw leases that no longer match
+                        # the database, and a confident wrong lease plots,
+                        # exports and gets quoted. The helper rebuilds only
+                        # when the signature moved -- the sidecar makes the
+                        # usual answer "no".
+                        _tw_leases = None
+                        if "geo_leases" not in _geo_on:
+                            _tw_leases = _ensure_lease_geojson(engine, _say)[1]
+                        # THE SAME FILTER THE LEASES ARE DRAWN WITH, so the
+                        # shading answers the question the panel is asking.
+                        # _lv_choice is the whole panel dict; the townships
+                        # take the parts that are about WHICH leases, and
+                        # ignore mode and colour_by, which are about how to
+                        # draw them.
+                        _tw_where, _tw_params = _lease_filter_sql(_lv_choice)
                         _tn, _tl = add_township_layer(
                             m, engine, show=True,
-                            bounds=_layer_bounds)
+                            bounds=_layer_bounds,
+                            lease_url=_tw_leases,
+                            lease_where=_tw_where,
+                            lease_params=_tw_params,
+                            lease_by=(_lv_choice.get("colour_by")
+                                      or st.session_state.get(
+                                          "wm_lease_color_by", "producing")))
                         _say("[map] geo layer geo_townships  drew %s "
                              "(%s leased)" % (_tn, _tl))
                         _mapmsg.info(
@@ -13618,7 +14655,56 @@ def run(engine=None):
         # rest") was the widest thing on screen. Leaflet expands it on hover,
         # so nothing is hidden, and the names are short now because the
         # explanation belongs in the status line, not in a legend entry.
-        folium.LayerControl(collapsed=True).add_to(m)
+        # ── HANDED TO st_folium, NOT ADDED HERE ─────────────────────────
+        # folium's LayerControl emits `let layer_control_div_5 = ...`, and
+        # the whole folium block is injected into the component TWICE -- so
+        # that `let` is redeclared, which is a SyntaxError, which kills the
+        # entire script tag at parse time. Everything riding in that block
+        # dies with it, including the map's saved view.
+        #
+        # st_folium takes the control as a parameter and adds it on its own
+        # terms, so our copy is not in the duplicated text. This does not fix
+        # the duplication -- that lives in streamlit_folium and is recorded
+        # separately -- it removes the one construct in it that is fatal.
+        _layer_control = folium.LayerControl(collapsed=True)
+
+        # ── WETLANDS, AFTER THE CONTROL EXISTS ──────────────────────────
+        # It registers itself through the control rather than as a folium
+        # layer, so it has to be added once the control is on the map --
+        # ordering is the whole reason this sits here and not with the other
+        # geography layers.
+        #
+        # ALWAYS ADDED, NEVER SHOWN BY DEFAULT: it is a live service, so an
+        # unticked layer costs one line of JavaScript and fetches nothing.
+        # No chip, no Python state -- the map's own layer control is where a
+        # reader looks for an overlay, and this is one.
+        # ── THE HIGHWAYS THE DISTANCE FILTER MEASURED TO ────────────────
+        # Off by default and only offered when the file exists, so a machine
+        # without the TIGER build simply has one fewer overlay rather than a
+        # broken one. Built by tools/build_road_geojson.py.
+        try:
+            from dataview.mapping.geography_layers import (
+                add_highway_layer, HIGHWAY_GEOJSON_NAME)
+            _hdir = os.path.join(os.path.dirname(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__)))), "static")
+            _hpath = os.path.join(_hdir, HIGHWAY_GEOJSON_NAME)
+            if os.path.exists(_hpath):
+                add_highway_layer(m, _hpath,
+                                  "/app/static/" + HIGHWAY_GEOJSON_NAME,
+                                  show=False)
+            else:
+                _say("[map] highways layer skipped: %s not built "
+                     "(tools/build_road_geojson.py --apply)" % _hpath)
+        except Exception as _he:
+            _say("[map] highways overlay unavailable: %s" % str(_he)[:140])
+
+        try:
+            from dataview.mapping.geography_layers import add_wetlands_layer
+            add_wetlands_layer(m, show=False)
+        except Exception as _we:
+            # Not swallowed: a missing overlay should say so once, not leave
+            # the reader hunting for a switch that never appears.
+            _say("[map] wetlands overlay unavailable: %s" % str(_we)[:140])
 
         # Draw toolbar — circle + rectangle. Both are bulk cell-selectors
         # for grid mode: drawing one selects every cell whose bbox intersects
@@ -13858,9 +14944,28 @@ def run(engine=None):
         _reset_saved_view = bool(st.session_state.pop("_reset_saved_view", False))
         view_persist = MacroElement()
         view_persist._name = "dv_view_persist"
+        # ── A `script` MACRO, AND IT HAS TO BE ─────────────────────────
+        # This was briefly moved to an `html` macro on the figure root, to
+        # escape a SyntaxError in folium's shared block. It made things
+        # strictly worse and the counter proved it: window.__dv_vp_ran read
+        # 0, meaning the tag never executed AT ALL.
+        #
+        # A <script> that arrives inside injected HTML DOES NOT RUN. That is
+        # a DOM rule, not a folium quirk -- innerHTML never executes scripts.
+        # st_folium extracts folium's JS and runs it deliberately; anything
+        # riding in as markup is inert. So a `script` macro is the only way
+        # in, and the SyntaxError has to be fixed at its source instead --
+        # see the layer control below.
         view_persist._template = Template(u"""
             {% macro script(this, kwargs) %}
             (function() {
+                // DID THIS TAG EVEN RUN? A counter on window, because the
+                // alternative is inferring it from a feature that has three
+                // other reasons to look broken. Cheap, harmless, and it
+                // distinguishes "never executed" from "executed and failed".
+                try {
+                    window.__dv_vp_ran = (window.__dv_vp_ran || 0) + 1;
+                } catch (e) {}
                 var SKIP_FLAG  = """ + ("true" if _has_active_fit else "false") + u""";
                 var RESET_FLAG = """ + ("true" if _reset_saved_view else "false") + u""";
                 var STORAGE_KEY = 'dv_map_view';
@@ -13906,10 +15011,51 @@ def run(engine=None):
                             var raw = sessionStorage.getItem(STORAGE_KEY);
                             if (raw) {
                                 var v = JSON.parse(raw);
-                                if (v && typeof v.lat === 'number'
+                                // ── BOUNDS, NOT A ZOOM NUMBER ──────────
+                                // The same rule the initial view already
+                                // follows, finally applied to the saved one.
+                                // A centre and a zoom describe a DIFFERENT
+                                // extent on a different width, so restoring
+                                // them into a map the lease strip has just
+                                // narrowed showed a tighter view than the
+                                // one that was saved -- "the zoom and center
+                                // are not reset to the size of the map with
+                                // the lease sidebar on". Bounds are what the
+                                // reader actually meant by their view, and
+                                // fitBounds re-derives the zoom from
+                                // whatever width the map now has.
+                                if (v && typeof v.s === 'number'
+                                    && typeof v.n === 'number') {
+                                    setTimeout(function() {
+                                        // Suppressed while WE move the map:
+                                        // fitBounds zooms out to the next
+                                        // step that fits, so saving the
+                                        // result would record a slightly
+                                        // larger box, which the next restore
+                                        // would grow again -- a ratchet that
+                                        // walks the view outwards on every
+                                        // rerun.
+                                        mapInst.__dv_restoring = true;
+                                        try {
+                                            // The container may have changed
+                                            // width since Leaflet measured
+                                            // it; ask it to look again.
+                                            mapInst.invalidateSize(
+                                                { animate: false });
+                                        } catch (e) { /* not fatal */ }
+                                        mapInst.fitBounds(
+                                            [[v.s, v.w], [v.n, v.e]],
+                                            { animate: false });
+                                        setTimeout(function () {
+                                            mapInst.__dv_restoring = false;
+                                        }, 300);
+                                    }, 0);
+                                } else if (v && typeof v.lat === 'number'
                                     && typeof v.lng === 'number'
                                     && typeof v.zoom === 'number') {
-                                    // Defer until after Leaflet's own init.
+                                    // A view saved by the previous build.
+                                    // Honoured once; the next save writes
+                                    // bounds and it never appears again.
                                     setTimeout(function() {
                                         mapInst.setView(
                                             [v.lat, v.lng], v.zoom,
@@ -13931,12 +15077,11 @@ def run(engine=None):
                         if (saveTimer) clearTimeout(saveTimer);
                         saveTimer = setTimeout(function() {
                             try {
-                                var c = mapInst.getCenter();
-                                var z = mapInst.getZoom();
+                                if (mapInst.__dv_restoring) { return; }
+                                var b = mapInst.getBounds();
                                 sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
-                                    lat:  c.lat,
-                                    lng:  c.lng,
-                                    zoom: z
+                                    s: b.getSouth(), w: b.getWest(),
+                                    n: b.getNorth(), e: b.getEast()
                                 }));
                             } catch (e) { /* silent */ }
                         }, 200);
@@ -14687,14 +15832,34 @@ def run(engine=None):
         # symbols, the clip toggle. Clearing the drawn box is an action,
         # the same kind of thing as ✗ Clear wells and 🎯 Reset view, and
         # it belongs next to them where those are looked for.
-        _rv1, _rvc, _rvb, _rvf, _rvh = st.columns(
-            [1.0, 1.1, 1.0, 1.2, 1.2])
+        _rv1, _rvc, _rvb, _rvf, _rvh, _rvr = st.columns(
+            [1.0, 1.1, 1.0, 1.2, 1.2, 0.9])
         # HOLD THE MAP UNTIL THE SELECTIONS ARE MADE. Every option on this
         # page reruns the script, and the script rebuilds the map -- so
         # picking an area, then a query, then a layer costs three rebuilds to
         # see one result. Held, the options still rerun (they are cheap; the
         # map serialize is what costs) and the map is simply not drawn until
         # Apply. Off restores the draw-on-every-change behaviour.
+        # THE SECOND WINDOW IS REACHED FROM THE STRIP, not from here. A
+        # standalone link lived in this cell, 40px under the ▦ Lease strip
+        # toggle and prefixed with the same ▦ -- and it opened a second
+        # session, so hitting it instead of the toggle produced a Connect
+        # prompt and looked exactly like the toggle being broken. Measured
+        # at y=500 and y=540 in the same 297px column.
+        #
+        # The panel now has ONE home and a "Move to its own window" at its
+        # foot, so there is one door here, not two.
+        #
+        # THIS TOGGLE IS THE DOOR. It is read ~3,000 lines above, where the
+        # columns are built -- session_state carries it, so the layout that
+        # draws is the layout the last toggle asked for.
+        _rvb.toggle(
+            "▦ Lease strip", key="wm_lease_strip",
+            help="A narrow lease panel beside the map, where the nav "
+                 "sidebar is. Same session, so it needs no Connect and the "
+                 "map redraws at once. The sidebar folds away to pay for "
+                 "the width; the panel can be moved to its own window from "
+                 "its foot.")
         _rvh.toggle(
             "⏸ Hold for Map", key="wm_hold_map",
             help="Don't redraw the map on every option change. Pick your "
@@ -14713,6 +15878,30 @@ def run(engine=None):
                  "scout ticket. OFF by default: a click opening what you "
                  "clicked is what people expect, and freezing is the "
                  "deliberate trade of that for speed.")
+        # ── RECORD WHAT THIS SESSION DOES ───────────────────────────────
+        # Writes the core operations -- the spatial lookups, the WHERE the
+        # AI filter built, what each returned -- to a JSONL in C:\Bulk\
+        # reports. tools/replay_workflow.py reads it as a workflow, and
+        # --check re-runs the replayable ones and compares by digest.
+        #
+        # The toggle only opens and closes the file; the recording itself
+        # happens inside the operations, so nothing here has to be kept in
+        # step with what the page draws.
+        _rec_on = _rvr.toggle(
+            "🎬 Record", key=workflow_capture.ON_KEY,
+            help="Write what this session asks the database to C:\\Bulk\\"
+                 "reports, so it can be replayed and re-checked later. "
+                 "Records operations and their results, not keystrokes.")
+        if _rec_on and not workflow_capture.current_path():
+            _p = workflow_capture.start()
+            if _p:
+                workflow_capture.record_note("recording started from the map")
+        elif not _rec_on and workflow_capture.current_path():
+            workflow_capture.stop()
+        if _rec_on:
+            _wfp = workflow_capture.current_path()
+            if _wfp:
+                st.caption("🎬 recording → `%s`" % os.path.basename(_wfp))
         if _rvc.button("✗ Clear wells", key="wells_clear_viewport",
                        use_container_width=True,
                        disabled=not _wells_on_map(),
@@ -14737,21 +15926,58 @@ def run(engine=None):
         # should not cost the selection it was constraining.
         #
         # KEY ENDS "_clear", which _is_action_key() already excludes.
+        # ── ENABLED BY WHAT CONSTRAINS THE LAYERS, NOT BY _clip_box ─────
+        # "How do I get townships back to the full state?" ... "I don't see
+        # any clear box." ... "I see it below Lease strip but it is greyed
+        # out."
+        #
+        # It was greyed because it asked about _clip_box -- the rectangle
+        # handler's key -- while the geography layers clip to
+        #
+        #     _layer_bounds = _drawn_bounds or _clip_bounds_now()
+        #
+        # and _drawn_bounds is a DIFFERENT thing: _clip_bounds_now's own
+        # docstring calls it "whatever last moved the camera" and warns that,
+        # being oneshot=False, IT THEN PERSISTS. So a drill, a saved place or
+        # Use current view leaves it holding that area, the township query
+        # stays narrowed to it, and the one control that drops a constraint
+        # is disabled because no rectangle was ever drawn. A constraint with
+        # no way out.
+        #
+        # Same shape as the invariant keyed on FILE_NAME when the identity
+        # was FILE_PATH: the right question asked of the wrong key, and it
+        # cannot ever come out right.
+        #
+        # So the button now asks what the LAYERS ask, and clears all of it.
+        _constraints = [_k for _k in ("_clip_box", "_drawn_bounds",
+                                      "_active_drill_bbox")
+                        if st.session_state.get(_k)]
         if _rvb.button("✗ Clear box", key="wm_clip_clear",
                        use_container_width=True,
-                       disabled=not st.session_state.get("_clip_box"),
-                       help=("Drop the drawn box and stop clipping. Wells, "
-                             "tray and view are kept — ✗ Clear wells is for "
-                             "those."
-                             if st.session_state.get("_clip_box") else
-                             "Nothing to clear — no box has been drawn.")):
+                       disabled=not _constraints,
+                       help=("Drop every area constraint (%s) and stop "
+                             "clipping, so layers cover the whole state "
+                             "again. Wells, tray and view are kept — "
+                             "✗ Clear wells is for those."
+                             % ", ".join(_c.lstrip("_") for _c in _constraints)
+                             if _constraints else
+                             "Nothing to clear — no area constraint is set.")):
             # A REQUEST for the toggle: the Clip checkbox is built later on
             # this same run, and assigning a widget its own key after it
             # exists raises on a LATER run -- scar #6.
             st.session_state.pop("_clip_box", None)
             st.session_state.pop("_place_shapes", None)
+            # THE TWO THAT USED TO SURVIVE IT. _drawn_bounds is what the
+            # geography layers actually read, and _active_drill_bbox is the
+            # circle equivalent; leaving either behind means pressing Clear
+            # box and watching nothing widen.
+            st.session_state.pop("_drawn_bounds", None)
+            st.session_state.pop("_drawn_bounds_oneshot", None)
+            st.session_state.pop("_drawn_bounds_exact", None)
+            st.session_state.pop("_active_drill_bbox", None)
             st.session_state["_clip_off_request"] = True
-            _say("[map] clear box: constraint dropped")
+            _say("[map] clear box: constraint dropped (%s)"
+                 % (", ".join(_constraints) or "none"))
             st.rerun()
         if _rv1.button("🎯 Reset view", key="wells_reset_view",
                        use_container_width=True,
@@ -14942,23 +16168,85 @@ def run(engine=None):
                 "**▶ Resume** (on the banner above, or in ⚙ Page controls) "
                 "to draw them again.")
 
+        # ── THE STRIP IS DRAWN ON EVERY RUN, MAP OR NO MAP ──────────────
+        # It used to live inside the `else` below, so it only existed on
+        # runs where the map actually drew. STREAMLIT DISCARDS WIDGET STATE
+        # FOR WIDGETS THAT ARE NOT INSTANTIATED, so any rerun that skipped
+        # the map -- hold, freeze, an early return -- threw away lv_mode,
+        # and the next render fell back to the value in the prefs file.
+        # Clicking "leases" then appeared to do nothing at all: the radio
+        # snapped back, every time. Reported as "the radio buttons don't
+        # alternate between lease, townships or both".
+        #
+        # The columns are still created HERE, immediately above the map, so
+        # the strip's top is still the map's top -- the alignment does not
+        # depend on the map being drawn either.
+        # 1:2.5 -- ~400px of a 1,920px viewport, up from the 344 that matched
+        # the nav sidebar. The panel is about to carry state and county on
+        # top of source, status, operator and acres, and a multiselect
+        # showing chips needs room before it starts wrapping one per line.
+        # The map keeps ~980px, still wider than it had before any of this.
+        if st.session_state.get("wm_lease_strip") and engine is not None:
+            _sc, _mc = st.columns([1, 2.5], gap="small")
+        else:
+            _mc, _sc = st.container(), None
+        if _sc is not None:
+            with _sc:
+                _collapse_sidebar_once()
+                # WHAT THE MAP IS ALREADY DRAWING, so the panel can open
+                # REFLECTING it instead of overriding it. Opening a panel
+                # must not change the map -- and it did: the radio seeded
+                # from the prefs file, so a new session that switched the
+                # strip on immediately drew whatever was last sent, which
+                # is "the leases were turned on by default" a second time,
+                # by a different route than the one already fixed.
+                _chip_mode = (
+                    "both" if ("geo_leases" in active_db
+                               and "geo_townships" in active_db)
+                    else "leases" if "geo_leases" in active_db
+                    else "townships" if "geo_townships" in active_db
+                    else "off")
+                # ── THE PANEL ENDS WHERE THE MAP ENDS ───────────────────
+                # "so it is the same height as the map". Its own scroll
+                # rather than the page's: a panel that runs past the map
+                # drags the whole page down with it, and every control
+                # added from here makes that worse -- which is the shape of
+                # the push-down that cost a day, arriving from the other
+                # side.
+                #
+                # 500 is the map's height, given to st_folium a few lines
+                # below and hard-capped in the page CSS. Written here as the
+                # same number for the same reason; if the map grows, this
+                # follows it.
+                try:
+                    with st.container(height=500, border=False):
+                        render_lease_view(engine, compact=True,
+                                          default_mode=_chip_mode)
+                except Exception as _lse:
+                    # NOT swallowed. A strip that silently draws nothing is
+                    # indistinguishable from one switched off.
+                    st.warning("Lease strip: %s" % str(_lse)[:200])
+
         if _skip_folium:
             map_data = None
         else:
             _phase(90, "🌐 Rendering map in browser…")
-            try:
-                map_data = st_folium(
-                m, height=500, use_container_width=True,
-                returned_objects=_ret,
-                key=_map_widget_key,
-            )
-            except TypeError:
-                # Older streamlit-folium
-                map_data = st_folium(
-                    m, width=None, height=500,
-                    returned_objects=_ret,
-                    key=_map_widget_key,
-                )
+            # THE MAP GOES IN THE WIDE COLUMN the block above created.
+            with _mc:
+                try:
+                    map_data = st_folium(
+                        m, height=500, use_container_width=True,
+                        returned_objects=_ret,
+                        layer_control=_layer_control,
+                        key=_map_widget_key,
+                    )
+                except TypeError:
+                    # Older streamlit-folium
+                    map_data = st_folium(
+                        m, width=None, height=500,
+                        returned_objects=_ret,
+                        key=_map_widget_key,
+                    )
         _phase(100)
         # UNDER THE MAP, which is what the messages are about. This used to
         # be _mapmsg.empty() -- clearing a placeholder that sat ABOVE the map
@@ -16029,12 +17317,31 @@ def run(engine=None):
         # -- The picked SEG-Y, opened in the shared file viewer ----------
         # Only when seismic is in play: the chooser is useless otherwise,
         # and both queries would run for a user who never asked for it.
-        if "geo_seismic" in active_db or st.session_state.get("_seis_pick"):
+        # THIS USED TO FAIL INTO A print() AND NOTHING ELSE. A panel that
+        # throws then leaves no mark anywhere the operator can see -- the
+        # seismic viewer is simply absent, which reads as "it was moved to
+        # the second screen" rather than "it raised". Reported exactly that
+        # way: "we need to put the seismic viewer back inline."
+        #
+        # The traceback goes on the page now. It is a diagnostic, not a
+        # crash: the map above it has already drawn and stays usable.
+        _seis_gate = ("geo_seismic" in active_db
+                      or st.session_state.get("_seis_pick"))
+        if _seis_gate:
             try:
                 _render_seis_pick(_seismic_line_paths(engine),
                                   _qry_seismic_3d(engine))
             except Exception as _spe:
-                print(f"[seis_panel] {_spe}")
+                import traceback as _sptb
+                st.error("The seismic panel could not draw: %s" % _spe)
+                st.caption("The map above is unaffected. Full traceback:")
+                st.code(_sptb.format_exc(), language="text")
+                print("[seis_panel] " + _sptb.format_exc())
+        elif st.session_state.get("wm_debug_seis"):
+            # AND SAY WHEN IT WAS THE GATE, not a failure. "Nothing drew" has
+            # two causes and they need different repairs.
+            st.caption("Seismic panel: not shown — the Seismic layer is off "
+                       "and no line is picked.")
 
         # ── Over-cap drill results ──────────────────────────────────────
         # Drills that returned more than _TRAY_AUTO_ADD_CAP wells stash their
@@ -16047,310 +17354,921 @@ def run(engine=None):
             st.session_state.pop("_pending_drill_label", None)
 
 
-        # ── Results — the current query / draw IS the object set ─────────
-        # Results = the drilled/clicked set, else the current viewport /
-        # draw selection, so Documents / Export reflect the wells chosen
-        # on the map (viewport toggle or a drawn box).
-        result_uwis = (list(st.session_state.get("clicked_uwis") or [])
-                       or list(st.session_state.get("viewport_uwis") or []))
-        _n = len(result_uwis)
-        st.markdown(f"#### 📋 Results — {_n} well(s)" if result_uwis
-                    else "#### 📋 Results")
+        # ── THE RESULTS PANEL IS A FRAGMENT ─────────────────────────────
+        # "There should be no reruns of the map or any communication with
+        # the map. The sole purpose I was selecting wells is to view the
+        # documents for those wells."
+        #
+        # Right, and it could not hold before: this panel sat directly in
+        # run(), so ANY submit inside it -- ticking wells and pressing Apply
+        # selection -- re-entered run() and rebuilt the whole map, 2-4 s, for
+        # an action that never touches it. Removing the handler's own
+        # st.rerun() took that from two rebuilds to one; only a fragment
+        # removes the last.
+        #
+        # SAFE BECAUSE THE PANEL IS SELF-CONTAINED. Everything that reads the
+        # selection -- selected_in_results, the Documents scoping, the Scout
+        # Tickets button -- lives inside it, and result_uwis is not referenced
+        # anywhere after it. It closes over uwi_index read-only. The Scout
+        # Ticket panel below reads _summary_uwis from session_state, not from
+        # here, so it is unaffected.
+        #
+        # THE FOUR REruns THAT STILL NEED THE WHOLE APP say so with
+        # scope="app": Scout Tickets, Documents and Export change the page,
+        # and Clear empties viewport_uwis, which the map draws from. A
+        # fragment-scoped rerun there would leave the page or the map showing
+        # the old thing -- the button would look like it had done nothing.
+        # Select all / None deliberately keep the fragment scope: they only
+        # re-default the editor.
+        @st.fragment
+        def _results_panel():
+            # ── Results — the current query / draw IS the object set ─────────
+            # Results = the drilled/clicked set, else the current viewport /
+            # draw selection, so Documents / Export reflect the wells chosen
+            # on the map (viewport toggle or a drawn box).
+            result_uwis = (list(st.session_state.get("clicked_uwis") or [])
+                           or list(st.session_state.get("viewport_uwis") or []))
+            _n = len(result_uwis)
+            st.markdown(f"#### 📋 Results — {_n} well(s)" if result_uwis
+                        else "#### 📋 Results")
 
-        if not result_uwis:
-            st.markdown(
-                "<div style='padding:6px 0'>"
-                "<span style='color:#aaa;font-size:12px'>— No wells —&nbsp;&nbsp;"
-                "Filter the wells or draw a circle / rectangle on the map to "
-                "build a result set.</span></div>",
-                unsafe_allow_html=True)
-        else:
-            _res_mode = st.radio(
-                "Results view", ["🛢 Wells", "📄 Documents"],
-                horizontal=True, key="results_mode:v1",
-                label_visibility="collapsed")
+            if not result_uwis:
+                st.markdown(
+                    "<div style='padding:6px 0'>"
+                    "<span style='color:#aaa;font-size:12px'>— No wells —&nbsp;&nbsp;"
+                    "Filter the wells or draw a circle / rectangle on the map to "
+                    "build a result set.</span></div>",
+                    unsafe_allow_html=True)
+            else:
+                _res_mode = st.radio(
+                    "Results view", ["🛢 Wells", "📄 Documents"],
+                    horizontal=True, key="results_mode:v1",
+                    label_visibility="collapsed")
 
-            # PICKING "Documents" GOES TO THE DOCUMENTS PAGE.
-            #
-            # It used to render a scannable table here plus an "Open in
-            # Documents page →" button underneath — two clicks to reach the
-            # thing the radio already named, and a preview of the page you
-            # were about to open. The radio is a destination, so treat it
-            # as one.
-            #
-            # _render_results_documents is left in place, unused: it is a
-            # perfectly good compact list and may be wanted somewhere that
-            # is NOT a navigation control.
-            if _res_mode == "📄 Documents":
-                st.session_state["selected_entities"] = [
-                    {"type": "well", "id": _u, "name": _u}
-                    for _u in result_uwis]
-                st.session_state["wm_docs_page"] = True
-                st.session_state["_export_scroll_pending"] = True
-                st.rerun()
-
-            selected_in_results = []
-            if _res_mode == "🛢 Wells":
-                # Tray grid — tick wells to scope Scout Tickets / Documents.
-                _grid_rows = []
-                for cu in list(result_uwis):
-                    well = uwi_index.get(cu, {})
-                    _wn_base = well.get("well_name") or cu
-                    _wn_sfx  = well.get("well_name_suffix") or ""
-                    wn = (f"{_wn_base} {_wn_sfx}".strip() if _wn_sfx else _wn_base)
-                    op = (well.get("operator_name") or well.get("company_name") or "")
-                    _grid_rows.append({"Select": False, "UWI": str(cu),
-                                       "Well": wn, "Operator": op})
-                # THE GRID LIVES IN A FORM, AND THAT IS THE WHOLE POINT.
-                # A data_editor outside a form reruns the entire page on every
-                # cell change — so on a long result set, ticking ten wells
-                # re-rendered the map ten times and each tick fought the
-                # redraw. Inside a form, edits accumulate in the browser and
-                # nothing reruns until a submit button is pressed.
+                # PICKING "Documents" GOES TO THE DOCUMENTS PAGE.
                 #
-                # Selection therefore has to live somewhere that survives the
-                # rerun: st.session_state["tray_selected_uwis"], keyed by UWI
-                # rather than by row, so it stays correct when the result set
-                # changes underneath it.
-                _sel_key = "tray_selected_uwis"
-                _all_uwis = [str(r["UWI"]) for r in _grid_rows]
-                # Intersect with what is actually on screen: a stale tick from
-                # a previous draw must not silently scope Documents to a well
-                # that is no longer in the results.
-                _selected = [u for u in (st.session_state.get(_sel_key) or [])
-                             if u in set(_all_uwis)]
+                # It used to render a scannable table here plus an "Open in
+                # Documents page →" button underneath — two clicks to reach the
+                # thing the radio already named, and a preview of the page you
+                # were about to open. The radio is a destination, so treat it
+                # as one.
+                #
+                # _render_results_documents is left in place, unused: it is a
+                # perfectly good compact list and may be wanted somewhere that
+                # is NOT a navigation control.
+                if _res_mode == "📄 Documents":
+                    st.session_state["selected_entities"] = [
+                        {"type": "well", "id": _u, "name": _u}
+                        for _u in result_uwis]
+                    st.session_state["wm_docs_page"] = True
+                    st.session_state["_export_scroll_pending"] = True
+                    st.rerun(scope="app")   # Documents view: page/map
 
-                # The editor key carries a nonce so Select all / Clear can
-                # re-default it. Streamlit refuses a write to a widget's own
-                # key once that widget exists, so those buttons CANNOT just
-                # assign the ticks — they record the new selection, bump the
-                # nonce, and rerun; this rebuild then seeds the frame from it.
-                # The key still ENDS IN ':sel' because _is_action_key() keys
-                # off that suffix — 'tray_grid:v2:sel', never 'tray_grid:sel:v2'.
-                _nonce = st.session_state.get("tray_grid_nonce", 0)
+                selected_in_results = []
+                if _res_mode == "🛢 Wells":
+                    # Tray grid — tick wells to scope Scout Tickets / Documents.
+                    _grid_rows = []
+                    for cu in list(result_uwis):
+                        well = uwi_index.get(cu, {})
+                        _wn_base = well.get("well_name") or cu
+                        _wn_sfx  = well.get("well_name_suffix") or ""
+                        wn = (f"{_wn_base} {_wn_sfx}".strip() if _wn_sfx else _wn_base)
+                        op = (well.get("operator_name") or well.get("company_name") or "")
+                        _grid_rows.append({"Select": False, "UWI": str(cu),
+                                           "Well": wn, "Operator": op})
+                    # THE GRID LIVES IN A FORM, AND THAT IS THE WHOLE POINT.
+                    # A data_editor outside a form reruns the entire page on every
+                    # cell change — so on a long result set, ticking ten wells
+                    # re-rendered the map ten times and each tick fought the
+                    # redraw. Inside a form, edits accumulate in the browser and
+                    # nothing reruns until a submit button is pressed.
+                    #
+                    # Selection therefore has to live somewhere that survives the
+                    # rerun: st.session_state["tray_selected_uwis"], keyed by UWI
+                    # rather than by row, so it stays correct when the result set
+                    # changes underneath it.
+                    _sel_key = "tray_selected_uwis"
+                    _all_uwis = [str(r["UWI"]) for r in _grid_rows]
+                    # Intersect with what is actually on screen: a stale tick from
+                    # a previous draw must not silently scope Documents to a well
+                    # that is no longer in the results.
+                    _selected = [u for u in (st.session_state.get(_sel_key) or [])
+                                 if u in set(_all_uwis)]
 
-                _grid_df = pd.DataFrame(_grid_rows)
-                _grid_df["Select"] = _grid_df["UWI"].isin(set(_selected))
+                    # The editor key carries a nonce so Select all / Clear can
+                    # re-default it. Streamlit refuses a write to a widget's own
+                    # key once that widget exists, so those buttons CANNOT just
+                    # assign the ticks — they record the new selection, bump the
+                    # nonce, and rerun; this rebuild then seeds the frame from it.
+                    # The key still ENDS IN ':sel' because _is_action_key() keys
+                    # off that suffix — 'tray_grid:v2:sel', never 'tray_grid:sel:v2'.
+                    _nonce = st.session_state.get("tray_grid_nonce", 0)
 
-                with st.form(key=f"tray_form_{_nonce}", border=False):
-                    _tray_edit = st.data_editor(
-                        _grid_df,
-                        column_config={"Select": st.column_config.CheckboxColumn(
-                            "Select", width="small")},
-                        disabled=["UWI", "Well", "Operator"],
-                        hide_index=True, use_container_width=True,
-                        height=min(360, 40 + 35 * max(1, len(_grid_df))),
-                        key=f"tray_grid:{_nonce}:sel",
-                    )
-                    _f1, _f2, _f3, _f4 = st.columns([2, 1, 1, 3])
-                    _apply = _f1.form_submit_button(
-                        "✓ Apply selection", type="primary",
-                        use_container_width=True)
-                    # Select all / Clear are SUBMIT buttons, not plain ones, so
-                    # pressing either still harvests the form first — a plain
-                    # button would discard whatever was ticked but not applied.
-                    _pick_all = _f2.form_submit_button(
-                        f"All {len(_all_uwis)}", use_container_width=True)
-                    _pick_none = _f3.form_submit_button(
-                        "None", use_container_width=True)
-                    _f4.markdown(
-                        f"<div style='font-size:11px;color:#888;padding:9px 0 0 6px'>"
+                    _grid_df = pd.DataFrame(_grid_rows)
+                    _grid_df["Select"] = _grid_df["UWI"].isin(set(_selected))
+
+                    with st.form(key=f"tray_form_{_nonce}", border=False):
+                        _tray_edit = st.data_editor(
+                            _grid_df,
+                            column_config={"Select": st.column_config.CheckboxColumn(
+                                "Select", width="small")},
+                            disabled=["UWI", "Well", "Operator"],
+                            hide_index=True, use_container_width=True,
+                            height=min(360, 40 + 35 * max(1, len(_grid_df))),
+                            key=f"tray_grid:{_nonce}:sel",
+                        )
+                        _f1, _f2, _f3, _f4 = st.columns([2, 1, 1, 3])
+                        _apply = _f1.form_submit_button(
+                            "✓ Apply selection", type="primary",
+                            use_container_width=True)
+                        # Select all / Clear are SUBMIT buttons, not plain ones, so
+                        # pressing either still harvests the form first — a plain
+                        # button would discard whatever was ticked but not applied.
+                        _pick_all = _f2.form_submit_button(
+                            f"All {len(_all_uwis)}", use_container_width=True)
+                        _pick_none = _f3.form_submit_button(
+                            "None", use_container_width=True)
+                        # _f4 is left empty on purpose -- it holds the buttons to
+                        # their width. The count that used to live here is drawn
+                        # BELOW the form now; see the Apply handler.
+
+                    if _pick_all or _pick_none:
+                        st.session_state[_sel_key] = _all_uwis if _pick_all else []
+                        st.session_state["tray_grid_nonce"] = _nonce + 1
+                        # These two DO need the rerun: they re-default the editor,
+                        # and Streamlit refuses a write to a live widget's key, so
+                        # the nonce bump only takes effect on a fresh run.
+                        st.rerun()
+                    if _apply:
+                        _selected = [str(r["UWI"]) for _, r in _tray_edit.iterrows()
+                                     if bool(r["Select"])]
+                        st.session_state[_sel_key] = _selected
+
+                    # ── THE COUNT, BELOW THE FORM, WHICH IS WHY APPLY IS FREE ───
+                    # It used to sit INSIDE the form, so it was drawn before the
+                    # Apply handler ran and reported the PREVIOUS selection --
+                    # reading as though Apply had done nothing. The answer was an
+                    # st.rerun(), described in the comment here as "the deliberate
+                    # cost" of one repaint.
+                    #
+                    # That price was set before the map got expensive. On this page
+                    # a rerun is not a repaint: it rebuilds the whole map, 2-4 s,
+                    # and Apply has nothing to do with the map. Reported as "the
+                    # results well apply selection is really slow for some unknown
+                    # reason" -- the reason is that it was redrawing the map.
+                    #
+                    # Nothing needed the rerun. `_selected` is already reassigned
+                    # from the editor above, so every reader below this line --
+                    # selected_in_results, Documents scoping, Scout Tickets -- sees
+                    # the new selection in THIS run. Only the caption was stale,
+                    # and a caption drawn after the handler cannot be.
+                    st.markdown(
+                        f"<div style='font-size:11px;color:#888;padding:2px 0 6px 6px'>"
                         f"{len(_selected)} of {len(_all_uwis)} selected</div>",
                         unsafe_allow_html=True)
 
-                if _pick_all or _pick_none:
-                    st.session_state[_sel_key] = _all_uwis if _pick_all else []
-                    st.session_state["tray_grid_nonce"] = _nonce + 1
-                    st.rerun()
-                if _apply:
-                    _selected = [str(r["UWI"]) for _, r in _tray_edit.iterrows()
-                                 if bool(r["Select"])]
-                    st.session_state[_sel_key] = _selected
-                    # Repaint once so the count and the buttons below agree with
-                    # what was just applied. The "N of M selected" caption is
-                    # drawn INSIDE the form, i.e. before this handler runs, so
-                    # without this it reports the previous selection and reads
-                    # like the Apply did nothing. One rerun per Apply is the
-                    # deliberate cost; the point of the form is that ticking
-                    # itself no longer causes one.
-                    st.rerun()
+                    selected_in_results = list(_selected)
+                    st.markdown(
+                        "<div style='font-size:11px;color:#555;padding:4px 0 6px 0'>"
+                        "<b>Export</b> sends <b>all</b> results. Tick wells and press "
+                        "<b>Apply selection</b> to scope <b>Documents</b> / "
+                        "<b>Scout Tickets</b> to just those — ticking no longer "
+                        "reloads the map on every box."
+                        "</div>",
+                        unsafe_allow_html=True)
+                # (no else: picking "Documents" navigated away above, so this
+                # branch could only ever be reached by a third radio option
+                # that does not exist. Leaving a second Documents path here is
+                # how the next person ends up debugging the wrong one.)
 
-                selected_in_results = list(_selected)
-                st.markdown(
-                    "<div style='font-size:11px;color:#555;padding:4px 0 6px 0'>"
-                    "<b>Export</b> sends <b>all</b> results. Tick wells and press "
-                    "<b>Apply selection</b> to scope <b>Documents</b> / "
-                    "<b>Scout Tickets</b> to just those — ticking no longer "
-                    "reloads the map on every box."
-                    "</div>",
-                    unsafe_allow_html=True)
-            # (no else: picking "Documents" navigated away above, so this
-            # branch could only ever be reached by a third radio option
-            # that does not exist. Leaving a second Documents path here is
-            # how the next person ends up debugging the wrong one.)
+                #   Scout Tickets → picked wells only
+                #   Documents     → picked wells (fallback all results)
+                #   Export        → all results
+                p1, p2, p3, p4 = st.columns(4)
+                with p1:
+                    if st.button("📋 Scout Tickets",
+                                 key="view_summary",
+                                 use_container_width=True, type="primary",
+                                 disabled=not selected_in_results):
+                        st.session_state["show_summary"] = True
+                        st.session_state["_summary_uwis"] = selected_in_results
+                        # THE PAGE CARRIES ITS OWN INPUTS. The scout ticket
+                        # is a page now, decided near the top of run() --
+                        # above the well query, so uwi_index does not exist
+                        # yet when it draws. Rather than move the query
+                        # earlier for one report's benefit, the rows it needs
+                        # are captured HERE, where they are already in hand.
+                        #
+                        # It also makes the page honest about what it is: a
+                        # report over a set of wells, reading the database
+                        # for the rest, with no dependency on the map having
+                        # been built.
+                        st.session_state["_summary_rows"] = {
+                            _u: uwi_index.get(_u)
+                            for _u in selected_in_results
+                            if uwi_index.get(_u)}
+                        # OPEN AT THE TOP. This button sits near the foot of
+                        # the map page and Streamlit keeps the scroll across
+                        # the rerun, so without this the ticket opens
+                        # scrolled to the bottom. Same flag Documents and
+                        # Export set, consumed once by the page on entry.
+                        st.session_state["_export_scroll_pending"] = True
+                        # scope="app": the page decision is read above this
+                        # fragment, so a fragment-scoped rerun cannot reach
+                        # it. The app rerun is cheap -- run() returns at the
+                        # scout-ticket block, long before the map is built.
+                        st.rerun(scope="app")   # Scout Tickets: page/map
+                with p2:
+                    _docs_uwis = selected_in_results or result_uwis
+                    if st.button("📄 Documents", key="open_docs_btn",
+                                 use_container_width=True,
+                                 disabled=not _docs_uwis):
+                        # Entity-aware selection the documents page consumes. Wells
+                        # now; seismic/fields can be added as other entity types.
+                        st.session_state["selected_entities"] = [
+                            {"type": "well", "id": _u, "name": _u}
+                            for _u in _docs_uwis
+                        ]
+                        st.session_state["wm_docs_page"] = True
+                        st.session_state["_export_scroll_pending"] = True
+                        st.rerun(scope="app")   # Documents button: page/map
+                with p3:
+                    if st.button("📊 Export", key="export_xlsx_btn",
+                                 use_container_width=True,
+                                 disabled=not result_uwis):
+                        st.session_state["wm_export_page"] = True
+                        # Scroll to the top once on entry — the Export button sits
+                        # at the bottom of the page, and Streamlit keeps the scroll
+                        # position across the rerun, so the export page would
+                        # otherwise open scrolled to the bottom.
+                        st.session_state["_export_scroll_pending"] = True
+                        st.rerun(scope="app")   # Export: page/map
+                with p4:
+                    if st.button("🗑 Clear", key="clear_tray",
+                                 use_container_width=True):
+                        st.session_state.clicked_uwis = []
+                        st.session_state.scout_uwi    = None
+                        st.session_state["show_summary"] = False
+                        st.session_state["_summary_uwis"] = []
+                        st.session_state["_auto_tray_uwis"] = []
+                        # Also clear viewport markers and the drawing dedupe set
+                        st.session_state["viewport_uwis"] = []
+                        st.session_state["processed_drawings"] = set()
+                        # Clear grid-click dedupe so the same cell can be
+                        # re-clicked, and the drawn bounds so the map
+                        # repositions correctly next time
+                        st.session_state.pop("_last_grid_click", None)
+                        st.session_state.pop("_drawn_bounds", None)
+                        st.session_state.pop("_active_drill_bbox", None)
+                        # Also clear the multi-cell selection buffer, and
+                        # bring the grid back so the user can pick again.
+                        st.session_state["selected_cells"] = []
+                        st.session_state["grid_visible"] = True
+                        st.session_state.pop("grid_visible_toggle", None)
+                        st.rerun(scope="app")   # Clear tray: page/map
 
-            #   Scout Tickets → picked wells only
-            #   Documents     → picked wells (fallback all results)
-            #   Export        → all results
-            p1, p2, p3, p4 = st.columns(4)
-            with p1:
-                if st.button("📋 Scout Tickets",
-                             key="view_summary",
-                             use_container_width=True, type="primary",
-                             disabled=not selected_in_results):
-                    st.session_state["show_summary"] = True
-                    st.session_state["_summary_uwis"] = selected_in_results
-                    st.rerun()
-            with p2:
-                _docs_uwis = selected_in_results or result_uwis
-                if st.button("📄 Documents", key="open_docs_btn",
-                             use_container_width=True,
-                             disabled=not _docs_uwis):
-                    # Entity-aware selection the documents page consumes. Wells
-                    # now; seismic/fields can be added as other entity types.
-                    st.session_state["selected_entities"] = [
-                        {"type": "well", "id": _u, "name": _u}
-                        for _u in _docs_uwis
-                    ]
-                    st.session_state["wm_docs_page"] = True
-                    st.session_state["_export_scroll_pending"] = True
-                    st.rerun()
-            with p3:
-                if st.button("📊 Export", key="export_xlsx_btn",
-                             use_container_width=True,
-                             disabled=not result_uwis):
-                    st.session_state["wm_export_page"] = True
-                    # Scroll to the top once on entry — the Export button sits
-                    # at the bottom of the page, and Streamlit keeps the scroll
-                    # position across the rerun, so the export page would
-                    # otherwise open scrolled to the bottom.
-                    st.session_state["_export_scroll_pending"] = True
-                    st.rerun()
-            with p4:
-                if st.button("🗑 Clear", key="clear_tray",
-                             use_container_width=True):
-                    st.session_state.clicked_uwis = []
-                    st.session_state.scout_uwi    = None
-                    st.session_state["show_summary"] = False
-                    st.session_state["_summary_uwis"] = []
-                    st.session_state["_auto_tray_uwis"] = []
-                    # Also clear viewport markers and the drawing dedupe set
-                    st.session_state["viewport_uwis"] = []
-                    st.session_state["processed_drawings"] = set()
-                    # Clear grid-click dedupe so the same cell can be
-                    # re-clicked, and the drawn bounds so the map
-                    # repositions correctly next time
-                    st.session_state.pop("_last_grid_click", None)
-                    st.session_state.pop("_drawn_bounds", None)
-                    st.session_state.pop("_active_drill_bbox", None)
-                    # Also clear the multi-cell selection buffer, and
-                    # bring the grid back so the user can pick again.
-                    st.session_state["selected_cells"] = []
-                    st.session_state["grid_visible"] = True
-                    st.session_state.pop("grid_visible_toggle", None)
-                    st.rerun()
 
-        # ── Scout Ticket panel — renders below the Object Tray ──────────
-        _summary_uwis = st.session_state.get("_summary_uwis", [])
-        if st.session_state.get("show_summary") and _summary_uwis:
-            # Cache HTML — only rebuild when selection changes
-            cache_key = tuple(_summary_uwis)
-            if st.session_state.get("_summary_cache_key") != cache_key:
-                _html = ""
-                for uwi in _summary_uwis:
-                    well_row = uwi_index.get(uwi)
-                    if not well_row:
-                        continue
-                    # Dispatch by identifier shape: GOM wells are keyed by
-                    # a UUID well_id (36 chars, dashed); dv_well wells use
-                    # PPDM-style UWIs. A dict tagged _source="gom" (set by
-                    # the GOM popup-click handler) is the explicit signal;
-                    # the UUID-shape check is the fallback.
-                    _is_gom = (
-                        well_row.get("_source") == "gom"
-                        or (isinstance(uwi, str)
-                            and len(uwi) == 36
-                            and uwi.count("-") == 4)
-                    )
-                    if _is_gom:
-                        _html += _build_gom_scout_ticket_html(uwi, well_row, engine)
-                    else:
-                        _html += _build_scout_ticket_html(uwi, well_row, engine)
-                    _html += "<div style='page-break-after:always'></div>"
-                st.session_state["_summary_html"]      = _html
-                st.session_state["_summary_cache_key"] = cache_key
+        # ── THE SCOUT TICKET RENDERS INSIDE THE FRAGMENT ────────────────
+        # "Nothing should cause a rerun of the map." Documents and Export
+        # already cost nothing: run() reads their page flags near the top and
+        # RETURNS before the map is built, so their app-scoped rerun never
+        # reaches it. Scout Tickets was the odd one out -- its panel renders
+        # inline, below the map, so it needed the whole app and the map was
+        # rebuilt to display a report that does not use it.
+        #
+        # Rendering it here makes the button fragment-scoped like Apply, and
+        # its two Close buttons with it. Nothing about a scout ticket asks
+        # the map a question.
 
-            all_html = st.session_state.get("_summary_html", "")
-            full_doc = _full_html_doc(all_html, f"Scout Tickets — {len(_summary_uwis)} wells")
-            fn       = f"Scout_Tickets_{len(_summary_uwis)}_wells.html"
-
-            _hdr = ("Scout Ticket" if len(_summary_uwis) == 1
-                    else f"Scout Tickets — {len(_summary_uwis)} wells")
-            st.markdown(f"#### 📋 {_hdr}")
-            b1, bp, b2, _ = st.columns([1, 1, 1, 3])
-            b1.download_button(
-                "⬇ Save Report", data=full_doc.encode(),
-                file_name=fn, mime="text/html",
-                key="save_report_dl", use_container_width=True)
-
-            # ── PDF, generated not printed ──────────────────────────────────
-            # _build_batch_pdf() has existed since the multi-well panel was
-            # written and was never wired to a button, so the only route to a
-            # PDF was "Save Report" -> open the HTML -> browser Print. That
-            # path (and Windows' "Microsoft Print to PDF" in particular)
-            # flattens the text to vector outlines: the file looks right and
-            # has ZERO extractable characters, so the File Catalog can't read
-            # a single field out of it. WeasyPrint writes a real text layer.
-            #
-            # Cached in session_state against the same cache_key the HTML uses,
-            # so switching wells invalidates it and re-rendering the page
-            # doesn't regenerate a PDF nobody asked for.
-            _pdf_key = f"_summary_pdf_{cache_key}"
-            if bp.button("⬇ PDF", key="summary_pdf_btn",
-                         use_container_width=True,
-                         help="Generate a PDF with a real text layer. Prefer "
-                              "this over printing the saved HTML — printed "
-                              "PDFs contain no searchable or extractable text."):
-                with st.spinner(f"Rendering {len(_summary_uwis)} ticket(s)…"):
-                    _pdf, _err = _scout_ticket_pdf(
-                        all_html, f"Scout Tickets — {len(_summary_uwis)} wells",
-                        return_error=True)
-                st.session_state[_pdf_key] = _pdf
-                st.session_state[f"{_pdf_key}_err"] = _err
-            if st.session_state.get(_pdf_key):
-                st.download_button(
-                    "📄 Save PDF", data=st.session_state[_pdf_key],
-                    file_name=f"Scout_Tickets_{len(_summary_uwis)}_wells.pdf",
-                    mime="application/pdf", key="summary_pdf_dl")
-            elif st.session_state.get(f"{_pdf_key}_err"):
-                st.error(st.session_state[f"{_pdf_key}_err"])
-
-            if b2.button("✕ Close", key="close_summary", use_container_width=True):
-                st.session_state["show_summary"] = False
-                st.session_state["_summary_uwis"] = []
-                st.rerun()
-
-            st.markdown(all_html, unsafe_allow_html=True)
-            # The ticket's photos are thumbnails and always will be; this is
-            # where the full-size ones live. See _render_photo_gallery.
-            try:
-                for _u in _summary_uwis[:1]:
-                    _render_mud_log(engine, _u)
-            except Exception as _mlexc:
-                st.caption("Mud log unavailable: %s" % _mlexc)
-            try:
-                _render_photo_gallery(engine, _summary_uwis)
-            except Exception as _galexc:
-                st.caption("Core photo gallery unavailable: %s" % _galexc)
-            if st.button("✕ Close scout ticket", key="close_summary_bottom",
-                         use_container_width=True):
-                st.session_state["show_summary"] = False
-                st.session_state["_summary_uwis"] = []
-                st.rerun()
-            st.markdown("---")
+        _results_panel()
 
 
 # Wrap the query and layer functions. MUST BE LAST: it walks globals(),
 # so every _qry_/_add_ has to be defined before it runs.
 _install_timers()
 _install_rerun_trace()
+
+
+# ── THE LEASE SECOND SCREEN ────────────────────────────────────────────────
+# A separate window that decides WHAT THE MAP DRAWS, so the map page does not
+# have to carry a query builder it has no room for.
+#
+# THE CHANNEL IS THE PREFS FILE, exactly as the seismic screen uses. A second
+# window is a SECOND STREAMLIT SESSION: session_state is keyed to the browser
+# connection, so no amount of shared Python reaches across. The seismic screen
+# already solved this and the solution is a file plus an mtime poll; a second
+# mechanism beside it would be the failure this codebase keeps writing down.
+#
+# ONE MODULE OWNS THE SHAPE. Both sides read and write {mode, colour_by,
+# source, status, operator, min_acres} through the two functions below and
+# nowhere else -- the "lists that must agree" problem, headed off by there
+# being only one list.
+MAP_LEASE_PREF = "map_lease"
+
+# What the map can be asked to draw. Not a free-text mode: the map switches on
+# it, and a typo in a prefs file should not silently mean "draw nothing".
+LEASE_MODES = ("leases", "townships", "both", "off")
+
+
+def _lease_pref_mtime():
+    """A fingerprint of the LEASE choice -- not the file's timestamp.
+
+    IT USED TO BE THE MTIME, and the seismic screen shares this file. So
+    pressing "Show all" in seismic rewrote the file, the mtime moved, and
+    this watcher concluded a LEASE instruction had arrived. It then applied
+    whatever mode was sitting in the file -- "leases" from hours earlier --
+    and the map drew all 24,178 uncalled for. Reported twice: once as leases
+    appearing on a fresh Wyoming map, and once as a blank page after
+    pressing Show all in seismic, with the log showing map_seis written and
+    geo_leases drawn in the very next render.
+
+    A watcher keyed on the whole file cannot tell whose change it was. This
+    reads the lease section only, so a seismic write is invisible to it and
+    a lease write still isn't.
+
+    Still cheap: a few hundred bytes of JSON every two seconds, against a
+    file that is already in the page cache. The mtime is kept as a first
+    gate, so the parse only happens when SOMETHING changed.
+    """
+    try:
+        _m = float(_USER_PREFS_PATH.stat().st_mtime)
+    except Exception:
+        return ""
+    _cache = getattr(_lease_pref_mtime, "_cache", None)
+    if _cache and _cache[0] == _m:
+        return _cache[1]
+    try:
+        _sig = json.dumps(_map_lease_choice(), sort_keys=True)
+    except Exception:
+        _sig = ""
+    _lease_pref_mtime._cache = (_m, _sig)
+    return _sig
+
+
+# ── THE LEASE CHOICE, DECLARED ONCE ────────────────────────────────────────
+# Every key the panel writes, with the type to coerce it to and the default
+# that means "not asked". The reader below is built FROM this list rather
+# than spelling the keys out a second time.
+#
+# WHY IT IS A LIST AND NOT SIX LINES OF CODE: it was six lines of code, and
+# it read mode, colour_by, source, status, operator and min_acres. Nine more
+# filters were added afterwards -- state, county, elevation, the two
+# distances, the two name lists, and the two wetland keys -- and the panel
+# writes all of them to the file. This function was never extended, so it
+# dropped them on the way back in, in silence.
+#
+# The result: with the lease strip ON the filters worked, because the map
+# takes them straight from the widgets; with it OFF, or driven from the
+# second screen, the same filters were written, discarded here, and the map
+# drew everything while the panel's own count said otherwise. Reported as
+# "it doesn't look like the filters to the nearest town are working".
+#
+# This is the fourth entry in CLAUDE.md's "lists that must agree" in a new
+# place: a writer and a reader of one shape, with nothing checking that they
+# still describe the same thing.
+_LEASE_CHOICE_SCHEMA = (
+    # key             coerce                       default
+    ("mode",          "mode",                      ""),
+    ("colour_by",     "str",                       ""),
+    ("source",        "list",                      None),
+    ("status",        "list",                      None),
+    ("operator",      "str",                       ""),
+    ("min_acres",     "int",                       0),
+    ("state",         "list",                      None),
+    ("county",        "list",                      None),
+    ("elev_min",      "numornone",                 None),
+    ("elev_max",      "numornone",                 None),
+    ("miles_city",    "float",                     0.0),
+    ("miles_hwy",     "float",                     0.0),
+    ("towns",         "list",                      None),
+    ("roads",         "list",                      None),
+    ("wet_min_pct",   "float",                     0.0),
+    ("wet_types",     "list",                      None),
+)
+
+
+def _map_lease_choice() -> dict:
+    """What the second screen asked the map to show. Always a full dict.
+
+    DEFAULTS THAT MATCH TODAY'S BEHAVIOUR, so a database with no prefs file
+    draws what it drew before this existed. A screen nobody has opened must
+    not change the map.
+
+    Built from _LEASE_CHOICE_SCHEMA so it cannot fall behind the writer
+    again -- see the comment on that list for what falling behind cost.
+    """
+    try:
+        _p = (_load_user_prefs().get(MAP_LEASE_PREF) or {})
+    except Exception:
+        _p = {}
+    _out = {}
+    for _k, _kind, _dflt in _LEASE_CHOICE_SCHEMA:
+        _v = _p.get(_k)
+        try:
+            if _kind == "mode":
+                _m = str(_v or "").strip().lower()
+                _out[_k] = _m if _m in LEASE_MODES else ""
+            elif _kind == "str":
+                _out[_k] = str(_v or "").strip()
+            elif _kind == "list":
+                _out[_k] = list(_v or [])
+            elif _kind == "int":
+                _out[_k] = int(_v or 0)
+            elif _kind == "float":
+                _out[_k] = float(_v or 0)
+            elif _kind == "numornone":
+                # None is MEANINGFUL for the elevation pair: it is the
+                # difference between "no elevation filter" and "from 0 ft",
+                # and 0 ft is a real answer in a state whose lowest lease
+                # sits at 3,363.
+                _out[_k] = None if _v is None else float(_v)
+        except (TypeError, ValueError):
+            _out[_k] = _dflt if _dflt is not None else (
+                [] if _kind == "list" else _dflt)
+        if _kind == "list" and _out.get(_k) is None:
+            _out[_k] = []
+    return _out
+
+
+def _write_map_lease(**kw) -> None:
+    """Tell the map what to draw. THE ONLY WRITER OF MAP_LEASE_PREF.
+
+    Merges rather than replaces, so a screen that only changes the colour
+    does not silently clear the filters -- the shape is one dict and every
+    key in it means something to the map.
+    """
+    _p = _load_user_prefs()
+    _cur = dict(_p.get(MAP_LEASE_PREF) or {})
+    _cur.update({k: v for k, v in kw.items() if v is not None})
+    _p[MAP_LEASE_PREF] = _cur
+    _save_user_prefs(_p)
+
+
+@st.fragment(run_every=2)
+def _watch_lease_choice():
+    """Rebuild the map when the lease screen changes what it should draw.
+
+    A COPY OF _watch_seis_choice, INCLUDING ITS SCAR. That watcher polls every
+    two seconds while a map render takes two to eight, so it fired again
+    before the render could stamp the mtime it drew -- one save produced 246
+    reruns and the map never finished. Remembering WHICH mtime was asked for
+    makes a second ask impossible for the same value, while a genuine later
+    change still gets its own rerun.
+
+    Do not re-derive this. It is written down because it was expensive.
+    """
+    _seen = st.session_state.get("_lease_pref_seen")
+    if _seen is None:
+        return
+    _now = _lease_pref_mtime()
+    if _now == _seen:
+        return
+    if st.session_state.get("_lease_rerun_for") == _now:
+        return
+    st.session_state["_lease_rerun_for"] = _now
+    # A CHANGE OBSERVED IN THIS SESSION IS WHAT MAKES THE CHANNEL LIVE.
+    # Until one happens, the file is just the last thing somebody sent --
+    # possibly days ago -- and the map must not obey it. See the gate in
+    # run(); this is the only place that opens it.
+    st.session_state["_lease_channel_live"] = True
+    st.rerun()
+
+
+def render_lease_view(engine, compact=False, default_mode=None):
+    """The lease query panel. One function, three homes.
+
+    It draws no map. That is the point: the map page had no room for a query
+    over fifty attributes, and every control added to it pushed the map
+    further down the page -- which is where this day started.
+
+    compact=True is the STRIP beside the map on the map page itself, which is
+    a column and therefore cannot push anything down -- the push-down was
+    always controls stacked ABOVE the map, never beside it. It drops the
+    heading (the strip is captioned by its own border) and stacks the mode
+    vertically, because four radio options do not fit across ~260px.
+
+    ONE FUNCTION, not a copy per home. A panel this size duplicated for a
+    narrow layout is two lists that must agree, and the second one silently
+    loses whichever control was added last.
+    """
+    from sqlalchemy import text as _lt
+    # IMPORTED HERE, not assumed. LEASE_COLOUR_BY lives in
+    # geography_layers; referencing it bare failed only when this
+    # page was first OPENED -- "name 'LEASE_COLOUR_BY' is not
+    # defined" -- which is the module-level-import trap CLAUDE.md
+    # opens with, and it surfaced here because app_v4 prints the
+    # traceback rather than swallowing it.
+    from dataview.mapping.geography_layers import LEASE_COLOUR_BY
+    if compact:
+        # IN THE SAME SESSION, so it does not wait and does not need its own
+        # Connect -- the two facts the separate window has to explain and
+        # this one must not repeat.
+        st.markdown("**▦ Leases**")
+    else:
+        st.markdown("### Leases — second screen")
+        st.caption("Choose what the map draws. It follows within two "
+                   "seconds; no need to touch the map window.")
+
+    _cur = _map_lease_choice()
+
+    # ── the vocabulary comes from the DATA, not a hard-coded list ───────
+    # A status list typed here would drift the first time a source was
+    # loaded that spells one differently -- which has already happened once
+    # today: BLM says Authorized, Wyoming says Prospecting.
+    try:
+        with engine.connect() as _c:
+            _srcs = [r[0] for r in _c.execute(_lt(
+                "SELECT DISTINCT source FROM dataview.dv_land_right "
+                "WHERE source IS NOT NULL ORDER BY source"))]
+            _stats = [r[0] for r in _c.execute(_lt(
+                "SELECT DISTINCT lease_status FROM dataview.dv_land_right "
+                "WHERE lease_status IS NOT NULL ORDER BY lease_status"))]
+            # WHAT IS ACTUALLY LOADED, not every US state: offering all 52
+            # would be 51 choices that match nothing.
+            # NAMED TOWNS AND ROUTES, from the geometry tables. Only what
+            # is actually loaded is offered -- a dropdown of 3,214 US
+            # counties' worth of towns would be 3,000 choices matching
+            # nothing.
+            try:
+                _towns = [r[0] for r in _c.execute(_lt(
+                    "SELECT place_name FROM dataview.dv_place_geom "
+                    "ORDER BY place_name"))]
+                _routes = [r[0] for r in _c.execute(_lt(
+                    "SELECT road_name FROM dataview.dv_road_geom "
+                    "ORDER BY road_name"))]
+            except Exception:
+                # The geometry tables are optional: without them the panel
+                # keeps the nearest-based filters and simply offers no names.
+                _towns, _routes = [], []
+            try:
+                _wtypes = [r[0] for r in _c.execute(_lt(
+                    "SELECT DISTINCT wetland_type "
+                    "FROM dataview.dv_land_tract_geom "
+                    "WHERE wetland_type IS NOT NULL ORDER BY wetland_type"))]
+            except Exception:
+                _wtypes = []
+            _elev_range = _c.execute(_lt(
+                "SELECT MIN(elevation_ft), MAX(elevation_ft) "
+                "FROM dataview.dv_land_tract_geom "
+                "WHERE elevation_ft IS NOT NULL")).first()
+            if not _elev_range or _elev_range[0] is None:
+                _elev_range = (0, 0)
+            _tract_states = [r[0] for r in _c.execute(_lt(
+                "SELECT DISTINCT province_state "
+                "FROM dataview.dv_land_tract_geom "
+                "WHERE province_state IS NOT NULL ORDER BY province_state"))]
+    except Exception as _e:
+        st.error("Cannot read the lease vocabulary: %s" % _e)
+        return
+
+    # ONE COLUMN, because this window is now opened as a 520px strip docked
+    # beside the map. Two columns there give two ~230px halves, which is not
+    # enough for a multiselect showing chips -- and the panel is only six
+    # controls, so a column is what it wanted anyway.
+    # ── THE SEED, SET ONCE, BEFORE THE WIDGET EXISTS ────────────────────
+    # default_mode is what the map is ALREADY drawing. It wins over the
+    # prefs file unless the file is live in this session, because a file
+    # written yesterday is history and the chips are the present -- opening
+    # this panel must not change the map, and seeding from the file made it
+    # do exactly that.
+    #
+    # setdefault BEFORE the radio, never assignment after it: assigning a
+    # widget's own key after instantiation is the Streamlit error that
+    # surfaces on a LATER run, on whatever page draws next. Seeding first is
+    # the supported half of that rule, and once seeded session_state carries
+    # the user's choice, so this runs once per session.
+    _seed = _cur["mode"]
+    if not st.session_state.get("_lease_channel_live"):
+        _seed = default_mode or _cur["mode"]
+    if "lv_mode" not in st.session_state:
+        st.session_state["lv_mode"] = (
+            _seed if _seed in LEASE_MODES else LEASE_MODES[0])
+    _mode = st.radio(
+        "What the map draws", LEASE_MODES,
+        key="lv_mode", horizontal=(not compact),
+        help="townships is the overview, leases is the detail. Drawing "
+             "both at once is what makes the map unreadable in the "
+             "middle zooms.")
+    _by = st.selectbox(
+        "Colour leases by", list(LEASE_COLOUR_BY),
+        index=(list(LEASE_COLOUR_BY).index(_cur["colour_by"])
+               if _cur["colour_by"] in LEASE_COLOUR_BY else 0),
+        key="lv_by")
+    # ── STATE AND COUNTY, FROM COLUMNS THAT ARE ALREADY STAMPED ─────────
+    # dv_land_tract_geom carries province_state on all 24,178 tracts and
+    # county on 24,177, so this is a column test, not a spatial join -- the
+    # same reason the township layer went from 75.6s to 0.4s.
+    #
+    # THE COUNTY LIST COMES FROM us_geo, NOT FROM DISTINCT. Seven tracts
+    # straddle two counties and record both in one field, so DISTINCT
+    # offers "Campbell & Converse" as though it were a county. us_geo reads
+    # assets/geo/us_counties.geojson -- 52 states, 3,214 counties, already
+    # relied on by the boundaries layer, the region picker and four tools --
+    # so this asks the same source the rest of the app asks.
+    _states = sorted({s for s in _tract_states if s})
+    _counties = []
+    try:
+        from dataview.mapping import us_geo as _ug
+        # THE PREVIOUS SELECTION, read from session_state -- the State
+        # widget is drawn below, so its return value does not exist yet.
+        # Narrowing the county list follows one rerun behind, which is what
+        # every other option on this page costs.
+        _pick = [s for s in (st.session_state.get("lv_state") or [])
+                 if s in _states] or _states
+        for _s in _pick:
+            _counties.extend(_ug.counties(_s) or [])
+        _counties = sorted(set(_counties))
+    except Exception as _ge:
+        st.caption("County list unavailable (%s)" % str(_ge)[:80])
+    _stsel = st.multiselect("State", _states,
+                            default=[s for s in _cur.get("state") or []
+                                     if s in _states],
+                            key="lv_state")
+    _cosel = st.multiselect("County", _counties,
+                            default=[s for s in _cur.get("county") or []
+                                     if s in _counties],
+                            key="lv_county",
+                            help="A lease that straddles two counties is "
+                                 "listed under both.")
+    _src = st.multiselect("Source", _srcs,
+                          default=[s for s in _cur["source"] if s in _srcs],
+                          key="lv_src")
+    _st_ = st.multiselect("Status", _stats,
+                          default=[s for s in _cur["status"] if s in _stats],
+                          key="lv_status")
+
+    _op = st.text_input("Operator contains", value=_cur["operator"],
+                        key="lv_op", placeholder="e.g. Kirkwood")
+    _ac = st.number_input("Minimum acres", min_value=0, step=40,
+                          value=int(_cur["min_acres"] or 0), key="lv_acres")
+
+    # ── ELEVATION AND ACCESS, from columns stamped once ─────────────────
+    # elevation_ft, dist_city_km and dist_hwy_km are on every tract already
+    # (tools/stamp_elevation.py and tools/stamp_cultural_distance.py), so
+    # these are numeric column tests -- no spatial work at render time.
+    #
+    # ASKED IN FEET AND MILES because that is what a land man says; stored
+    # in feet and kilometres because that is what the sources measured. The
+    # conversion happens in one place, _filter_literal, so no reader of this
+    # panel ever has to know there was one.
+    _el_lo, _el_hi = (_elev_range or (0, 0))
+    _elmin = _elmax = None
+    if _el_hi > _el_lo:
+        _e1, _e2 = st.slider(
+            "Elevation (ft)", int(_el_lo), int(_el_hi),
+            (int(_cur.get("elev_min") or _el_lo),
+             int(_cur.get("elev_max") or _el_hi)),
+            step=100, key="lv_elev",
+            help="Wyoming runs about 3,360 to 10,550 ft, so this separates "
+                 "basin from mountain. Nothing here is below 100 ft.")
+        # ONLY A REAL NARROWING COUNTS. Left at the full span it is not a
+        # filter, and sending it as one would hide every tract whose
+        # elevation was never stamped.
+        if _e1 > _el_lo:
+            _elmin = _e1
+        if _e2 < _el_hi:
+            _elmax = _e2
+    # ── A NAMED PLACE CHANGES WHAT THE MILES MEAN ───────────────────────
+    # Empty, the mileage measures to the NEAREST town (the stamped column).
+    # Name one and it measures to THAT town, which is a different question
+    # and usually the one being asked: a lease four miles from Glenrock and
+    # four and a half from Casper is within five miles of Casper, and the
+    # nearest-based filter says otherwise.
+    _twnsel = st.multiselect("Near which town(s)", _towns,
+                             default=[x for x in _cur.get("towns") or []
+                                      if x in _towns],
+                             key="lv_towns",
+                             help="Leave empty to measure to whichever town "
+                                  "is nearest.")
+    _rdsel = st.multiselect("Near which highway(s)", _routes,
+                            default=[x for x in _cur.get("roads") or []
+                                     if x in _routes],
+                            key="lv_roads",
+                            help="Interstates and US highways. Leave empty "
+                                 "to measure to whichever is nearest.")
+    # ── WETLAND, AS A SHARE RATHER THAN A FLAG ──────────────────────────
+    # 23,059 of 24,178 leases contain SOME wetland -- a creek across a
+    # section counts -- so a yes/no would mark 95% of Wyoming and mean
+    # nothing. Only 1,052 are over 10%, and that is the set worth finding.
+    _wetpct = st.number_input("Minimum wetland %", min_value=0.0,
+                              max_value=100.0, step=1.0, format="%.0f",
+                              value=float(_cur.get("wet_min_pct") or 0),
+                              key="lv_wetpct",
+                              help="Share of the lease that is NWI wetland. "
+                                   "0 means no limit; 95% hold some.")
+    _wetty = st.multiselect("Wetland type", _wtypes,
+                            default=[x for x in _cur.get("wet_types") or []
+                                     if x in _wtypes],
+                            key="lv_wetty",
+                            help="The dominant class by area within the "
+                                 "lease. Riverine is much the commonest.")
+    _mi_city = st.number_input("Within miles of a town", min_value=0.0,
+                               step=1.0, format="%.0f",
+                               value=float(_cur.get("miles_city") or 0),
+                               key="lv_micity",
+                               help="0 means no limit.")
+    _mi_hwy = st.number_input("Within miles of a highway", min_value=0.0,
+                              step=1.0, format="%.0f",
+                              value=float(_cur.get("miles_hwy") or 0),
+                              key="lv_mihwy",
+                              help="Interstates and US highways (TIGER "
+                                   "S1100). 0 means no limit.")
+
+    # ── A NAME WITHOUT A DISTANCE FILTERS NOTHING, AND SAID NOTHING ─────
+    # "I didn't see matching leases moving at all." Picking Casper on its
+    # own does nothing: both the count and the map ask
+    #
+    #     if _mi_city and _twnsel:
+    #
+    # so the name is only ever used to qualify a DISTANCE. With the miles
+    # box left at its default of 0 -- documented as "no limit" -- neither
+    # that branch nor the nearest-town fallback below it fires, and the
+    # filter is silently absent. The control appears to work, the count
+    # does not move, and nothing on screen connects the two.
+    #
+    # NOT FIXED BY PICKING A RADIUS HERE. "Within some miles of Casper" is a
+    # question only the operator can answer, and guessing five would put a
+    # number nobody chose behind a count they will quote. Automation may
+    # skip ceremony, never a decision. So it says what is wrong and what to
+    # do about it, next to the box that needs changing.
+    _dead = []
+    if _twnsel and not _mi_city:
+        _dead.append("%s selected, but **Within miles of a town** is 0"
+                     % ", ".join(_twnsel[:3])
+                     + (" …" if len(_twnsel) > 3 else ""))
+    if _rdsel and not _mi_hwy:
+        _dead.append("%s selected, but **Within miles of a highway** is 0"
+                     % ", ".join(_rdsel[:3])
+                     + (" …" if len(_rdsel) > 3 else ""))
+    if _dead:
+        st.warning("Not filtering by distance yet — " + "; ".join(_dead)
+                   + ". Set a distance above 0, or clear the name.")
+
+    # ── THE COUNT, BEFORE ANYTHING IS SENT ──────────────────────────────
+    # "Wrong is worse than missing": a filter that silently matches nothing
+    # is a map that looks broken. Say what it will draw while there is still
+    # a chance to change it.
+    # ── THE FILTER, FROM THE ONE DEFINITION ─────────────────────────────
+    # These predicates used to be spelled out here, seventy-four lines of
+    # them, and nowhere else -- which is why the township shading could not
+    # obey them without a second copy. They live in _lease_filter_sql now,
+    # and the township aggregate composes the SAME clauses into an EXISTS.
+    #
+    # The locals above still matter: _panel below sends them to the second
+    # screen. Only the SQL construction moved.
+    _panel_filt = {
+        "source": _src, "status": _st_, "state": _stsel, "county": _cosel,
+        "wet_min_pct": _wetpct, "wet_types": _wetty,
+        "elev_min": _elmin, "elev_max": _elmax,
+        "miles_city": _mi_city, "towns": _twnsel,
+        "miles_hwy": _mi_hwy, "roads": _rdsel,
+        "operator": _op, "min_acres": _ac,
+    }
+    _lf_clauses, _params = _lease_filter_sql(_panel_filt)
+    _where = ["1=1"] + _lf_clauses
+    # COUNT WHAT THE LABEL SAYS. A plain COUNT(*) over this join counts
+    # right-TRACT PAIRS, and the label beside it says "lease(s)". Today every
+    # lease has exactly one tract (24,178 / 24,178 / 24,178) so the two agree
+    # by accident -- and the split into LAND_RIGHT / LAND_RIGHT_TRACT /
+    # LAND_TRACT exists precisely so a lease CAN hold several tracts. The
+    # first multi-tract lease loaded would inflate the number silently, which
+    # is the confident-wrong-value failure this repo keeps paying for.
+    # The acreage has the mirror-image bug: SUM over the join adds a tract
+    # once per lease that touches it, so a shared tract is counted twice.
+    # Sum over DISTINCT tracts instead. Both sub-selects reuse the same bound
+    # parameters, which named binds allow.
+    _from = ("""
+          FROM dataview.dv_land_right r
+          JOIN dataview.dv_land_right_tract x
+            ON x.land_right_id = r.land_right_id
+          JOIN dataview.dv_land_tract_geom g
+            ON g.tract_id = x.tract_id
+         WHERE """ + " AND ".join(_where))
+    try:
+        with engine.connect() as _c:
+            _n, _acres = _c.execute(_lt(
+                "SELECT (SELECT COUNT(DISTINCT r.land_right_id) " + _from + "),"
+                "       (SELECT ISNULL(SUM(a.area_km2), 0) * 247.105"
+                "          FROM (SELECT DISTINCT g.tract_id, g.area_km2 "
+                + _from + ") a)"), _params).first()
+    except Exception as _e:
+        st.error("Count failed: %s" % _e)
+        return
+
+    if _n:
+        st.success("**%s** lease(s) match  ·  %s acres"
+                   % (format(_n, ","), format(int(_acres or 0), ",")))
+    else:
+        st.warning("No leases match. The map would draw nothing.")
+
+    _panel = {"mode": _mode, "colour_by": _by, "source": sorted(_src),
+              "status": sorted(_st_), "operator": _op, "min_acres": int(_ac),
+              "state": sorted(_stsel), "county": sorted(_cosel),
+              "elev_min": _elmin, "elev_max": _elmax,
+              "miles_city": float(_mi_city or 0),
+              "miles_hwy": float(_mi_hwy or 0),
+              "towns": sorted(_twnsel), "roads": sorted(_rdsel),
+              "wet_min_pct": float(_wetpct or 0),
+              "wet_types": sorted(_wetty)}
+
+    # IN THE STRIP THIS BUTTON IS NOT REQUIRED, and says so. The mode and
+    # colour are read straight from these widgets by the map build, so a
+    # click on the radio is already drawn by the rerun that click caused.
+    # What Send still does here is WRITE THE FILE, which is the only way the
+    # separate window can be told -- so it is "also send to the other
+    # window", not "apply". Labelled for what it does, because a button that
+    # looks mandatory and is not gets pressed out of doubt, and one that
+    # looks optional and is not gets skipped.
+    _compact_note = compact and st.session_state.get("wm_lease_strip")
+    if st.button(("▶ Also send to the second window" if _compact_note
+                  else "▶ Send to map"),
+                 type=("secondary" if _compact_note else "primary"),
+                 use_container_width=True,
+                 disabled=not _n, key="lv_send"):
+        _write_map_lease(**_panel)
+        st.rerun()
+
+    # WHAT THE MAP IS DRAWING, READ BACK FROM THE FILE -- never a memory of
+    # having pressed the button.
+    #
+    # The caption here used to be st.session_state["lv_sent"], set beside the
+    # write. It survived changes to the panel, so a press that did NOT land
+    # left "Sent: townships, 24,178" standing above a panel reading leases /
+    # 6,131 -- a confident statement about the map that the map did not
+    # agree with, and no way for the reader to tell which was true. Caught
+    # exactly that way: the count updated, the caption did not, and the
+    # prefs file had not been written at all.
+    #
+    # Read back from the one place that decides, the panel can only ever say
+    # what is actually out there, and an unsent change is visible instead of
+    # silent.
+    _live = _map_lease_choice()
+    _live_cmp = dict(_live, source=sorted(_live["source"]),
+                     status=sorted(_live["status"]),
+                     min_acres=int(_live["min_acres"] or 0))
+    if _compact_note:
+        # IN THE STRIP THE FILE IS NOT WHAT THE MAP IS READING, so comparing
+        # against it would report "unsent changes" for a map that is already
+        # drawing exactly this -- the read-back would become the confident
+        # wrong statement it was written to prevent.
+        st.caption("✓ Drawing **%s**, coloured by %s — applied as you choose."
+                   % (_mode, _by))
+    elif not _live.get("mode"):
+        st.caption("The map has not been told anything yet — it is drawing "
+                   "whatever its own chips say. Press ▶ Send to map.")
+    elif _live_cmp == _panel:
+        st.caption("✓ The map is drawing this: **%s**, coloured by %s."
+                   % (_live["mode"], _live["colour_by"] or "producing"))
+    else:
+        st.warning("The map is still drawing **%s**. This panel has unsent "
+                   "changes — press ▶ Send to map." % _live["mode"])
+
+    if compact:
+        # ── MOVE IT OUT, rather than open a second copy ──────────────────
+        # The strip is the panel's home; the second window is for a second
+        # monitor. Offering "open" would leave the same panel in two places
+        # driving one map, so this MOVES: the window opens and the strip
+        # switches off in the same gesture.
+        #
+        # THE TOGGLE IS CLICKED IN THE PARENT DOCUMENT, for the reason every
+        # other browser-side action on this page exists: Python cannot hear
+        # a click here, and a Streamlit button cannot open a window --
+        # window.open outside a user gesture is refused by the popup
+        # blocker, and a button's handler runs a round trip later, which is
+        # not a gesture any more. So the anchor does both: it is the
+        # gesture, so the window opens; and it flips the toggle the way a
+        # person would.
+        #
+        # IF THE TOGGLE CANNOT BE FOUND, the window still opens and the
+        # strip simply stays -- the useful half survives, visibly, instead
+        # of the whole thing failing.
+        st.components.v1.html(
+            """
+            <style>
+              html,body{margin:0;padding:0;background:transparent}
+              a{font:600 11px system-ui;color:#94a3b8;text-decoration:none;
+                cursor:pointer}
+              a:hover{color:#f59e0b;text-decoration:underline}
+            </style>
+            <a id="dwmove" href="?view=lease">&#8663; Move to its own window</a>
+            <script>
+              document.getElementById('dwmove').addEventListener(
+                'click', function (ev) {
+                  ev.preventDefault();
+                  var w = 520, h = (screen.availHeight || 900);
+                  var x = Math.max(0, (screen.availWidth || 1600) - w);
+                  var win = window.open(
+                    '?view=lease', 'dwlease',
+                    'width=' + w + ',height=' + h + ',left=' + x +
+                    ',top=0,menubar=no,toolbar=no,location=no,status=no');
+                  if (win) { win.focus(); }
+                  else { window.open('?view=lease', 'dwlease'); }
+                  try {
+                    var cb = window.parent.document.querySelector(
+                      'input[type=checkbox][aria-label="▦ Lease strip"]');
+                    if (cb) { cb.click(); }
+                  } catch (e) { /* strip stays; the window is what mattered */ }
+                });
+            </script>
+            """,
+            height=22)

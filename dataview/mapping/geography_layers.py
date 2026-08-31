@@ -1328,8 +1328,36 @@ def write_lease_geojson(engine, out_dir, limit=200000):
     have = _table_columns(engine, "dv_land_tract")
     if not have or "geog" not in have:
         return None, 0, {}
-    _c = lambda n: n if n in have else "NULL"            # noqa: E731
+    # QUALIFIED, because this query joins dv_land_tract_geom and that table
+    # carries geog, area_km2, province_state, source and quality_note under
+    # the same names. Prefixing in the lambda rather than at each call site
+    # means a column added later cannot be the one that forgot.
+    _c = lambda n: ("lt." + n) if n in have else "NULL"  # noqa: E731
     with engine.connect() as con:
+        _has_twp = con.execute(text(
+            "SELECT CASE WHEN OBJECT_ID('dataview.dv_land_tract_geom') "
+            "IS NOT NULL AND COL_LENGTH('dataview.dv_land_tract_geom',"
+            "'plss_id') IS NOT NULL THEN 1 ELSE 0 END")).scalar()
+        _twcol = "tg.plss_id" if _has_twp else "NULL"
+        # THE COUNTY COMES OFF THE SAME JOIN. dv_land_tract (the view) does
+        # not expose it; dv_land_tract_geom stamps it on 24,177 of 24,178
+        # tracts, which is what makes a county filter a column test rather
+        # than a spatial join.
+        _cocol = "tg.county" if _has_twp else "NULL"
+        # ELEVATION AND THE TWO DISTANCES, stamped by tools/stamp_elevation.py
+        # and tools/stamp_cultural_distance.py. Guarded individually: the
+        # file must still build on a database where those tools have never
+        # been run, and _has_twp only proves the geom table exists.
+        _extra = {}
+        for _c2 in ("elevation_ft", "dist_city_km", "near_city",
+                    "dist_hwy_km", "near_hwy",
+                    "wetland_pct", "wetland_acres", "wetland_type"):
+            _extra[_c2] = ("tg." + _c2) if (_has_twp and con.execute(text(
+                "SELECT COL_LENGTH('dataview.dv_land_tract_geom', :c)"),
+                {"c": _c2}).scalar() is not None) else "NULL"
+        _twjoin = ("LEFT JOIN dataview.dv_land_tract_geom tg "
+                   "ON tg.tract_id = lt.land_tract_id"
+                   if _has_twp else "")
         rows = con.execute(text(f"""
             SELECT TOP {int(limit)}
                    {_c('tract_name')}     AS nm,
@@ -1343,9 +1371,27 @@ def write_lease_geojson(engine, out_dir, limit=200000):
                    {_c('province_state')} AS st,
                    {_c('source')}         AS src,
                    {_c('quality_note')}   AS qly,
-                   geog.STAsText()        AS wkt
-              FROM dataview.dv_land_tract
-             WHERE geog IS NOT NULL AND ISNULL(active_ind, 'Y') = 'Y'
+                   -- THE TOWNSHIP THE TRACT WAS STAMPED WITH, so a township
+                   -- click can select on the same fact its tooltip counted.
+                   -- LEFT JOIN and a guard: dv_land_tract is a VIEW and does
+                   -- not expose plss_id, and COL_LENGTH alone returns NULL
+                   -- for a missing TABLE and a missing COLUMN alike -- so it
+                   -- is paired with OBJECT_ID, or the guard skips silently.
+                   {_twcol}               AS twp,
+                   {_cocol}               AS cty,
+                   {_extra['elevation_ft']}  AS el,
+                   {_extra['dist_city_km']}  AS dcity,
+                   {_extra['near_city']}     AS ncity,
+                   {_extra['dist_hwy_km']}   AS dhwy,
+                   {_extra['near_hwy']}      AS nhwy,
+                   {_extra['wetland_pct']}   AS wpct,
+                   {_extra['wetland_acres']} AS wac,
+                   {_extra['wetland_type']}  AS wty,
+                   lt.geog.STAsText()     AS wkt
+              FROM dataview.dv_land_tract lt
+              {_twjoin}
+             WHERE lt.geog IS NOT NULL
+               AND ISNULL(lt.active_ind, 'Y') = 'Y'
         """)).fetchall()
 
     DIMS = ("owner", "producing", "status", "vintage", "size")
@@ -1371,6 +1417,47 @@ def write_lease_geojson(engine, out_dir, limit=200000):
             "src": _t(r.src), "qly": _t(r.qly),
             "ac": ("%s ac" % format(int(float(r.km2) * 247.105), ",")
                    if r.km2 is not None else ""),
+            "_tw": _t(r.twp),
+            # NORMALISED FOR MATCHING, not for display. Seven tracts straddle
+            # two counties and the source recorded both in one field with
+            # inconsistent separators -- "Campbell & Converse" and
+            # "Campbell,Johnson". Stored as ",campbell,converse," so a filter
+            # can ask "does this contain ,campbell,?" and a straddling lease
+            # answers yes under BOTH its counties, instead of being silently
+            # missed by county = 'Campbell'.
+            "_co": _county_key(r.cty),
+            # NUMBERS FOR THE FILTER, prose for the popup -- the same split
+            # the 640-acre boundary forced: never filter on a display string.
+            "_el": (round(float(r.el), 1) if r.el is not None else None),
+            "_dc": (round(float(r.dcity), 4) if r.dcity is not None else None),
+            "_dh": (round(float(r.dhwy), 4) if r.dhwy is not None else None),
+            "el": ("%s ft" % format(int(float(r.el)), ",")
+                   if r.el is not None else ""),
+            "ncity": ("%s (%.1f mi)" % (_t(r.ncity),
+                                        float(r.dcity) * 0.621371)
+                      if (r.ncity and r.dcity is not None) else ""),
+            "nhwy": ("%s (%.1f mi)" % (_t(r.nhwy),
+                                       float(r.dhwy) * 0.621371)
+                     if (r.nhwy and r.dhwy is not None) else ""),
+            # ZERO AND NULL ARE DIFFERENT FACTS. 0 means measured and none
+            # found; null means never measured. A filter that treats them
+            # alike reports 1,123 wetland-free leases as unknown, or worse.
+            "_wp": (round(float(r.wpct), 3) if r.wpct is not None else None),
+            "_wt": (_t(r.wty) or None),
+            "wet": (("%s%% wetland (%s ac)%s"
+                     % (round(float(r.wpct), 1),
+                        format(int(float(r.wac or 0)), ","),
+                        (" - " + _t(r.wty)) if r.wty else ""))
+                    if (r.wpct is not None and float(r.wpct) > 0) else ""),
+            # THE NUMBER, BESIDE THE STRING THAT DISPLAYS IT. "km" is
+            # "%.2f km2" for a popup; filtering on it means filtering on a
+            # ROUNDED value, and at a threshold that is exactly one section
+            # that changes the answer: 2.589988 km2 is 639.9997 acres and
+            # fails ">= 640", while the rounded 2.59 is 640.0018 and passes.
+            # 1,043 section-sized leases sat on that boundary, so the map
+            # drew 7,369 where the count said 6,326. Same source, same
+            # arithmetic, both sides.
+            "_km2": (round(float(r.km2), 6) if r.km2 is not None else None),
             "km": ("%.2f km2" % float(r.km2) if r.km2 is not None else ""),
         }
         for k, v in lab.items():
@@ -1433,13 +1520,122 @@ function(feature, layer) {
     // OUTSIDE THE CLIP BOX: hidden, and not clickable. opacity alone leaves
     // an invisible polygon still swallowing clicks over the wells beneath.
     var CLIP = __CLIP__;
+    var GONE = {opacity: 0, fillOpacity: 0};
+    function hide() {
+        feature.properties.style = GONE;
+        layer.setStyle(GONE);
+        if (layer._path) { layer._path.style.pointerEvents = "none"; }
+    }
     if (CLIP && (p._la < CLIP[0] || p._la > CLIP[2] ||
                  p._lo < CLIP[1] || p._lo > CLIP[3])) {
-        var gone = {opacity: 0, fillOpacity: 0};
-        feature.properties.style = gone;
-        layer.setStyle(gone);
-        if (layer._path) { layer._path.style.pointerEvents = "none"; }
+        hide();
         return;
+    }
+    // ── THE PANEL'S FILTERS, APPLIED TO WHAT IS DRAWN ────────────────────
+    // The panel said "6,131 lease(s) match" and the map drew all 24,178:
+    // source, status, operator and minimum acres reached the COUNT and
+    // nothing else. A number beside a map that disagrees with the map is
+    // the confident-wrong-value failure, and the count was the believable
+    // half.
+    //
+    // Filtered HERE rather than in the query, because the file is a cached
+    // artifact shared by every filter combination -- re-querying and
+    // rewriting 29 MB per filter change would undo the whole reason it is
+    // served as a file. The browser already holds every lease; deciding
+    // which to show is the same client-side job the clip box above does.
+    //
+    // THE PREDICATES MIRROR THE SQL the count runs, deliberately:
+    //   source / status  IN (...)      -> exact match against the list
+    //   operator_name LIKE '%op%'      -> case-insensitive substring
+    //   area_km2 * 247.105 >= :ac      -> same arithmetic, same constant
+    // A lease with no area fails the acres test, exactly as a NULL fails
+    // the SQL comparison -- unknown size must not be claimed as a match.
+    var FILT = __FILT__;
+    if (FILT) {
+        if (FILT.src && FILT.src.length &&
+                FILT.src.indexOf(p.src) < 0) { hide(); return; }
+        if (FILT.lst && FILT.lst.length &&
+                FILT.lst.indexOf(p.lst) < 0) { hide(); return; }
+        // ── THE NAMED-PLACE ANSWER, DECIDED BY SQL ──────────────────
+        // "Within 5 miles of Casper" needs Casper's geometry, which the
+        // browser does not have and should not: the panel's count already
+        // asked that question, so the map filters on the SAME answer rather
+        // than computing a second one that could disagree. ids is a list of
+        // lease_number, unique across all 24,178 features.
+        //
+        // An EMPTY list means "asked, nothing matched" and hides everything;
+        // its ABSENCE means "not asked". Those must stay distinct -- collapse
+        // them and a filter that matches nothing silently draws the lot.
+        if (FILT.ids) {
+            if (!FILT._idset) {
+                FILT._idset = {};
+                for (var ii = 0; ii < FILT.ids.length; ii++) {
+                    FILT._idset[FILT.ids[ii]] = 1;
+                }
+            }
+            if (!FILT._idset[p.ln]) { hide(); return; }
+        }
+        if (FILT.st && FILT.st.length &&
+                FILT.st.indexOf(p.st) < 0) { hide(); return; }
+        if (FILT.co && FILT.co.length) {
+            // CONTAINMENT, NOT EQUALITY. _co is ",campbell,converse," for a
+            // lease straddling two counties; asking for Campbell must find
+            // it. The wrapping commas keep the test exact.
+            var ck = p._co;
+            if (!ck) { hide(); return; }
+            var anyCo = false;
+            for (var ci = 0; ci < FILT.co.length; ci++) {
+                if (ck.indexOf(',' + FILT.co[ci] + ',') >= 0) {
+                    anyCo = true; break;
+                }
+            }
+            if (!anyCo) { hide(); return; }
+        }
+        if (FILT.opr) {
+            var o = (p.opr || '').toLowerCase();
+            if (o.indexOf(FILT.opr) < 0) { hide(); return; }
+        }
+        // ELEVATION AND DISTANCE, on the numeric properties. A lease with
+        // no stamp fails a filter that asks about it, the way a NULL fails
+        // the SQL comparison -- unknown must not be reported as a match.
+        if (FILT.elmin !== undefined || FILT.elmax !== undefined) {
+            var el = p._el;
+            if (el === undefined || el === null) { hide(); return; }
+            if (FILT.elmin !== undefined && el < FILT.elmin) { hide(); return; }
+            if (FILT.elmax !== undefined && el > FILT.elmax) { hide(); return; }
+        }
+        if (FILT.dcity !== undefined) {
+            var dc = p._dc;
+            if (dc === undefined || dc === null || dc > FILT.dcity) {
+                hide(); return;
+            }
+        }
+        if (FILT.dhwy !== undefined) {
+            var dh = p._dh;
+            if (dh === undefined || dh === null || dh > FILT.dhwy) {
+                hide(); return;
+            }
+        }
+        if (FILT.wpmin) {
+            // A NULL IS NOT A ZERO. Never-measured fails a wetland question
+            // the way it fails every other one here.
+            var wp = p._wp;
+            if (wp === undefined || wp === null || wp < FILT.wpmin) {
+                hide(); return;
+            }
+        }
+        if (FILT.wty && FILT.wty.length &&
+                FILT.wty.indexOf(p._wt) < 0) { hide(); return; }
+        if (FILT.ac) {
+            // _km2 IS THE NUMBER; km is the rounded string for the popup.
+            // Filtering on the display value put 1,043 section-sized leases
+            // on the wrong side of "at least 640 acres". Falls back to the
+            // string for a file written before _km2 existed, and an unknown
+            // area fails the test the way a NULL fails the SQL comparison.
+            var km = (p._km2 === undefined || p._km2 === null)
+                     ? parseFloat(p.km) : p._km2;
+            if (!(km * 247.105 >= FILT.ac)) { hide(); return; }
+        }
     }
     // NO DARK EDGE AT ALL. Tried three times: the tract's own hue (tracts of
     // one owner merge), black at 2.2 (the edges become the picture at state
@@ -1470,6 +1666,9 @@ function(feature, layer) {
                 ['Effective', p.eff], ['Expires', p.exp],
                 ['Area', p.ac], ['Area (km2)', p.km],
                 ['Operator', p.opr], ['State', p.st],
+                ['Elevation', p.el],
+                ['Nearest town', p.ncity], ['Nearest highway', p.nhwy],
+                ['Wetland', p.wet],
                 ['Source', p.src], ['Quality', p.qly]];
     var h = '<table style="font-size:11px;border-collapse:collapse">';
     for (var i = 0; i < rows.length; i++) {
@@ -1481,8 +1680,133 @@ function(feature, layer) {
 }"""
 
 
+def lease_on_each(by, clip=None, filt=None):
+    """_LEASE_ON_EACH with EVERY placeholder filled. The only way to use it.
+
+    THE TEMPLATE HAS THREE HOLES AND HAD TWO CALLERS, and when __FILT__ was
+    added for the lease filters only one caller learned about it. The other
+    is the township click, which injects the same template to style the
+    leases it fetches on demand -- so it shipped a literal __FILT__ into the
+    browser and died with "ReferenceError: __FILT__ is not defined" the
+    moment somebody clicked a township. Reported from the map, not caught
+    here, because a Python-side syntax check cannot see an unfilled token in
+    a string.
+
+    That is the "lists that must agree" failure at its smallest: two call
+    sites, one template, a new hole. One function fills them all now, so a
+    fourth placeholder cannot be half-applied.
+    """
+    key = by if by in LEASE_COLOUR_BY else "producing"
+    out = (_LEASE_ON_EACH
+           .replace("__BY__", key)
+           .replace("__CLIP__",
+                    ("[%r, %r, %r, %r]" % (clip[0][0], clip[0][1],
+                                           clip[1][0], clip[1][1]))
+                    if clip else "null")
+           .replace("__FILT__", _filter_literal(filt)))
+    # CAUGHT HERE, NOT IN THE BROWSER. An unfilled __TOKEN__ is valid Python,
+    # valid JSON and valid-looking JavaScript right up until it runs, so
+    # nothing upstream of the user's screen notices. This is the one place
+    # that can see the finished text.
+    import re as _re          # not module-level in this file; see CLAUDE.md
+    _left = _re.findall(r"__[A-Z_]+__", out)
+    if _left:
+        raise ValueError(
+            "lease_on_each: placeholder(s) never filled: %s -- add them to "
+            "this function, which is the only filler." % ", ".join(sorted(set(_left))))
+    return out
+
+
+def _county_key(raw):
+    """A county string as a matchable token list: ",campbell,converse,".
+
+    ONE SPELLING OF THE RULE, used by the file, the browser filter and the
+    SQL count -- three places that must agree about whether a straddling
+    lease is "in Campbell County". It is, and equality says otherwise.
+
+    Both separators seen in the data are handled ("&" and ","), and the
+    wrapping commas make a containment test exact: ",campbell," cannot match
+    inside ",campbell county," or a county whose name merely starts the same.
+    """
+    if not raw:
+        return None
+    parts = [p.strip().lower()
+             for p in str(raw).replace("&", ",").split(",")]
+    parts = [p for p in parts if p]
+    return ("," + ",".join(parts) + ",") if parts else None
+
+
+def _filter_literal(filt):
+    """The panel's filters as a JS literal, or "null" when nothing is set.
+
+    ONE PLACE DECIDES WHAT "EMPTY" MEANS. A filter of empty lists and blank
+    strings matches everything, and shipping it as an object would run four
+    tests per feature across 24,178 features to reach that conclusion --
+    and, worse, would make `if (FILT)` true, so a bug in any predicate
+    would blank the layer for a user who had filtered nothing.
+    """
+    import json as _j
+    if not filt:
+        return "null"
+    out = {}
+    _src = [s for s in (filt.get("source") or []) if s]
+    _lst = [s for s in (filt.get("status") or []) if s]
+    _st = [s for s in (filt.get("state") or []) if s]
+    # LOWER-CASED HERE so the browser compares like for like against the
+    # normalised _co key, rather than lower-casing 24,178 times.
+    _co = [str(s).strip().lower() for s in (filt.get("county") or []) if s]
+    _opr = str(filt.get("operator") or "").strip().lower()
+    try:
+        _ac = float(filt.get("min_acres") or 0)
+    except (TypeError, ValueError):
+        _ac = 0.0
+    if _src:
+        out["src"] = _src
+    if _lst:
+        out["lst"] = _lst
+    if _st:
+        out["st"] = _st
+    if _co:
+        out["co"] = _co
+    # PASSED THROUGH VERBATIM, not recomputed. None means the named filter
+    # was not asked; a list (even empty) means it was.
+    if filt.get("ids") is not None:
+        out["ids"] = list(filt.get("ids") or [])
+    if _opr:
+        out["opr"] = _opr
+    if _ac > 0:
+        out["ac"] = _ac
+    # MILES IN, KILOMETRES OUT. The panel asks in miles because that is what
+    # a land man says; the stamp is in km because that is what the projection
+    # measured. Converted once, here, so the browser never sees a unit.
+    try:
+        _wp = float(filt.get("wet_min_pct") or 0)
+    except (TypeError, ValueError):
+        _wp = 0.0
+    if _wp > 0:
+        out["wpmin"] = _wp
+    _wty = [s for s in (filt.get("wet_types") or []) if s]
+    if _wty:
+        out["wty"] = _wty
+    _elmin = filt.get("elev_min")
+    _elmax = filt.get("elev_max")
+    if _elmin is not None:
+        out["elmin"] = float(_elmin)
+    if _elmax is not None:
+        out["elmax"] = float(_elmax)
+    for _k, _src in (("dcity", "miles_city"), ("dhwy", "miles_hwy")):
+        _v = filt.get(_src)
+        try:
+            _v = float(_v or 0)
+        except (TypeError, ValueError):
+            _v = 0.0
+        if _v > 0:
+            out[_k] = _v * 1.609344
+    return _j.dumps(out) if out else "null"
+
+
 def add_lease_layer_file(m, path, url, by="producing", show=True,
-                         legend=None, clip=None):
+                         legend=None, clip=None, filt=None):
     """Leases from a SERVED GeoJSON file, styled entirely in the browser.
 
     TWO ARGUMENTS FOR ONE FILE, and they are not interchangeable:
@@ -1509,12 +1833,7 @@ def add_lease_layer_file(m, path, url, by="producing", show=True,
     _gj = _f.GeoJson(
         path, embed=False, pane="dvleases", show=show,
         name="▩ Leases",
-        on_each_feature=_f.JsCode(
-            _LEASE_ON_EACH.replace("__BY__", key).replace(
-                "__CLIP__",
-                ("[%r, %r, %r, %r]" % (clip[0][0], clip[0][1],
-                                       clip[1][0], clip[1][1]))
-                if clip else "null")),
+        on_each_feature=_f.JsCode(lease_on_each(key, clip=clip, filt=filt)),
     )
     # The link folium emits must be the BROWSER's, not ours.
     _gj.embed_link = url
@@ -1554,7 +1873,9 @@ def _twp_bounds(wkt):
     return (min(ys), min(xs), max(ys), max(xs))
 
 
-def add_township_layer(m, engine, show=True, state="WY", bounds=None):
+def add_township_layer(m, engine, show=True, state="WY", bounds=None,
+                       lease_url=None, lease_by="producing",
+                       lease_where=None, lease_params=None):
     """PLSS townships shaded by leased acreage. (drawn, leased_townships).
 
     ONE QUERY, AGGREGATED IN SQL. Pulling 24,178 leases to count them in
@@ -1574,6 +1895,36 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
         except Exception:
             pass
     clause = " AND ".join(where)
+    # ── THE SHADING OBEYS THE LEASE FILTERS ─────────────────────────────
+    # "Lease filters don't filter townships?" They did not: this counted
+    # every tract in the township, so a map filtered to 42 leases near
+    # Casper still coloured all 2,888 townships by their full leased
+    # acreage. The panel said one thing and the map said another -- the
+    # failure this feature has already paid for twice.
+    #
+    # AN EXISTS ON THE JOIN, NOT A WHERE. On a LEFT JOIN a WHERE over `g`
+    # would drop the unmatched townships entirely, quietly turning this into
+    # the other design -- hide what does not match -- when what was asked
+    # for is the grid intact and the COLOUR filtered.
+    #
+    # The clauses come from _lease_filter_sql, the same definition the
+    # panel's count uses, with prefixed parameters so they cannot collide
+    # with :st / :s / :n / :w / :e above.
+    _lease_join = ""
+    if lease_where:
+        _lease_join = (
+            " AND EXISTS (SELECT 1"
+            "   FROM dataview.dv_land_right r"
+            "   JOIN dataview.dv_land_right_tract x"
+            "     ON x.land_right_id = r.land_right_id"
+            "  WHERE x.tract_id = g.tract_id AND "
+            + " AND ".join(lease_where) + ")")
+        params.update(lease_params or {})
+    # LOCAL, and named so: this module has no module-level `json`, and a bare
+    # name that resolves only when the line runs is the failure CLAUDE.md
+    # opens its list with.
+    import json as _json
+    _lkey = lease_by if lease_by in LEASE_COLOUR_BY else "producing"
     try:
         with engine.connect() as con:
             rows = con.execute(text(f"""
@@ -1589,7 +1940,7 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                   -- the same trick h3_refresh uses for wells -- and this
                   -- becomes a GROUP BY on an indexed column.
                   LEFT JOIN dataview.dv_land_tract_geom g
-                    ON  g.plss_id = t.plss_id
+                    ON  g.plss_id = t.plss_id{_lease_join}
                  WHERE {clause}
                  GROUP BY t.plss_id, t.township_label, t.bbox_wkt
             """), params).fetchall()
@@ -1647,7 +1998,7 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
         show=show,
         # STYLED IN THE BROWSER for the same reason the leases are: one
         # template instead of a style block per feature.
-        on_each_feature=_f.JsCode("""
+        on_each_feature=_f.JsCode(("""
             function(feature, layer) {
                 var p = feature.properties;
                 var c = p._c;
@@ -1707,6 +2058,157 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                 layer.on('click', function(ev) {
                     var mp = layer._map;
                     if (!mp) { return; }
+                    // DECLARED IN THE CLICK, not in on_each_feature: that
+                    // runs once per township and would build 2,888 copies of
+                    // the same function for a handler most never fire.
+                    var LEASE_URL = __LEASE_URL__;
+                    var LEASE_ONEACH = __LEASE_ONEACH__;
+
+                    // ── THE GRID STANDS DOWN ONCE THE LEASES ARRIVE ─────
+                    // "If both layers are on then the leases and townships
+                    // plot together, defeating the purpose of the
+                    // townships." The grid is the overview you use to
+                    // CHOOSE; the moment it has handed over to the leases
+                    // its job is done, and leaving it drawn is the smear
+                    // this layer exists to prevent. It also stops taking
+                    // the clicks that should reach the leases beneath it.
+                    //
+                    // ONE FRAME IS KEPT. Removing every township at zoom 12
+                    // leaves six polygons floating on blank tiles with no
+                    // way to tell WHICH township you opened -- so the one
+                    // you clicked stays as an outline. It is a plain
+                    // rectangle, non-interactive, so it cannot swallow a
+                    // lease click the way the polygon it replaces did.
+                    //
+                    // ONE-WAY, NOW THAT THE ZOOM RULES ARE GONE. This used
+                    // to coexist with a zoom-13 auto-hide and a zoom-10
+                    // reset that put the grid back; both were removed on
+                    // request. So a grid stood down here stays down for the
+                    // life of this render, and the way back is a rerun --
+                    // any control change rebuilds the map. Said here because
+                    // the next reader will otherwise look for the undo that
+                    // the comment above used to promise.
+                    // ── THE WAY BACK ────────────────────────────────
+                    // The body of the zoom-10 reset that was removed on
+                    // request. Removing the ZOOM as a trigger did not mean
+                    // removing the capability -- but it left the map with no
+                    // undo at all, and the popup still telling people to zoom
+                    // out. Offered as a link instead: same work, a trigger
+                    // that is visible at the moment it is wanted.
+                    //
+                    // Restores ONLY what was hidden here: if __dv_twp_grp is
+                    // null the grid was never stood down, and a grid switched
+                    // off in the layer control is not switched back on behind
+                    // the reader's back.
+                    // ── THE WAY BACK, WHERE IT CANNOT BE LOST ───────────
+                    // "Where is the popup if I am zoomed into several
+                    // townships." Nowhere: the popup is anchored to the one
+                    // township that was clicked, and it is the only thing
+                    // carrying the way back. Close it, or pan off it, and
+                    // the map is left focused with no visible undo -- the
+                    // amber frame around the focused township is
+                    // interactive:false, so it cannot even be clicked to
+                    // bring the popup back.
+                    //
+                    // So the link also goes on a control, which sits in the
+                    // corner of the map for exactly as long as the grid is
+                    // stood down. Same backOut(), a place that does not move
+                    // and cannot be dismissed by accident.
+                    //
+                    // L.DomEvent.disableClickPropagation, or clicking it
+                    // reaches the map underneath and the click that undoes
+                    // the focus also drills whatever is beneath the button.
+                    function twpBackControl(label) {
+                        if (mp.__dv_twp_ctl) {
+                            try { mp.removeControl(mp.__dv_twp_ctl); }
+                            catch (e) {}
+                            mp.__dv_twp_ctl = null;
+                        }
+                        if (!label) { return; }
+                        var K = L.Control.extend({
+                            options: {position: 'topright'},
+                            onAdd: function () {
+                                var d = L.DomUtil.create('div', '');
+                                d.style.cssText =
+                                    'background:#1c1917;border:1px solid ' +
+                                    '#f59e0b;border-radius:6px;padding:5px 9px;' +
+                                    'font:600 11px system-ui;color:#f59e0b;' +
+                                    'cursor:pointer;box-shadow:0 1px 4px ' +
+                                    'rgba(0,0,0,.4)';
+                                d.innerHTML = '&#8617; show all townships' +
+                                    '<div style="font:400 10px system-ui;' +
+                                    'color:#a8a29e">showing ' + label +
+                                    ' only</div>';
+                                L.DomEvent.disableClickPropagation(d);
+                                L.DomEvent.on(d, 'click', function (ev) {
+                                    L.DomEvent.preventDefault(ev);
+                                    backOut();
+                                });
+                                return d;
+                            }
+                        });
+                        mp.__dv_twp_ctl = new K();
+                        mp.addControl(mp.__dv_twp_ctl);
+                    }
+
+                    function backOut() {
+                        window.DV_TWP_FOCUS = null;
+                        twpBackControl(null);
+                        if (mp.__dv_twp_leases) {
+                            try { mp.removeLayer(mp.__dv_twp_leases); }
+                            catch (e) {}
+                            mp.__dv_twp_leases = null;
+                        }
+                        if (mp.__dv_twp_grp) {
+                            try { mp.addLayer(mp.__dv_twp_grp); }
+                            catch (e) {}
+                            mp.__dv_twp_grp = null;
+                        }
+                        if (mp.__dv_twp_frame) {
+                            try { mp.removeLayer(mp.__dv_twp_frame); }
+                            catch (e) {}
+                            mp.__dv_twp_frame = null;
+                        }
+                        // Un-fade every lease the highlight dimmed.
+                        mp.eachLayer(function (grp) {
+                            if (!grp || !grp.eachLayer) { return; }
+                            try {
+                                grp.eachLayer(function (c) {
+                                    var q = c.feature && c.feature.properties;
+                                    if (!q || q.ln === undefined) { return; }
+                                    c.setStyle({opacity: 0.9,
+                                                fillOpacity: 0.38,
+                                                weight: 1.0});
+                                });
+                            } catch (e) { /* not a lease group */ }
+                        });
+                        try { mp.closePopup(); } catch (e) {}
+                    }
+
+                    function standDownGrid() {
+                        var grp = null;
+                        mp.eachLayer(function (g) {
+                            if (!grp && g !== layer && g.hasLayer &&
+                                    g.hasLayer(layer)) { grp = g; }
+                        });
+                        if (grp && mp.hasLayer(grp)) {
+                            mp.removeLayer(grp);
+                            mp.__dv_twp_grp = grp;
+                        }
+                        if (mp.__dv_twp_frame) {
+                            try { mp.removeLayer(mp.__dv_twp_frame); }
+                            catch (e) {}
+                        }
+                        mp.__dv_twp_frame = L.rectangle(b, {
+                            fill: false, color: '#f59e0b', weight: 2,
+                            opacity: 0.9, interactive: false
+                        }).addTo(mp);
+                        // The undo appears at the same moment the grid goes,
+                        // and names what is being shown -- "showing 31N 97W
+                        // only" answers "why can I only see one township"
+                        // without anyone having to work it out.
+                        twpBackControl(p.lab);
+                    }
                     var b = layer.getBounds();
                     try { L.DomEvent.stopPropagation(ev); } catch (e) {}
 
@@ -1753,20 +2255,157 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                             });
                         } catch (e) { /* not a lease group */ }
                     });
+                    // Leases were ALREADY on the map ("both" mode): they
+                    // have just been highlighted, so the grid has done its
+                    // job and gets out of their way now rather than waiting
+                    // for zoom 13.
+                    if (inside > 0) { standDownGrid(); }
                     // Say what happened, on the map, where the click was.
-                    try {
-                        L.popup({closeButton: true, autoPan: false})
-                         .setLatLng(b.getCenter())
-                         .setContent(
-                            '<div style="font:600 13px system-ui">' + p.lab +
-                            '</div><div style="font:12px system-ui">' +
-                            p.n + ' lease(s) &middot; ' +
-                            p.ac.toLocaleString() + ' ac leased</div>' +
-                            '<div style="font:11px system-ui;color:#64748b;' +
-                            'margin-top:4px">' + inside +
-                            ' drawn here &middot; zoom out to reset</div>')
-                         .openOn(mp);
-                    } catch (e) {}
+                    // ONE POPUP THAT CAN BE REWRITTEN, because the load below
+                    // is asynchronous: the click has to answer immediately
+                    // ("loading...") and then again with the result. A second
+                    // popup would leave the first one standing and stale.
+                    var pop = null;
+                    function say(extra) {
+                        try {
+                            var html =
+                                '<div style="font:600 13px system-ui">' + p.lab +
+                                '</div><div style="font:12px system-ui">' +
+                                p.n + ' lease(s) &middot; ' +
+                                p.ac.toLocaleString() + ' ac leased</div>' +
+                                '<div style="font:11px system-ui;color:#64748b;' +
+                                'margin-top:4px">' + extra + '</div>' +
+                                '<div style="margin-top:6px"><a href="#" ' +
+                                'id="dvtwpback" style="font:600 11px ' +
+                                'system-ui;color:#f59e0b;text-decoration:none"' +
+                                '>&#8617; show all townships</a></div>';
+                            if (pop) { pop.setContent(html); }
+                            else {
+                                // ── NOT OVER THE THING IT DESCRIBES ─────
+                                // At the centre it covered the leases it had
+                                // just counted: fitBounds zooms so the
+                                // township fills the view, so a popup at the
+                                // middle sits squarely on the answer.
+                                // Reported as "it says 22 leases but where
+                                // are the actual leases" -- they were
+                                // behind the box.
+                                //
+                                // Anchored at the NORTH edge instead, where
+                                // a Leaflet popup opens upward and clears
+                                // the township almost entirely.
+                                pop = L.popup({closeButton: true,
+                                               autoPan: false})
+                                       .setLatLng([b.getNorth(),
+                                                   b.getCenter().lng])
+                                       .setContent(html).openOn(mp);
+                            }
+                            // BOUND AFTER EVERY setContent, because Leaflet
+                            // replaces the popup's DOM each time -- a handler
+                            // attached once would survive exactly until the
+                            // first update, which is the async lease load.
+                            try {
+                                var lnk = document.getElementById('dvtwpback');
+                                if (lnk) {
+                                    lnk.addEventListener('click', function (ev) {
+                                        ev.preventDefault();
+                                        backOut();
+                                    });
+                                }
+                            } catch (e) {}
+                        } catch (e) {}
+                    }
+                    say(inside + ' drawn here');
+
+                    // ── NOTHING TO EXPAND? FETCH THE LEASES ──────────────
+                    // The grid can be drawn with the lease layer off -- the
+                    // second screen's "townships" mode does exactly that --
+                    // and then this click had nothing to highlight. It zoomed
+                    // to an empty rectangle and reported "0 drawn here",
+                    // which reads as a broken feature rather than as "you did
+                    // not ask for leases".
+                    //
+                    // Fetching here keeps the bargain the rest of this
+                    // handler keeps: NOTHING REACHES PYTHON, so no rerun
+                    // rebuilds the map and wipes the highlight the click just
+                    // made -- the failure that killed the first version of
+                    // this feature. It is the same file the lease layer
+                    // serves, so it is usually already in the browser cache,
+                    // and it is fetched at most once per page.
+                    if (inside === 0 && LEASE_URL) {
+                        say('loading leases for this township...');
+                        var got = window.__dv_lease_gj
+                            ? Promise.resolve(window.__dv_lease_gj)
+                            : fetch(LEASE_URL).then(function (r) {
+                                  if (!r.ok) {
+                                      throw new Error('HTTP ' + r.status);
+                                  }
+                                  return r.json();
+                              }).then(function (gj) {
+                                  window.__dv_lease_gj = gj;
+                                  return gj;
+                              });
+                        got.then(function (gj) {
+                            // The previous expansion goes when the next one
+                            // arrives. Two townships' worth of leases on the
+                            // map at once is the smear this layer exists to
+                            // avoid.
+                            if (mp.__dv_twp_leases) {
+                                try { mp.removeLayer(mp.__dv_twp_leases); }
+                                catch (e) {}
+                                mp.__dv_twp_leases = null;
+                            }
+                            // THE STAMP, NOT A SECOND GEOMETRY RULE.
+                            // The tooltip's count comes from the stamped
+                            // plss_id; filtering here by "centre inside the
+                            // box" is a DIFFERENT rule that nearly agrees --
+                            // 28N 113W read 69 in the tooltip and 70 here,
+                            // because a centre in the overlap of two adjacent
+                            // township boxes is stamped once but matches both.
+                            // Two numbers for one fact, and whichever the
+                            // reader trusted less would look like the bug.
+                            //
+                            // Centre-in-box remains the FALLBACK, for a file
+                            // written before the stamp was carried -- near
+                            // enough to be useful, and it says so below.
+                            var byStamp = (gj.features || []).length > 0 &&
+                                (gj.features[0].properties || {})._tw !== undefined;
+                            var picked = (gj.features || []).filter(
+                                function (f) {
+                                    var q = f.properties || {};
+                                    if (byStamp) { return q._tw === p.pid; }
+                                    if (q._la === undefined ||
+                                        q._lo === undefined) { return false; }
+                                    return b.contains(L.latLng(q._la, q._lo));
+                                });
+                            if (!picked.length) {
+                                say('no leases fall in this township');
+                                return;
+                            }
+                            var lyr = L.geoJSON(
+                                {type: 'FeatureCollection', features: picked},
+                                {style: function (f) {
+                                     return (f.properties &&
+                                             f.properties.style) || {};
+                                 },
+                                 onEachFeature: LEASE_ONEACH});
+                            lyr.addTo(mp);
+                            mp.__dv_twp_leases = lyr;
+                            // The leases are on the map; the grid steps
+                            // aside. Done HERE, not beside the fetch call,
+                            // because the fetch is asynchronous -- hiding
+                            // the grid before the leases arrive leaves an
+                            // empty map for as long as the download takes,
+                            // and a blank map is how "it broke" looks.
+                            standDownGrid();
+                            say(picked.length + ' lease(s) drawn' +
+                                (byStamp ? '' : ' (approx)'));
+                        }).catch(function (e) {
+                            // SAID, NOT SWALLOWED: a silent failure here is
+                            // indistinguishable from a township that simply
+                            // holds no leases.
+                            say('could not load leases: ' + e);
+                        });
+                    }
                     // OUT OF THE CLICK'S CALL STACK, and this is the whole
                     // reason it did not work. Fired inline, streamlit-folium's
                     // onDraw runs while the click event is still live, reads
@@ -1780,31 +2419,14 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                     // setTimeout lets the click finish first; onDraw then
                     // sees an ordinary programmatic draw, exactly like the
                     // ⛶ control's, which has always worked.
-                    // ZOOMING OUT PUTS EVERYTHING BACK. A focus you cannot
-                    // leave is a trap, and the gesture people already use to
-                    // mean "show me more" is the zoom -- so that is the
-                    // gesture that clears it, rather than a button they have
-                    // to find. Bound once per map, not once per township.
-                    if (!mp.__dv_twp_reset_bound) {
-                        mp.__dv_twp_reset_bound = true;
-                        mp.on('zoomend', function () {
-                            if (!window.DV_TWP_FOCUS) { return; }
-                            if (mp.getZoom() > 10) { return; }
-                            window.DV_TWP_FOCUS = null;
-                            mp.eachLayer(function (grp) {
-                                if (!grp || !grp.eachLayer) { return; }
-                                try {
-                                    grp.eachLayer(function (c) {
-                                        var q = c.feature && c.feature.properties;
-                                        if (!q || q.ln === undefined) { return; }
-                                        c.setStyle({opacity: 0.9,
-                                                    fillOpacity: 0.38,
-                                                    weight: 1.0});
-                                    });
-                                } catch (e) {}
-                            });
-                        });
-                    }
+                    // THE ZOOM NO LONGER RESETS ANYTHING. A zoomend handler
+                    // used to clear the focus below zoom 10 -- restoring the
+                    // grid, dropping the fetched leases and un-fading the rest.
+                    // Removed on request, with the consequence stated rather
+                    // than discovered: nothing now puts the grid back inside a
+                    // single render. Clicking another township re-frames it,
+                    // and ANY control change rebuilds the map, which restores
+                    // the grid -- that is the recovery path.
 
                     // AND IT MUST NOT TELL PYTHON. An earlier version also
                     // fired draw:created here, so that the server would learn
@@ -1823,83 +2445,161 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None):
                     // clipping server-side is what ⛶ Use current view and the
                     // box tool are for.
                 });
-            }"""),
+            }""")
+        # THE LEASE STYLING IS NOT COPIED, IT IS THE SAME TEMPLATE. An
+        # on-demand lease has to look and behave exactly like a drawn one --
+        # same colours, same tooltip, same popup -- and a second style block
+        # here would be one more list that must agree with another.
+        .replace("__LEASE_URL__",
+                 _json.dumps(lease_url) if lease_url else "null")
+        # THE SAME FILLER THE DRAWN LAYER USES. Spelling the replacements
+        # out here is what left __FILT__ unfilled and broke the township
+        # click in the browser.
+        .replace("__LEASE_ONEACH__", lease_on_each(_lkey))),
     ).add_to(m)
 
-    # ── ZOOM IN FAR ENOUGH AND THE GRID GETS OUT OF THE WAY ─────────────
-    # "Could I turn off the townships by zooming in, rather than scrolling
-    # up and switching off the pill." Yes -- and it has to be done in the
-    # browser, because Python never learns the zoom. That is the same
-    # constraint that shaped the box tool and the ⛶ control; here it costs
-    # nothing, since hiding a layer is a browser job anyway.
-    #
-    # REMOVED, NOT FADED. A township at zoom 13 is bigger than the screen,
-    # so a faint one is just a stray line across the map -- and while it is
-    # still on the map it keeps taking the clicks that should reach the
-    # leases underneath. Removing the layer hands the clicks back.
-    #
-    # AND IT ONLY RE-ADDS WHAT IT REMOVED. If you switch the layer off
-    # yourself in the layer control, zooming out must not switch it back on:
-    # autoHidden records that the hiding was ours to undo.
-    from branca.element import MacroElement as _ME, Template as _TPL
-    _zoom_hide = _ME()
-    _zoom_hide._name = "dv_twp_zoom_hide"
-    _zoom_hide._template = _TPL(u"""
-        {% macro script(this, kwargs) %}
-        (function () {
-            var HIDE_AT = 13;
-            function findMap() {
-                var el = document.querySelector('.leaflet-container');
-                if (!el) { return null; }
-                for (var k in window) {
-                    try {
-                        var v = window[k];
-                        if (v && v._container === el &&
-                                typeof v.on === 'function') { return v; }
-                    } catch (e) { /* unreadable key */ }
-                }
-                return null;
-            }
-            function findGroup(mp) {
-                var found = null;
-                mp.eachLayer(function (g) {
-                    if (found || !g.eachLayer) { return; }
-                    try {
-                        g.eachLayer(function (c) {
-                            if (found) { return; }
-                            var p = c.feature && c.feature.properties;
-                            if (p && p.pid !== undefined) { found = g; }
-                        });
-                    } catch (e) { /* not it */ }
-                });
-                return found;
-            }
-            function install() {
-                if (typeof L === 'undefined') {
-                    setTimeout(install, 200); return;
-                }
-                var mp = findMap();
-                if (!mp) { setTimeout(install, 200); return; }
-                if (mp.__dv_twp_zoom_bound) { return; }
-                var grp = findGroup(mp);
-                if (!grp) { setTimeout(install, 300); return; }
-                mp.__dv_twp_zoom_bound = true;
-                var autoHidden = false;
-                function apply() {
-                    var z = mp.getZoom();
-                    if (z >= HIDE_AT && mp.hasLayer(grp)) {
-                        mp.removeLayer(grp); autoHidden = true;
-                    } else if (z < HIDE_AT && autoHidden && !mp.hasLayer(grp)) {
-                        mp.addLayer(grp); autoHidden = false;
-                    }
-                }
-                mp.on('zoomend', apply);
-                apply();
-            }
-            install();
-        })();
-        {% endmacro %}
-    """)
-    _zoom_hide._parent = m
-    m.add_child(_zoom_hide)
+    # THE GRID NO LONGER HIDES ITSELF ON ZOOM. A MacroElement removed
+    # the township layer past zoom 13 and re-added it below, so the grid
+    # got out of the way when you were close enough to want leases.
+    # Removed on request. The grid now stays until it is switched off in
+    # the layer control, or until a township click stands it down.
     return len(feats), leased
+
+
+
+# ── WETLANDS: THE REGISTRY, NOT A COPY OF IT ───────────────────────────────
+# The USFWS National Wetlands Inventory is the registry a land man would
+# actually cite -- PEM, PSS, PFO classifications, not a basemap's "green
+# bit". Wyoming's download is 1,071 MB; the same data is served live, so for
+# LOOKING there is nothing to store and nothing to keep in sync.
+#
+# Querying is the other half and is deliberately not attempted here: "is this
+# lease on a wetland" needs the polygons locally, and that is the gigabyte.
+# Display first, because it answers the question that was actually asked.
+NWI_SERVICE = ("https://www.fws.gov/wetlandsmapservice/rest/services/"
+               "Wetlands/MapServer")
+# WMS LIVES UNDER /services/, NOT /rest/services/. That one path segment is
+# the whole reason the first attempt concluded there was no WMS.
+NWI_WMS = ("https://www.fws.gov/wetlandsmapservice/services/"
+           "Wetlands/MapServer/WMSServer")
+
+# THE SERVICE DRAWS NOTHING ABOVE THIS SCALE, by its own configuration
+# (minScale 100000 on layer 0). Zoomed out to the state, ticking the layer
+# would look broken -- so the layer says so rather than leaving the reader to
+# wonder. Web-mercator zoom 11 is roughly 1:144k, 12 roughly 1:72k, so 12 is
+# the first zoom that reliably paints.
+NWI_MIN_ZOOM = 12
+
+
+def add_wetlands_layer(m, show=False):
+    """USFWS NWI wetlands as a live WMS overlay. Returns the layer name.
+
+    IT IS A WMS AFTER ALL. The first version of this hand-wrote a Leaflet
+    tile layer that computed each tile's bbox and called the ArcGIS `export`
+    endpoint, because .../rest/services/Wetlands/MapServer/WMSServer 404s.
+    That was the wrong URL: ArcGIS serves WMS from /services/, not
+    /rest/services/, and the service advertises it plainly --
+    supportedExtensions: WMSServer. Asking the service what it supports
+    would have settled it before fifteen lines of tile arithmetic.
+
+    So this is folium's own WmsTileLayer now: a standard protocol, no custom
+    JavaScript, and it registers itself in the layer control instead of
+    hunting for one in window. Verified against the live service --
+    GetCapabilities returns WMS 1.3.0 with EPSG:3857 and image/png, and
+    GetMap returns real PNGs.
+
+    THE SERVICE DRAWS NOTHING ZOOMED OUT (minScale 100000 on its one layer),
+    so the name carries the zoom rather than leaving a blank overlay looking
+    broken.
+
+    DISPLAY ONLY. "Which leases sit on wetland" needs the polygons locally,
+    and Wyoming's NWI download is 1,071 MB -- a different decision, not a
+    bigger version of this one.
+    """
+    import folium as _f
+    _name = "🟩 Wetlands (NWI, zoom 12+)"
+    # ── ON TOP OF TOWNSHIPS AND LEASES, WHICH IS A PANE, NOT AN ORDER ───
+    # "Can I put wetlands on top of Townships and Leases." Not by reordering
+    # the layer control: this is a RASTER, and Leaflet puts tile layers in
+    # tilePane (z-index 200) while GeoJson vectors go in overlayPane (400).
+    # Raster is structurally underneath vector however the control lists
+    # them, so there is no toggle that could have done it.
+    #
+    # 450 clears the vectors and stays below shadowPane (500), markerPane
+    # (600), tooltipPane (650) and popupPane (700) -- so well symbols,
+    # tooltips and every popup still read over the top of it. Sliding it
+    # above those would hide the thing you clicked.
+    #
+    # POINTER EVENTS OFF, AND THIS IS THE HALF THAT BREAKS SILENTLY. A pane
+    # laid over the vectors swallows the clicks aimed at them: township
+    # click-to-expand and lease clicks would simply stop, with no error and
+    # nothing on screen to say the raster ate them. The overlay is a
+    # picture; it has no business receiving a click.
+    _f.map.CustomPane("wetlands", z_index=450,
+                      pointer_events=False).add_to(m)
+    _f.raster_layers.WmsTileLayer(
+        url=NWI_WMS,
+        layers="0",
+        fmt="image/png",
+        transparent=True,
+        version="1.3.0",
+        name=_name,
+        overlay=True,
+        control=True,
+        show=show,
+        # 0.75 WAS CHOSEN WHEN THIS DREW UNDERNEATH, where washing out the
+        # basemap was the whole cost. Over the leases it washes out the
+        # colour that says which lease is which, so it comes down.
+        opacity=0.5,
+        pane="wetlands",
+        attr="Wetlands: USFWS National Wetlands Inventory",
+    ).add_to(m)
+    return _name
+
+
+
+# ── HIGHWAYS: THE LINES THE DISTANCE FILTER MEASURED TO ────────────────────
+# The basemaps already draw roads, so this is not "show me roads". It is the
+# specific 84 primary routes that tools/stamp_cultural_distance.py measured
+# against -- so "within 5 miles of a highway: 3,286 leases" can be checked by
+# eye instead of taken on trust.
+#
+# SERVED, NOT EMBEDDED, for the reason the leases are: 1.09 MB in the map
+# HTML would be paid on every rerun, and the browser caches a file.
+HIGHWAY_GEOJSON_NAME = "dv_highways.geojson"
+
+
+def add_highway_layer(m, path, url, show=False):
+    """TIGER primary roads as a served overlay. Returns the layer name."""
+    import folium as _f
+    _name = "🛣 Highways (I- and US)"
+    _gj = _f.GeoJson(
+        path, embed=False, show=show, name=_name,
+        style_function=lambda _f_: {
+            # A ROAD IS A LINE, NOT A REGION: no fill, and a casing so it
+            # reads over both the pale topo basemap and the satellite one.
+            "color": "#1f2937", "weight": 4.0, "opacity": 0.35,
+        },
+        on_each_feature=_f.JsCode("""
+            function(feature, layer) {
+                var p = feature.properties || {};
+                // The visible line, drawn over its own casing.
+                layer.setStyle({color: '#1f2937', weight: 4.0, opacity: 0.35});
+                var inner = L.polyline(layer.getLatLngs(), {
+                    color: '#fbbf24', weight: 1.8, opacity: 0.95,
+                    interactive: false
+                });
+                layer.on('add', function () {
+                    if (layer._map) { inner.addTo(layer._map); }
+                });
+                layer.on('remove', function () {
+                    if (inner._map) { inner.remove(); }
+                });
+                if (p.nm) {
+                    layer.bindTooltip(p.nm, {sticky: true});
+                }
+            }"""),
+    )
+    _gj.embed_link = url
+    _gj.add_to(m)
+    return _name

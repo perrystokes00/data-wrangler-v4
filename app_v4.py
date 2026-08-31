@@ -53,11 +53,29 @@ def _dump_loaded_modules():
 _atexit.register(_dump_loaded_modules)
 # ── end probe ─
 
+# THE LEASE WINDOW OPENS AS A 520px STRIP, and Streamlit turns the sidebar
+# into an OVERLAY DRAWER below ~768px rather than a column -- so in that
+# window an expanded sidebar does not sit beside the panel, it covers it
+# completely. Measured at 520x900: the panel was entirely hidden behind nav
+# and Connect until the drawer was collapsed by hand, every time the window
+# was opened.
+#
+# initial_sidebar_state applies to the FIRST render of a session, which is
+# exactly the right scope: the drawer is still there for the one Connect that
+# window needs, it just does not start on top of the thing it came for.
+_view = ""
+try:
+    _view = str(st.query_params.get("view") or "")
+except Exception:
+    # Older Streamlit, or no params at all. An expanded sidebar is the
+    # correct fallback -- it is what every other page wants.
+    _view = ""
+
 st.set_page_config(
     page_title="DataView",
     page_icon="🛢",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state=("collapsed" if _view == "lease" else "expanded"),
 )
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -626,8 +644,13 @@ S = st.session_state
 # the dispatch below; assigning it after a widget was drawn from it is
 # Streamlit scar #7, and the crash would land on whatever page drew next.
 try:
-    if str(st.query_params.get("view") or "").lower() == "seis":
+    _v = str(st.query_params.get("view") or "").lower()
+    if _v == "seis":
         S.app_mode = "seis_view"
+    elif _v == "lease":
+        # SAME DOOR AS THE SEISMIC SCREEN. ?view=lease opens the lease panel
+        # alone, so it can live on a second monitor beside the map.
+        S.app_mode = "lease_view"
 except Exception:
     pass
 
@@ -681,13 +704,12 @@ with st.sidebar:
             _os.path.abspath(_dv_pkg.__file__)))
         _here = _os.path.dirname(_os.path.abspath(__file__))
         _same = _os.path.normcase(_code_root) == _os.path.normcase(_here)
-        st.markdown(
-            f"<div style=\"font-size:9px;font-family:'IBM Plex Mono',monospace;"
-            f"letter-spacing:.5px;margin-top:4px;"
-            f"color:{'#7fd18b' if _same else '#ff6b6b'}\">"
-            + ("● repo" if _same else "▲ NOT this folder")
-            + f"<br><span style=\"opacity:.7\">{_code_root}</span></div>",
-            unsafe_allow_html=True)
+        # SILENT WHEN CORRECT. This printed "● repo" and the full path on
+        # every single run -- a line long enough to spill past the sidebar's
+        # edge, spent saying the ordinary thing. The deployed second copy it
+        # watched for was removed 18 Aug 2026, so the green half had nothing
+        # left to tell anyone. The alarm is kept: it costs nothing, and if
+        # `dataview` ever resolves somewhere else it still says so, loudly.
         if not _same:
             st.warning(
                 f"`dataview` is being imported from **{_code_root}**, not from "
@@ -697,7 +719,18 @@ with st.sidebar:
     except Exception as _e_src:                  # never let a banner break boot
         st.caption(f"(code source unknown: {str(_e_src)[:60]})")
 
-    # Theme selector
+    # THE THEME PICKER, AT THE TOP, UNDER THE LOGO. Its header and rule are
+    # kept: they are the framing that makes this read as a labelled group
+    # rather than a stray dropdown, and nobody asked for them to go.
+    #
+    # What is gone is the three-line description that used to sit BELOW the
+    # dropdown, restating the name already showing in it -- and, being the
+    # last thing before the Reset button, it was the line directly above
+    # Reset that was asked about.
+    #
+    # The theme CSS is injected before the sidebar opens, so nothing here
+    # renders unthemed. A second _inject_theme call used to sit at this
+    # spot and emit the same <style> block twice per run.
     st.markdown("<div class='sec-hdr'>Appearance</div>", unsafe_allow_html=True)
     theme_choice = st.selectbox(
         "Color theme",
@@ -707,44 +740,6 @@ with st.sidebar:
         label_visibility="collapsed")
     if theme_choice != S.get("theme"):
         S.theme = theme_choice
-        st.rerun()
-    _inject_theme(THEMES[S.get("theme", "Midnight Gold")])
-    st.caption(THEMES[S.get("theme", "Midnight Gold")]["desc"])
-
-    # Connection status
-    if S.connected:
-        st.markdown(
-            f"<div class='conn-pill connected'>● {S.db_label}</div>",
-            unsafe_allow_html=True)
-    else:
-        st.markdown(
-            "<div class='conn-pill disconnected'>○ Not connected</div>",
-            unsafe_allow_html=True)
-
-    # ── Global reset (cold start) ─────────────────────────────────────
-    if st.button("🔄  Reset", key="global_reset",
-                 use_container_width=True,
-                 help="Cold start: disposes the connection, clears all cached "
-                      "data and every bit of session state, and returns to a "
-                      "fresh, not-connected app — like restarting Streamlit."):
-        # tear down the DB connection cleanly if one exists
-        try:
-            if S.get("engine") is not None:
-                S.engine.dispose()
-        except Exception:
-            pass
-        # drop every Streamlit cache
-        for _cache in (getattr(st, "cache_data", None),
-                       getattr(st, "cache_resource", None)):
-            try:
-                if _cache is not None:
-                    _cache.clear()
-            except Exception:
-                pass
-        # wipe ALL session state — DEFAULTS re-seed on the next run,
-        # landing on the splash page, not connected, Midnight Gold theme.
-        for _k in list(S.keys()):
-            del S[_k]
         st.rerun()
 
     # ── Connect panel ─────────────────────────────────────────────────
@@ -961,8 +956,60 @@ with st.sidebar:
             except Exception as e:
                 st.error(str(e))
 
+    # ── RESET, THEN THE THEME PICKER ── BOTH BELOW CONNECT ───────
+    # Connect is the first thing anyone touches, so it is the first thing in
+    # the sidebar. Reset sits under it -- it is a cold start, wanted rarely
+    # and never before you have tried connecting.
+    if st.button("🔄  Reset", key="global_reset",
+                 use_container_width=True,
+                 help="Cold start: disposes the connection, clears all cached "
+                      "data and every bit of session state, and returns to a "
+                      "fresh, not-connected app — like restarting Streamlit."):
+        try:
+            if S.get("engine") is not None:
+                S.engine.dispose()
+        except Exception:
+            pass
+        for _cache in (getattr(st, "cache_data", None),
+                       getattr(st, "cache_resource", None)):
+            try:
+                if _cache is not None:
+                    _cache.clear()
+            except Exception:
+                pass
+        # Wipe ALL session state -- DEFAULTS re-seed on the next run, landing
+        # on the splash page, not connected, Midnight Gold theme.
+        for _k in list(S.keys()):
+            del S[_k]
+        st.rerun()
+
+
     # ── Navigation (only when connected) ─────────────────────────────
     if S.connected:
+        # ── ONCE LOGGED IN, THE SIDEBAR IS NOT NEEDED ────────────────
+        # "We should also be able to close the sidebar at any time to give
+        # more space to the applications. Once logged in we don't need it."
+        # Connecting is the one thing it is required for, so connecting is
+        # when it stands down -- every page gets the ~336px, not just the
+        # map.
+        #
+        # ONCE PER PAGE LOAD, and only when it is observed to have worked:
+        # the flag lives on the window and is set on aria-expanded, so a
+        # sidebar re-opened by hand STAYS open. Streamlit has no API for
+        # this after the session starts -- initial_sidebar_state applies to
+        # the first render only, and the connection happens later -- so it
+        # clicks the control a person would click.
+        #
+        # The » control Streamlit leaves behind is how it comes back, and
+        # nav lives in there, so nothing becomes unreachable.
+        try:
+            from dataview.mapping.page_well_map import _collapse_sidebar_once
+            _collapse_sidebar_once()
+        except Exception as _cse:
+            # Cosmetic only: an unreachable helper must not stop the app
+            # from drawing its navigation.
+            print("[app] sidebar auto-collapse skipped: %s" % _cse)
+
         st.markdown("<div class='sec-hdr'>Navigation</div>",
                     unsafe_allow_html=True)
 
@@ -994,10 +1041,79 @@ with st.sidebar:
 
         st.markdown("<div class='sec-hdr'>Session</div>",
                     unsafe_allow_html=True)
+        # WHICH DATABASE, kept from the status pill that used to sit above
+        # Connect. The pill went, but this half of it earns its place: it is
+        # the only thing on screen that says WHICH database is connected, and
+        # the day DataView was silently selected instead of DataView_Demo
+        # this line was the fastest way to see it.
+        st.caption("● %s" % (S.db_label or "connected"))
         if st.button("⏏ Disconnect", key="nav_disconnect",
                      use_container_width=True):
             for k, v in DEFAULTS.items():
                 S[k] = v
+            # ── AND THE MAP'S SELECTIONS, WHICH DEFAULTS DOES NOT COVER ──
+            # DEFAULTS resets seven keys, all about the CONNECTION. Every map
+            # widget lives under its own key and survived untouched, so
+            # reconnecting resumed drawing whatever was on before: "I
+            # disconnected and started a new map. I entered Wyoming and the
+            # county map plotted along with all the leases, uncalled for."
+            # It was not a new map -- it was the old one, still selected.
+            #
+            # Disconnect means a clean slate, so it now means one.
+            #
+            # BY PREFIX, so a control added later is covered without anyone
+            # remembering to add it here -- the "lists that must agree"
+            # failure this repo pays for in four places. wm_ is the map,
+            # lv_ the lease panel, seis_ the seismic screen. The connection
+            # form is sb_ and is deliberately left alone: clearing the server
+            # and database someone just typed would be its own rudeness.
+            #
+            # DELETED, NOT ASSIGNED. Assigning a widget's own key is the
+            # Streamlit error that surfaces on a LATER run, on whatever page
+            # draws next; deleting before the widget is built is the
+            # supported way to restore a default. Safe here because the
+            # rerun lands on the splash page, where none of them exist.
+            _keep = ("sb_",)
+            _drop = [k for k in list(st.session_state.keys())
+                     if isinstance(k, str)
+                     and k.startswith(("wm_", "lv_", "seis_"))
+                     and not k.startswith(_keep)]
+            # ── AND THE DATABASE CHOICE, WHICH sb_ WOULD OTHERWISE KEEP ──
+            # The Database control is a selectbox created with index= pointing
+            # at DataView_Demo -- but once a widget's key holds a value,
+            # index= is IGNORED on every later run. DataView sorts first in
+            # sys.databases, so if that selectbox was ever built before
+            # DataView_Demo appeared in the fetched list, "DataView" was
+            # stored and became permanent: the older, essentially empty
+            # database, which has no dv_land_right at all.
+            #
+            # Reported as "Invalid object name 'dataview.dv_land_right'"
+            # followed by "I have not changed databases" -- and that was
+            # correct. The user changed nothing; the widget kept an answer
+            # nobody gave it, and Disconnect preserved it because it wears
+            # the sb_ prefix that protects the server and driver.
+            #
+            # Server, driver and auth are still kept: retyping those is the
+            # rudeness this exception is carved out of. Only the database
+            # goes, back to the default that is right.
+            _drop += [k for k in ("sb_database_sel", "sb_database")
+                      if k in st.session_state]
+            # The map's own bookkeeping, which has no prefix.
+            _drop += [k for k in (
+                "map_mode", "wells_layer_on", "h3_layer_on", "h3_resolution",
+                "_drawn_bounds", "_drawn_bounds_oneshot", "_clip_box",
+                "_active_drill_bbox", "_place_shapes", "_place_pending",
+                "_lease_channel_live", "_lease_rerun_for", "_lease_pref_seen",
+                "_lease_gj_sig", "_lease_gj_legend", "_lease_gj_n",
+                "_sidebar_collapsed_once", "_reset_saved_view",
+            ) if k in st.session_state]
+            for _k in _drop:
+                try:
+                    del st.session_state[_k]
+                except Exception:
+                    # A key that will not delete must not block the
+                    # disconnect itself.
+                    pass
             st.rerun()
 
         with st.expander("🗑️ Reset demo data", expanded=False):
@@ -1322,6 +1438,21 @@ elif S.app_mode == "seis_view":
             _pwm.render_seis_view(S.engine)
     except Exception as e:
         st.error(f"Seismic view error: {e}")
+
+# ── LEASE SECOND SCREEN ───────────────────────────────────────────────
+elif S.app_mode == "lease_view":
+    try:
+        from dataview.mapping import page_well_map as _pwm2
+        if S.engine is None:
+            st.info("This window needs its own connection — press "
+                    "**Connect** in the sidebar. A second window is a second "
+                    "session, so it cannot inherit the map's.")
+        else:
+            _pwm2.render_lease_view(S.engine)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        st.error(f"Lease view error: {e}")
 
 # ── WELL MAP ──────────────────────────────────────────────────────────
 elif S.app_mode == "well_map":

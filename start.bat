@@ -92,12 +92,31 @@ if "%ACTION%"=="" set "ACTION=start"
 
 REM WATCHING SOURCES COSTS SOMETHING, AND ON DEMO DAY IT COSTS TOO MUCH.
 REM With the watcher on, every save to a local module makes Streamlit reload
-REM it -- page_well_map is 711 KB and takes ~1.2 s to import -- and the repo
-REM lives inside OneDrive, which touches mtimes of its own accord. Eighteen
-REM edits in one morning is eighteen reloads the running session absorbed.
+REM it -- page_well_map is 711 KB and takes ~1.2 s to import. Eighteen edits
+REM in one morning is eighteen reloads the running session absorbed.
 REM
 REM   start.bat start nowatch     no watcher; edits need a restart
 REM   start.bat restart nowatch   same, after stopping
+REM
+REM ONEDRIVE IS NOT A REASON TO USE nowatch, and this comment used to say it
+REM was: "the repo lives inside OneDrive, which touches mtimes of its own
+REM accord." Measured 30 Aug 2026 -- it triggers nothing. Streamlit's
+REM LocalSourcesWatcher compares the file's CONTENT HASH, not its timestamp:
+REM `touch page_well_map.py` and `touch app_v4.py` both produced no reload at
+REM all, and appending one real line produced "Source file changed" at once.
+REM
+REM AND nowatch IS NOT FREE, which is the half nobody costed. Without the
+REM watcher every code change needs a server RESTART, and a restart kills
+REM every open session -- the operator is disconnected mid-task. Worse, a tab
+REM left sitting on the map keeps polling the run_every=2 watcher fragments
+REM that died with the old process: "The fragment with id ... does not exist
+REM anymore", once every two seconds, for as long as that tab stays open. It
+REM heals only when that tab is reloaded, and until then that tab's map has
+REM silently stopped following the second screen.
+REM
+REM So the trade is ~1.2 s per save against a dropped session per change.
+REM auto stays the default for development. Keep nowatch for demo day, where
+REM nothing is being edited and a mid-demo reload is the only real risk.
 REM
 REM Which is what .streamlit\config.toml asks for already; this script's
 REM --server.fileWatcherType auto is the override, and this turns it off
