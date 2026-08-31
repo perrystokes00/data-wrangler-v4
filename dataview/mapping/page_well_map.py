@@ -11380,6 +11380,27 @@ def run(engine=None):
         _cur = st.session_state.get("wm_map_db", _conn_db)
         if _cur and _cur not in _db_options:
             _db_options = [_cur] + _db_options
+        # ── OPEN ON THE DATABASE YOU CONNECTED TO ───────────────────────
+        # _db_options is every database holding dataview.dv_well, ORDERED BY
+        # NAME, and this selectbox has a key and no index -- so Streamlit
+        # picks the first option whenever the key is unset, i.e. on every
+        # fresh session. "DataView" sorts before "DataView_Demo", so the map
+        # opened on the older database while the connection was on the newer
+        # one, and nothing said so.
+        #
+        # It fails LATER and somewhere else, which is what makes it costly:
+        # DataView carries dv_well and most of the federation views, so the
+        # map draws. It is missing v_well_master_arm, so the H3 density query
+        # dies with "Invalid object name" naming a view that plainly exists
+        # -- in the other database. Reported exactly that way.
+        #
+        # SEEDED, NOT PASSED AS index=. Once a widget's key holds a value
+        # Streamlit ignores index= entirely; that is the same trap that made
+        # Disconnect preserve the wrong database in bf012d5. setdefault
+        # before the widget is drawn is the supported way to say "this is the
+        # default", and it leaves a deliberate later choice alone.
+        if _conn_db and _conn_db in _db_options:
+            st.session_state.setdefault("wm_map_db", _conn_db)
         _map_db = st.selectbox("📊 Database", _db_options, key="wm_map_db",
                                 help="Which database the map reads from "
                                      "(engine + bcp). Only databases carrying "
