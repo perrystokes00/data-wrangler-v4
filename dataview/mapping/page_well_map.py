@@ -15603,21 +15603,58 @@ def run(engine=None):
         # should not cost the selection it was constraining.
         #
         # KEY ENDS "_clear", which _is_action_key() already excludes.
+        # ── ENABLED BY WHAT CONSTRAINS THE LAYERS, NOT BY _clip_box ─────
+        # "How do I get townships back to the full state?" ... "I don't see
+        # any clear box." ... "I see it below Lease strip but it is greyed
+        # out."
+        #
+        # It was greyed because it asked about _clip_box -- the rectangle
+        # handler's key -- while the geography layers clip to
+        #
+        #     _layer_bounds = _drawn_bounds or _clip_bounds_now()
+        #
+        # and _drawn_bounds is a DIFFERENT thing: _clip_bounds_now's own
+        # docstring calls it "whatever last moved the camera" and warns that,
+        # being oneshot=False, IT THEN PERSISTS. So a drill, a saved place or
+        # Use current view leaves it holding that area, the township query
+        # stays narrowed to it, and the one control that drops a constraint
+        # is disabled because no rectangle was ever drawn. A constraint with
+        # no way out.
+        #
+        # Same shape as the invariant keyed on FILE_NAME when the identity
+        # was FILE_PATH: the right question asked of the wrong key, and it
+        # cannot ever come out right.
+        #
+        # So the button now asks what the LAYERS ask, and clears all of it.
+        _constraints = [_k for _k in ("_clip_box", "_drawn_bounds",
+                                      "_active_drill_bbox")
+                        if st.session_state.get(_k)]
         if _rvb.button("✗ Clear box", key="wm_clip_clear",
                        use_container_width=True,
-                       disabled=not st.session_state.get("_clip_box"),
-                       help=("Drop the drawn box and stop clipping. Wells, "
-                             "tray and view are kept — ✗ Clear wells is for "
-                             "those."
-                             if st.session_state.get("_clip_box") else
-                             "Nothing to clear — no box has been drawn.")):
+                       disabled=not _constraints,
+                       help=("Drop every area constraint (%s) and stop "
+                             "clipping, so layers cover the whole state "
+                             "again. Wells, tray and view are kept — "
+                             "✗ Clear wells is for those."
+                             % ", ".join(_c.lstrip("_") for _c in _constraints)
+                             if _constraints else
+                             "Nothing to clear — no area constraint is set.")):
             # A REQUEST for the toggle: the Clip checkbox is built later on
             # this same run, and assigning a widget its own key after it
             # exists raises on a LATER run -- scar #6.
             st.session_state.pop("_clip_box", None)
             st.session_state.pop("_place_shapes", None)
+            # THE TWO THAT USED TO SURVIVE IT. _drawn_bounds is what the
+            # geography layers actually read, and _active_drill_bbox is the
+            # circle equivalent; leaving either behind means pressing Clear
+            # box and watching nothing widen.
+            st.session_state.pop("_drawn_bounds", None)
+            st.session_state.pop("_drawn_bounds_oneshot", None)
+            st.session_state.pop("_drawn_bounds_exact", None)
+            st.session_state.pop("_active_drill_bbox", None)
             st.session_state["_clip_off_request"] = True
-            _say("[map] clear box: constraint dropped")
+            _say("[map] clear box: constraint dropped (%s)"
+                 % (", ".join(_constraints) or "none"))
             st.rerun()
         if _rv1.button("🎯 Reset view", key="wells_reset_view",
                        use_container_width=True,
