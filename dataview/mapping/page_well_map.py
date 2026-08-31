@@ -13241,9 +13241,39 @@ def run(engine=None):
         # serialise are PYTHON-side costs, and the 16x came from replacing
         # 14,727 folium.Polygon objects with one GeoJson layer; canvas only
         # changes how the browser paints what it is given. That change stays.
+        # ── THE ACTIVE BASEMAP IS ADDED BY NAME, NOT BY URL ─────────────
+        # "When I select Esri topo it puts a very long line so I can't get to
+        # the wetlands to turn it on."
+        #
+        # folium names a base layer after its TILES argument, and for every
+        # basemap here except OpenStreetMap that argument is a URL template.
+        # So the layer control listed the SELECTED basemap as
+        #
+        #   https://server.arcgisonline.com/arcgis/rest/services/
+        #   world_topo_map/mapserver/tile/{z}/{y}/{x}
+        #
+        # on one unbroken line, which stretched the expanded control to 568px
+        # -- measured -- and pushed the overlay entries below it out of
+        # reach. Only the ACTIVE one was affected: the alternatives loop below
+        # already passes name=, which is why they read correctly and this one
+        # did not.
+        #
+        # Map(name=...) does NOT fix it -- folium ignores it and still uses
+        # the URL; checked. The map is built with no tiles and the chosen
+        # basemap added as an explicit, named TileLayer instead, which is
+        # exactly what the loop below does for the others.
         m = folium.Map(location=[lat0, lon0], zoom_start=zoom0,
-                       tiles=bm["tiles"], attr=bm["attr"],
+                       tiles=None,
                        max_zoom=bm.get("max_zoom", 19))
+        try:
+            folium.TileLayer(
+                tiles=bm["tiles"], attr=bm["attr"], name=basemap,
+                max_zoom=bm.get("max_zoom", 19), overlay=False,
+                control=True, show=True).add_to(m)
+        except Exception as _bmexc:
+            # NOT SWALLOWED. A map with no basemap at all is a grey rectangle
+            # and reads as a broken page, so say which basemap failed.
+            _say("[map] basemap %r failed to add: %s" % (basemap, _bmexc))
 
         # ── shapes saved with a place ───────────────────────────────────
         # AN OUTLINE, NOT A DRAW-TOOL SHAPE. These come back as a GeoJson
