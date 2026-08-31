@@ -960,11 +960,14 @@ with st.sidebar:
     # Connect is the first thing anyone touches, so it is the first thing in
     # the sidebar. Reset sits under it -- it is a cold start, wanted rarely
     # and never before you have tried connecting.
+    # NO help= HERE, on request. Streamlit renders help as a hover tooltip
+    # that pops up over the sidebar, and this one was three lines long on a
+    # button whose label already says what it does. What it used to say is
+    # kept here, where it costs nobody a popup: Reset is a cold start --
+    # it disposes the connection, clears every cache and wipes all session
+    # state, landing on a fresh not-connected app, like restarting Streamlit.
     if st.button("🔄  Reset", key="global_reset",
-                 use_container_width=True,
-                 help="Cold start: disposes the connection, clears all cached "
-                      "data and every bit of session state, and returns to a "
-                      "fresh, not-connected app — like restarting Streamlit."):
+                 use_container_width=True):
         try:
             if S.get("engine") is not None:
                 S.engine.dispose()
