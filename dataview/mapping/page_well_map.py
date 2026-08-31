@@ -16850,27 +16850,44 @@ def run(engine=None):
                         f"All {len(_all_uwis)}", use_container_width=True)
                     _pick_none = _f3.form_submit_button(
                         "None", use_container_width=True)
-                    _f4.markdown(
-                        f"<div style='font-size:11px;color:#888;padding:9px 0 0 6px'>"
-                        f"{len(_selected)} of {len(_all_uwis)} selected</div>",
-                        unsafe_allow_html=True)
+                    # _f4 is left empty on purpose -- it holds the buttons to
+                    # their width. The count that used to live here is drawn
+                    # BELOW the form now; see the Apply handler.
 
                 if _pick_all or _pick_none:
                     st.session_state[_sel_key] = _all_uwis if _pick_all else []
                     st.session_state["tray_grid_nonce"] = _nonce + 1
+                    # These two DO need the rerun: they re-default the editor,
+                    # and Streamlit refuses a write to a live widget's key, so
+                    # the nonce bump only takes effect on a fresh run.
                     st.rerun()
                 if _apply:
                     _selected = [str(r["UWI"]) for _, r in _tray_edit.iterrows()
                                  if bool(r["Select"])]
                     st.session_state[_sel_key] = _selected
-                    # Repaint once so the count and the buttons below agree with
-                    # what was just applied. The "N of M selected" caption is
-                    # drawn INSIDE the form, i.e. before this handler runs, so
-                    # without this it reports the previous selection and reads
-                    # like the Apply did nothing. One rerun per Apply is the
-                    # deliberate cost; the point of the form is that ticking
-                    # itself no longer causes one.
-                    st.rerun()
+
+                # ── THE COUNT, BELOW THE FORM, WHICH IS WHY APPLY IS FREE ───
+                # It used to sit INSIDE the form, so it was drawn before the
+                # Apply handler ran and reported the PREVIOUS selection --
+                # reading as though Apply had done nothing. The answer was an
+                # st.rerun(), described in the comment here as "the deliberate
+                # cost" of one repaint.
+                #
+                # That price was set before the map got expensive. On this page
+                # a rerun is not a repaint: it rebuilds the whole map, 2-4 s,
+                # and Apply has nothing to do with the map. Reported as "the
+                # results well apply selection is really slow for some unknown
+                # reason" -- the reason is that it was redrawing the map.
+                #
+                # Nothing needed the rerun. `_selected` is already reassigned
+                # from the editor above, so every reader below this line --
+                # selected_in_results, Documents scoping, Scout Tickets -- sees
+                # the new selection in THIS run. Only the caption was stale,
+                # and a caption drawn after the handler cannot be.
+                st.markdown(
+                    f"<div style='font-size:11px;color:#888;padding:2px 0 6px 6px'>"
+                    f"{len(_selected)} of {len(_all_uwis)} selected</div>",
+                    unsafe_allow_html=True)
 
                 selected_in_results = list(_selected)
                 st.markdown(
