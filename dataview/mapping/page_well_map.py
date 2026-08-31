@@ -17229,7 +17229,12 @@ def run(engine=None):
                                  disabled=not selected_in_results):
                         st.session_state["show_summary"] = True
                         st.session_state["_summary_uwis"] = selected_in_results
-                        st.rerun(scope="app")   # Scout Tickets: page/map
+                        # FRAGMENT SCOPE, because the ticket now renders
+                        # inside this fragment. It used to need the whole app
+                        # only because its panel was drawn below the map, so
+                        # the map was rebuilt to show a report that never
+                        # asks it anything.
+                        st.rerun()
                 with p2:
                     _docs_uwis = selected_in_results or result_uwis
                     if st.button("📄 Documents", key="open_docs_btn",
@@ -17279,106 +17284,118 @@ def run(engine=None):
                         st.session_state.pop("grid_visible_toggle", None)
                         st.rerun(scope="app")   # Clear tray: page/map
 
+
+        # ── THE SCOUT TICKET RENDERS INSIDE THE FRAGMENT ────────────────
+        # "Nothing should cause a rerun of the map." Documents and Export
+        # already cost nothing: run() reads their page flags near the top and
+        # RETURNS before the map is built, so their app-scoped rerun never
+        # reaches it. Scout Tickets was the odd one out -- its panel renders
+        # inline, below the map, so it needed the whole app and the map was
+        # rebuilt to display a report that does not use it.
+        #
+        # Rendering it here makes the button fragment-scoped like Apply, and
+        # its two Close buttons with it. Nothing about a scout ticket asks
+        # the map a question.
+            # ── Scout Ticket panel — renders below the Object Tray ──────────
+            _summary_uwis = st.session_state.get("_summary_uwis", [])
+            if st.session_state.get("show_summary") and _summary_uwis:
+                # Cache HTML — only rebuild when selection changes
+                cache_key = tuple(_summary_uwis)
+                if st.session_state.get("_summary_cache_key") != cache_key:
+                    _html = ""
+                    for uwi in _summary_uwis:
+                        well_row = uwi_index.get(uwi)
+                        if not well_row:
+                            continue
+                        # Dispatch by identifier shape: GOM wells are keyed by
+                        # a UUID well_id (36 chars, dashed); dv_well wells use
+                        # PPDM-style UWIs. A dict tagged _source="gom" (set by
+                        # the GOM popup-click handler) is the explicit signal;
+                        # the UUID-shape check is the fallback.
+                        _is_gom = (
+                            well_row.get("_source") == "gom"
+                            or (isinstance(uwi, str)
+                                and len(uwi) == 36
+                                and uwi.count("-") == 4)
+                        )
+                        if _is_gom:
+                            _html += _build_gom_scout_ticket_html(uwi, well_row, engine)
+                        else:
+                            _html += _build_scout_ticket_html(uwi, well_row, engine)
+                        _html += "<div style='page-break-after:always'></div>"
+                    st.session_state["_summary_html"]      = _html
+                    st.session_state["_summary_cache_key"] = cache_key
+
+                all_html = st.session_state.get("_summary_html", "")
+                full_doc = _full_html_doc(all_html, f"Scout Tickets — {len(_summary_uwis)} wells")
+                fn       = f"Scout_Tickets_{len(_summary_uwis)}_wells.html"
+
+                _hdr = ("Scout Ticket" if len(_summary_uwis) == 1
+                        else f"Scout Tickets — {len(_summary_uwis)} wells")
+                st.markdown(f"#### 📋 {_hdr}")
+                b1, bp, b2, _ = st.columns([1, 1, 1, 3])
+                b1.download_button(
+                    "⬇ Save Report", data=full_doc.encode(),
+                    file_name=fn, mime="text/html",
+                    key="save_report_dl", use_container_width=True)
+
+                # ── PDF, generated not printed ──────────────────────────────────
+                # _build_batch_pdf() has existed since the multi-well panel was
+                # written and was never wired to a button, so the only route to a
+                # PDF was "Save Report" -> open the HTML -> browser Print. That
+                # path (and Windows' "Microsoft Print to PDF" in particular)
+                # flattens the text to vector outlines: the file looks right and
+                # has ZERO extractable characters, so the File Catalog can't read
+                # a single field out of it. WeasyPrint writes a real text layer.
+                #
+                # Cached in session_state against the same cache_key the HTML uses,
+                # so switching wells invalidates it and re-rendering the page
+                # doesn't regenerate a PDF nobody asked for.
+                _pdf_key = f"_summary_pdf_{cache_key}"
+                if bp.button("⬇ PDF", key="summary_pdf_btn",
+                             use_container_width=True,
+                             help="Generate a PDF with a real text layer. Prefer "
+                                  "this over printing the saved HTML — printed "
+                                  "PDFs contain no searchable or extractable text."):
+                    with st.spinner(f"Rendering {len(_summary_uwis)} ticket(s)…"):
+                        _pdf, _err = _scout_ticket_pdf(
+                            all_html, f"Scout Tickets — {len(_summary_uwis)} wells",
+                            return_error=True)
+                    st.session_state[_pdf_key] = _pdf
+                    st.session_state[f"{_pdf_key}_err"] = _err
+                if st.session_state.get(_pdf_key):
+                    st.download_button(
+                        "📄 Save PDF", data=st.session_state[_pdf_key],
+                        file_name=f"Scout_Tickets_{len(_summary_uwis)}_wells.pdf",
+                        mime="application/pdf", key="summary_pdf_dl")
+                elif st.session_state.get(f"{_pdf_key}_err"):
+                    st.error(st.session_state[f"{_pdf_key}_err"])
+
+                if b2.button("✕ Close", key="close_summary", use_container_width=True):
+                    st.session_state["show_summary"] = False
+                    st.session_state["_summary_uwis"] = []
+                    st.rerun()
+
+                st.markdown(all_html, unsafe_allow_html=True)
+                # The ticket's photos are thumbnails and always will be; this is
+                # where the full-size ones live. See _render_photo_gallery.
+                try:
+                    for _u in _summary_uwis[:1]:
+                        _render_mud_log(engine, _u)
+                except Exception as _mlexc:
+                    st.caption("Mud log unavailable: %s" % _mlexc)
+                try:
+                    _render_photo_gallery(engine, _summary_uwis)
+                except Exception as _galexc:
+                    st.caption("Core photo gallery unavailable: %s" % _galexc)
+                if st.button("✕ Close scout ticket", key="close_summary_bottom",
+                             use_container_width=True):
+                    st.session_state["show_summary"] = False
+                    st.session_state["_summary_uwis"] = []
+                    st.rerun()
+                st.markdown("---")
+
         _results_panel()
-
-        # ── Scout Ticket panel — renders below the Object Tray ──────────
-        _summary_uwis = st.session_state.get("_summary_uwis", [])
-        if st.session_state.get("show_summary") and _summary_uwis:
-            # Cache HTML — only rebuild when selection changes
-            cache_key = tuple(_summary_uwis)
-            if st.session_state.get("_summary_cache_key") != cache_key:
-                _html = ""
-                for uwi in _summary_uwis:
-                    well_row = uwi_index.get(uwi)
-                    if not well_row:
-                        continue
-                    # Dispatch by identifier shape: GOM wells are keyed by
-                    # a UUID well_id (36 chars, dashed); dv_well wells use
-                    # PPDM-style UWIs. A dict tagged _source="gom" (set by
-                    # the GOM popup-click handler) is the explicit signal;
-                    # the UUID-shape check is the fallback.
-                    _is_gom = (
-                        well_row.get("_source") == "gom"
-                        or (isinstance(uwi, str)
-                            and len(uwi) == 36
-                            and uwi.count("-") == 4)
-                    )
-                    if _is_gom:
-                        _html += _build_gom_scout_ticket_html(uwi, well_row, engine)
-                    else:
-                        _html += _build_scout_ticket_html(uwi, well_row, engine)
-                    _html += "<div style='page-break-after:always'></div>"
-                st.session_state["_summary_html"]      = _html
-                st.session_state["_summary_cache_key"] = cache_key
-
-            all_html = st.session_state.get("_summary_html", "")
-            full_doc = _full_html_doc(all_html, f"Scout Tickets — {len(_summary_uwis)} wells")
-            fn       = f"Scout_Tickets_{len(_summary_uwis)}_wells.html"
-
-            _hdr = ("Scout Ticket" if len(_summary_uwis) == 1
-                    else f"Scout Tickets — {len(_summary_uwis)} wells")
-            st.markdown(f"#### 📋 {_hdr}")
-            b1, bp, b2, _ = st.columns([1, 1, 1, 3])
-            b1.download_button(
-                "⬇ Save Report", data=full_doc.encode(),
-                file_name=fn, mime="text/html",
-                key="save_report_dl", use_container_width=True)
-
-            # ── PDF, generated not printed ──────────────────────────────────
-            # _build_batch_pdf() has existed since the multi-well panel was
-            # written and was never wired to a button, so the only route to a
-            # PDF was "Save Report" -> open the HTML -> browser Print. That
-            # path (and Windows' "Microsoft Print to PDF" in particular)
-            # flattens the text to vector outlines: the file looks right and
-            # has ZERO extractable characters, so the File Catalog can't read
-            # a single field out of it. WeasyPrint writes a real text layer.
-            #
-            # Cached in session_state against the same cache_key the HTML uses,
-            # so switching wells invalidates it and re-rendering the page
-            # doesn't regenerate a PDF nobody asked for.
-            _pdf_key = f"_summary_pdf_{cache_key}"
-            if bp.button("⬇ PDF", key="summary_pdf_btn",
-                         use_container_width=True,
-                         help="Generate a PDF with a real text layer. Prefer "
-                              "this over printing the saved HTML — printed "
-                              "PDFs contain no searchable or extractable text."):
-                with st.spinner(f"Rendering {len(_summary_uwis)} ticket(s)…"):
-                    _pdf, _err = _scout_ticket_pdf(
-                        all_html, f"Scout Tickets — {len(_summary_uwis)} wells",
-                        return_error=True)
-                st.session_state[_pdf_key] = _pdf
-                st.session_state[f"{_pdf_key}_err"] = _err
-            if st.session_state.get(_pdf_key):
-                st.download_button(
-                    "📄 Save PDF", data=st.session_state[_pdf_key],
-                    file_name=f"Scout_Tickets_{len(_summary_uwis)}_wells.pdf",
-                    mime="application/pdf", key="summary_pdf_dl")
-            elif st.session_state.get(f"{_pdf_key}_err"):
-                st.error(st.session_state[f"{_pdf_key}_err"])
-
-            if b2.button("✕ Close", key="close_summary", use_container_width=True):
-                st.session_state["show_summary"] = False
-                st.session_state["_summary_uwis"] = []
-                st.rerun()
-
-            st.markdown(all_html, unsafe_allow_html=True)
-            # The ticket's photos are thumbnails and always will be; this is
-            # where the full-size ones live. See _render_photo_gallery.
-            try:
-                for _u in _summary_uwis[:1]:
-                    _render_mud_log(engine, _u)
-            except Exception as _mlexc:
-                st.caption("Mud log unavailable: %s" % _mlexc)
-            try:
-                _render_photo_gallery(engine, _summary_uwis)
-            except Exception as _galexc:
-                st.caption("Core photo gallery unavailable: %s" % _galexc)
-            if st.button("✕ Close scout ticket", key="close_summary_bottom",
-                         use_container_width=True):
-                st.session_state["show_summary"] = False
-                st.session_state["_summary_uwis"] = []
-                st.rerun()
-            st.markdown("---")
 
 
 # Wrap the query and layer functions. MUST BE LAST: it walks globals(),
