@@ -5488,6 +5488,15 @@ def _render_seis_gallery(picks):
     three lines that failed.
     """
     _shown = [h for h in picks if h.get("path")][:SEIS_GALLERY_MAX]
+    # NOTHING TO STACK IS A SENTENCE, NOT AN EMPTY PAGE. Every pick can lack
+    # a path -- geometry is catalogued separately from files -- and the loop
+    # below then draws nothing at all, which is indistinguishable from the
+    # gallery being broken. Say which, and say how to get back.
+    if not _shown:
+        st.info("None of the %d picked line(s) has a file behind it, so "
+                "there is no section to stack. Untick **Show all** to go "
+                "back to the single view." % len(picks))
+        return
     if len(picks) > len(_shown):
         st.info("Showing the first %d of %d. Clear some, or step through "
                 "them with ◀ ▶." % (len(_shown), len(picks)))
@@ -5563,6 +5572,21 @@ def _render_seis_basket():
     """
     _multi = list(st.session_state.get("_seis_multi") or [])
     if len(_multi) < 2:
+        # ── THE CHECKBOX BELOW IS NOT DRAWN ON THIS PATH ────────────────
+        # ...so a True left in its key can never be turned off again from
+        # the page, and `seis_basket_all` is in the persist set, which
+        # self-assigns it on every run precisely so it survives. The two
+        # together stranded the viewer: Show all with a basket that later
+        # emptied left the flag set with no control anywhere to clear it,
+        # and _render_seis_pick returns after the gallery, so the single
+        # section never drew again. Reported as a blank page after Show
+        # all, and again as "we need to put the seismic viewer back
+        # inline".
+        #
+        # Cleared HERE because here is before any widget on this path
+        # exists -- setting a widget's own key before it is instantiated
+        # is the legal half of scar #6; after, it raises on a later run.
+        st.session_state["seis_basket_all"] = False
         return
     st.caption("%d lines picked from the map." % len(_multi))
     _labels = [_seis_label(h) for h in _multi]
@@ -5812,8 +5836,14 @@ def _render_seis_pick(lines=None, df3d=None):
 
     _render_seis_area_add(lines, df3d)
     _render_seis_basket()
-    if st.session_state.get("seis_basket_all"):
-        _render_seis_gallery(st.session_state.get("_seis_multi") or [])
+    # THE GALLERY REPLACES THE SINGLE VIEW, so it may only do that when it
+    # actually has something to draw. Gated on the flag ALONE, an empty
+    # basket rendered nothing and returned, and the whole viewer -- header,
+    # trace headers, section -- silently vanished. A branch that can produce
+    # no output must not also be a return.
+    _gal = list(st.session_state.get("_seis_multi") or [])
+    if st.session_state.get("seis_basket_all") and _gal:
+        _render_seis_gallery(_gal)
         return
 
     _pick = st.session_state.get("_seis_pick")
@@ -16642,12 +16672,31 @@ def run(engine=None):
         # -- The picked SEG-Y, opened in the shared file viewer ----------
         # Only when seismic is in play: the chooser is useless otherwise,
         # and both queries would run for a user who never asked for it.
-        if "geo_seismic" in active_db or st.session_state.get("_seis_pick"):
+        # THIS USED TO FAIL INTO A print() AND NOTHING ELSE. A panel that
+        # throws then leaves no mark anywhere the operator can see -- the
+        # seismic viewer is simply absent, which reads as "it was moved to
+        # the second screen" rather than "it raised". Reported exactly that
+        # way: "we need to put the seismic viewer back inline."
+        #
+        # The traceback goes on the page now. It is a diagnostic, not a
+        # crash: the map above it has already drawn and stays usable.
+        _seis_gate = ("geo_seismic" in active_db
+                      or st.session_state.get("_seis_pick"))
+        if _seis_gate:
             try:
                 _render_seis_pick(_seismic_line_paths(engine),
                                   _qry_seismic_3d(engine))
             except Exception as _spe:
-                print(f"[seis_panel] {_spe}")
+                import traceback as _sptb
+                st.error("The seismic panel could not draw: %s" % _spe)
+                st.caption("The map above is unaffected. Full traceback:")
+                st.code(_sptb.format_exc(), language="text")
+                print("[seis_panel] " + _sptb.format_exc())
+        elif st.session_state.get("wm_debug_seis"):
+            # AND SAY WHEN IT WAS THE GATE, not a failure. "Nothing drew" has
+            # two causes and they need different repairs.
+            st.caption("Seismic panel: not shown — the Seismic layer is off "
+                       "and no line is picked.")
 
         # ── Over-cap drill results ──────────────────────────────────────
         # Drills that returned more than _TRAY_AUTO_ADD_CAP wells stash their
