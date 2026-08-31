@@ -2074,8 +2074,60 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                     // null the grid was never stood down, and a grid switched
                     // off in the layer control is not switched back on behind
                     // the reader's back.
+                    // ── THE WAY BACK, WHERE IT CANNOT BE LOST ───────────
+                    // "Where is the popup if I am zoomed into several
+                    // townships." Nowhere: the popup is anchored to the one
+                    // township that was clicked, and it is the only thing
+                    // carrying the way back. Close it, or pan off it, and
+                    // the map is left focused with no visible undo -- the
+                    // amber frame around the focused township is
+                    // interactive:false, so it cannot even be clicked to
+                    // bring the popup back.
+                    //
+                    // So the link also goes on a control, which sits in the
+                    // corner of the map for exactly as long as the grid is
+                    // stood down. Same backOut(), a place that does not move
+                    // and cannot be dismissed by accident.
+                    //
+                    // L.DomEvent.disableClickPropagation, or clicking it
+                    // reaches the map underneath and the click that undoes
+                    // the focus also drills whatever is beneath the button.
+                    function twpBackControl(label) {
+                        if (mp.__dv_twp_ctl) {
+                            try { mp.removeControl(mp.__dv_twp_ctl); }
+                            catch (e) {}
+                            mp.__dv_twp_ctl = null;
+                        }
+                        if (!label) { return; }
+                        var K = L.Control.extend({
+                            options: {position: 'topright'},
+                            onAdd: function () {
+                                var d = L.DomUtil.create('div', '');
+                                d.style.cssText =
+                                    'background:#1c1917;border:1px solid ' +
+                                    '#f59e0b;border-radius:6px;padding:5px 9px;' +
+                                    'font:600 11px system-ui;color:#f59e0b;' +
+                                    'cursor:pointer;box-shadow:0 1px 4px ' +
+                                    'rgba(0,0,0,.4)';
+                                d.innerHTML = '&#8617; show all townships' +
+                                    '<div style="font:400 10px system-ui;' +
+                                    'color:#a8a29e">showing ' + label +
+                                    ' only</div>';
+                                L.DomEvent.disableClickPropagation(d);
+                                L.DomEvent.on(d, 'click', function (ev) {
+                                    L.DomEvent.preventDefault(ev);
+                                    backOut();
+                                });
+                                return d;
+                            }
+                        });
+                        mp.__dv_twp_ctl = new K();
+                        mp.addControl(mp.__dv_twp_ctl);
+                    }
+
                     function backOut() {
                         window.DV_TWP_FOCUS = null;
+                        twpBackControl(null);
                         if (mp.__dv_twp_leases) {
                             try { mp.removeLayer(mp.__dv_twp_leases); }
                             catch (e) {}
@@ -2125,6 +2177,11 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                             fill: false, color: '#f59e0b', weight: 2,
                             opacity: 0.9, interactive: false
                         }).addTo(mp);
+                        // The undo appears at the same moment the grid goes,
+                        // and names what is being shown -- "showing 31N 97W
+                        // only" answers "why can I only see one township"
+                        // without anyone having to work it out.
+                        twpBackControl(p.lab);
                     }
                     var b = layer.getBounds();
                     try { L.DomEvent.stopPropagation(ev); } catch (e) {}
