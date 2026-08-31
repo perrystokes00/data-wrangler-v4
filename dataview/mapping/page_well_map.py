@@ -17413,26 +17413,89 @@ def _lease_pref_mtime():
     return _sig
 
 
+# ── THE LEASE CHOICE, DECLARED ONCE ────────────────────────────────────────
+# Every key the panel writes, with the type to coerce it to and the default
+# that means "not asked". The reader below is built FROM this list rather
+# than spelling the keys out a second time.
+#
+# WHY IT IS A LIST AND NOT SIX LINES OF CODE: it was six lines of code, and
+# it read mode, colour_by, source, status, operator and min_acres. Nine more
+# filters were added afterwards -- state, county, elevation, the two
+# distances, the two name lists, and the two wetland keys -- and the panel
+# writes all of them to the file. This function was never extended, so it
+# dropped them on the way back in, in silence.
+#
+# The result: with the lease strip ON the filters worked, because the map
+# takes them straight from the widgets; with it OFF, or driven from the
+# second screen, the same filters were written, discarded here, and the map
+# drew everything while the panel's own count said otherwise. Reported as
+# "it doesn't look like the filters to the nearest town are working".
+#
+# This is the fourth entry in CLAUDE.md's "lists that must agree" in a new
+# place: a writer and a reader of one shape, with nothing checking that they
+# still describe the same thing.
+_LEASE_CHOICE_SCHEMA = (
+    # key             coerce                       default
+    ("mode",          "mode",                      ""),
+    ("colour_by",     "str",                       ""),
+    ("source",        "list",                      None),
+    ("status",        "list",                      None),
+    ("operator",      "str",                       ""),
+    ("min_acres",     "int",                       0),
+    ("state",         "list",                      None),
+    ("county",        "list",                      None),
+    ("elev_min",      "numornone",                 None),
+    ("elev_max",      "numornone",                 None),
+    ("miles_city",    "float",                     0.0),
+    ("miles_hwy",     "float",                     0.0),
+    ("towns",         "list",                      None),
+    ("roads",         "list",                      None),
+    ("wet_min_pct",   "float",                     0.0),
+    ("wet_types",     "list",                      None),
+)
+
+
 def _map_lease_choice() -> dict:
     """What the second screen asked the map to show. Always a full dict.
 
     DEFAULTS THAT MATCH TODAY'S BEHAVIOUR, so a database with no prefs file
     draws what it drew before this existed. A screen nobody has opened must
     not change the map.
+
+    Built from _LEASE_CHOICE_SCHEMA so it cannot fall behind the writer
+    again -- see the comment on that list for what falling behind cost.
     """
     try:
         _p = (_load_user_prefs().get(MAP_LEASE_PREF) or {})
     except Exception:
         _p = {}
-    _mode = str(_p.get("mode") or "").strip().lower()
-    return {
-        "mode": _mode if _mode in LEASE_MODES else "",
-        "colour_by": str(_p.get("colour_by") or "").strip(),
-        "source": list(_p.get("source") or []),
-        "status": list(_p.get("status") or []),
-        "operator": str(_p.get("operator") or "").strip(),
-        "min_acres": _p.get("min_acres") or 0,
-    }
+    _out = {}
+    for _k, _kind, _dflt in _LEASE_CHOICE_SCHEMA:
+        _v = _p.get(_k)
+        try:
+            if _kind == "mode":
+                _m = str(_v or "").strip().lower()
+                _out[_k] = _m if _m in LEASE_MODES else ""
+            elif _kind == "str":
+                _out[_k] = str(_v or "").strip()
+            elif _kind == "list":
+                _out[_k] = list(_v or [])
+            elif _kind == "int":
+                _out[_k] = int(_v or 0)
+            elif _kind == "float":
+                _out[_k] = float(_v or 0)
+            elif _kind == "numornone":
+                # None is MEANINGFUL for the elevation pair: it is the
+                # difference between "no elevation filter" and "from 0 ft",
+                # and 0 ft is a real answer in a state whose lowest lease
+                # sits at 3,363.
+                _out[_k] = None if _v is None else float(_v)
+        except (TypeError, ValueError):
+            _out[_k] = _dflt if _dflt is not None else (
+                [] if _kind == "list" else _dflt)
+        if _kind == "list" and _out.get(_k) is None:
+            _out[_k] = []
+    return _out
 
 
 def _write_map_lease(**kw) -> None:
