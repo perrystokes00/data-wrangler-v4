@@ -6810,6 +6810,158 @@ tr:nth-child(even) td {{background:#f1f5f9;}}
 </body></html>"""
 
 
+def _scout_pdf_reportlab(html_body, title="Scout Tickets"):
+    """The scout ticket as a PDF, with no native dependencies. (pdf, err).
+
+    THE FALLBACK, AND WHY IT IS NOT A SCREENSHOT. WeasyPrint gives the nicer
+    page but needs the GTK/Pango runtime on Windows, which pip cannot
+    install; printing the HTML through a browser needs no runtime at all and
+    is the obvious substitute -- and it is the one thing that must not be
+    done here. A browser print flattens every glyph to a vector outline, so
+    the file has ZERO extractable characters and the File Catalog cannot
+    read a word of it. Same pixels, unusable downstream.
+
+    ReportLab is pure Python, already in requirements, and emits real text.
+    So this reads the ticket's own markup rather than its appearance: the
+    ticket is built from _section() headings and _tbl(_th + _td) tables, and
+    those become platypus headings and Tables. It will not match WeasyPrint
+    pixel for pixel and is not trying to -- it is trying to be a scout
+    ticket you can search, quote and catalogue.
+
+    Returns (None, reason) rather than raising: the caller offers a download
+    button, and a button that explodes is worse than one that explains.
+    """
+    try:
+        from io import BytesIO
+        from html.parser import HTMLParser
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                        Table, TableStyle, PageBreak)
+    except ImportError as _e:
+        return None, ("ReportLab is not available either — "
+                      "pip install reportlab (%s)" % _e)
+
+    class _Scrape(HTMLParser):
+        """Cells, rows and headings, in document order.
+
+        DELIBERATELY SHALLOW. It does not try to understand the ticket's
+        CSS -- only that a <td>/<th> is a cell, a <tr> ends a row, a <table>
+        ends a block, and the section bar is a heading. Anything cleverer
+        would have to track the ticket's markup as it changes, and a PDF
+        that silently loses a section is the confident-wrong-output failure
+        this repo keeps paying for.
+        """
+
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.blocks = []          # ("head", text) | ("table", rows)
+            self._rows, self._cells, self._buf = [], [], []
+            self._in_cell = False
+            self._hdr_row = False
+            self._page_break = False
+
+        def handle_starttag(self, tag, attrs):
+            a = dict(attrs)
+            if tag in ("td", "th"):
+                self._in_cell, self._buf = True, []
+                self._hdr_row = self._hdr_row or (tag == "th")
+            elif tag == "tr":
+                self._cells, self._hdr_row = [], False
+            elif tag == "div" and "page-break-after" in (a.get("style") or ""):
+                self._page_break = True
+
+        def handle_endtag(self, tag):
+            if tag in ("td", "th"):
+                self._cells.append(" ".join("".join(self._buf).split()))
+                self._in_cell = False
+            elif tag == "tr":
+                if self._cells:
+                    self._rows.append((self._hdr_row, self._cells))
+                self._cells = []
+            elif tag == "table":
+                if self._rows:
+                    self.blocks.append(("table", self._rows))
+                self._rows = []
+                if self._page_break:
+                    self.blocks.append(("break", None))
+                    self._page_break = False
+
+        def handle_data(self, data):
+            if self._in_cell:
+                self._buf.append(data)
+                return
+            # A SECTION BAR IS JUST TEXT between tables. Short, non-empty
+            # runs outside any cell are the headings and the ticket's own
+            # title lines; long ones are style or script leftovers.
+            t = " ".join(data.split())
+            if t and len(t) <= 90 and not t.startswith(("{", ".", "@")):
+                self.blocks.append(("head", t))
+
+    try:
+        p = _Scrape()
+        p.feed(html_body or "")
+        if not p.blocks:
+            return None, "Nothing to render — the ticket produced no content."
+
+        ss = getSampleStyleSheet()
+        h_style = ParagraphStyle(
+            "dvhead", parent=ss["Heading3"], fontSize=10.5, leading=13,
+            spaceBefore=9, spaceAfter=3, textColor=colors.HexColor("#334155"))
+        cell = ParagraphStyle("dvcell", parent=ss["BodyText"], fontSize=7.4,
+                              leading=9.2, spaceAfter=0)
+        head_cell = ParagraphStyle("dvhcell", parent=cell, fontSize=7.2,
+                                   textColor=colors.white)
+
+        buf = BytesIO()
+        doc = SimpleDocTemplate(
+            buf, pagesize=letter, title=title,
+            leftMargin=0.5 * inch, rightMargin=0.5 * inch,
+            topMargin=0.5 * inch, bottomMargin=0.5 * inch)
+        avail = doc.width
+        story = []
+        for kind, payload in p.blocks:
+            if kind == "break":
+                story.append(PageBreak())
+            elif kind == "head":
+                story.append(Paragraph(payload, h_style))
+            elif kind == "table":
+                rows = [r for _h, r in payload]
+                width = max(len(r) for r in rows)
+                # RAGGED ROWS ARE NORMAL HERE -- the header block writes a
+                # trailing empty cell to square off a four-column row. Pad
+                # rather than reject: a table dropped for being uneven is a
+                # section silently missing from the ticket.
+                rows = [r + [""] * (width - len(r)) for r in rows]
+                flags = [h for h, _r in payload]
+                data = [[Paragraph(c, head_cell if flags[i] else cell)
+                         for c in r] for i, r in enumerate(rows)]
+                t = Table(data, colWidths=[avail / width] * width,
+                          repeatRows=0, hAlign="LEFT")
+                style = [
+                    ("GRID", (0, 0), (-1, -1), 0.25,
+                     colors.HexColor("#cbd5e1")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                    ("TOPPADDING", (0, 0), (-1, -1), 2),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ]
+                for i, is_head in enumerate(flags):
+                    if is_head:
+                        style.append(("BACKGROUND", (0, i), (-1, i),
+                                      colors.HexColor("#475569")))
+                t.setStyle(TableStyle(style))
+                story.append(t)
+                story.append(Spacer(1, 4))
+        doc.build(story)
+        return buf.getvalue(), None
+    except Exception as _e:
+        return None, "%s: %s" % (type(_e).__name__, _e)
+
+
 def _scout_ticket_pdf(html_body, well_name, return_error=False):
     """Render scout-ticket HTML to a real PDF via WeasyPrint.
 
@@ -6834,6 +6986,21 @@ def _scout_ticket_pdf(html_body, well_name, return_error=False):
         err = (f"{type(e).__name__}: {e}\n\n"
                "On Windows WeasyPrint also needs the GTK3 runtime "
                "(Pango/Cairo) on PATH.")
+    # ── FALL BACK RATHER THAN FAIL ──────────────────────────────────────
+    # WeasyPrint is the nicer page and stays first. But it needs a native
+    # runtime pip cannot install, so on a plain Windows box the button was
+    # simply dead -- and the ONE substitute that needs no runtime, printing
+    # through the browser, is the one that must not be used: it flattens
+    # every glyph to an outline and the File Catalog cannot read a word.
+    #
+    # ReportLab is pure Python, already present, and emits real text. The
+    # page is plainer; the PDF is searchable and catalogable, which is what
+    # the ticket is FOR.
+    _pdf, _rl_err = _scout_pdf_reportlab(html_body, well_name)
+    if _pdf:
+        return (_pdf, None) if return_error else _pdf
+    # BOTH REASONS, because "PDF failed" sends the reader to the wrong one.
+    err = "%s\n\nThe built-in fallback also failed — %s" % (err, _rl_err)
     return (None, err) if return_error else None
 
 
