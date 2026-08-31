@@ -9544,6 +9544,110 @@ def _render_saved_places(engine):
             st.warning(_emsg)
 
 
+def _lease_filter_sql(filt, p="lf_"):
+    """The lease panel's filter as SQL, over r (dv_land_right) and g
+    (dv_land_tract_geom). Returns (clauses, params).
+
+    ONE DEFINITION, BECAUSE THE THIRD COPY IS WHERE IT GOES WRONG. The panel
+    counts leases with these predicates and the map draws leases by applying
+    the same choices in the BROWSER; the township shading did neither, so it
+    coloured every township by ALL its leases while the panel above it
+    reported a filtered number. "Lease filters don't filter townships?" --
+    they did not.
+
+    Spelling them a second time inside the township query would have fixed
+    the symptom and created a third list that must agree with two others.
+    That is the shape that cost two bugs in one evening: the mirror registry,
+    and the lease channel that read six of the sixteen keys it was sent.
+
+    PARAMETERS ARE PREFIXED, because these clauses get pasted into a query
+    that has bound names of its own -- the township aggregate already binds
+    :st, :s, :n, :w and :e. A silent collision would not raise; it would
+    answer a different question.
+
+    Every clause is over r or g, so this composes anywhere those two tables
+    are in scope -- as a WHERE in the panel's count, and as an EXISTS in the
+    township join.
+    """
+    _f = filt or {}
+    _c, _pm = [], {}
+
+    def _in(col, vals, tag):
+        if not vals:
+            return
+        _keys = ["%s%s%d" % (p, tag, i) for i in range(len(vals))]
+        _c.append("%s IN (%s)" % (col, ",".join(":" + k for k in _keys)))
+        _pm.update(dict(zip(_keys, vals)))
+
+    _in("r.source", list(_f.get("source") or []), "src")
+    _in("r.lease_status", list(_f.get("status") or []), "sts")
+    _in("g.province_state", list(_f.get("state") or []), "pst")
+
+    _co = list(_f.get("county") or [])
+    if _co:
+        # CONTAINMENT, NOT EQUALITY -- the same rule the browser uses. A
+        # straddling lease is stamped "Campbell & Converse", and county =
+        # 'Campbell' would miss it.
+        _bits = []
+        for _i, _v in enumerate(_co):
+            _k = "%sco%d" % (p, _i)
+            _bits.append("',' + LOWER(REPLACE(REPLACE(REPLACE("
+                         "g.county, ' & ', ','), '&', ','), ', ', ',')) + ',' "
+                         "LIKE :" + _k)
+            _pm[_k] = "%," + str(_v).strip().lower() + ",%"
+        _c.append("(" + " OR ".join(_bits) + ")")
+
+    if _f.get("wet_min_pct"):
+        _c.append("g.wetland_pct >= :%swpmin" % p)
+        _pm["%swpmin" % p] = float(_f["wet_min_pct"])
+    _in("g.wetland_type", list(_f.get("wet_types") or []), "wt")
+
+    if _f.get("elev_min") is not None:
+        _c.append("g.elevation_ft >= :%selmin" % p)
+        _pm["%selmin" % p] = float(_f["elev_min"])
+    if _f.get("elev_max") is not None:
+        _c.append("g.elevation_ft <= :%selmax" % p)
+        _pm["%selmax" % p] = float(_f["elev_max"])
+
+    # NAMED -> the precomputed pair table (distance to THAT town/route).
+    # UNNAMED -> the stamped nearest-anything column. Same control, two
+    # questions. A name with no distance filters nothing, which the panel
+    # now says out loud rather than leaving to be discovered.
+    _mc, _twn = _f.get("miles_city") or 0, list(_f.get("towns") or [])
+    if _mc and _twn:
+        _keys = ["%spn%d" % (p, i) for i in range(len(_twn))]
+        _c.append("EXISTS (SELECT 1 FROM dataview.dv_tract_place_dist d "
+                  "WHERE d.tract_id = g.tract_id AND d.dist_km <= :%sdcity "
+                  "AND d.place_name IN (%s))"
+                  % (p, ",".join(":" + k for k in _keys)))
+        _pm.update(dict(zip(_keys, _twn)))
+        _pm["%sdcity" % p] = float(_mc) * 1.609344
+    elif _mc:
+        _c.append("g.dist_city_km <= :%sdcity" % p)
+        _pm["%sdcity" % p] = float(_mc) * 1.609344
+
+    _mh, _rds = _f.get("miles_hwy") or 0, list(_f.get("roads") or [])
+    if _mh and _rds:
+        _keys = ["%srn%d" % (p, i) for i in range(len(_rds))]
+        _c.append("EXISTS (SELECT 1 FROM dataview.dv_tract_road_dist d "
+                  "WHERE d.tract_id = g.tract_id AND d.dist_km <= :%sdhwy "
+                  "AND d.road_name IN (%s))"
+                  % (p, ",".join(":" + k for k in _keys)))
+        _pm.update(dict(zip(_keys, _rds)))
+        _pm["%sdhwy" % p] = float(_mh) * 1.609344
+    elif _mh:
+        _c.append("g.dist_hwy_km <= :%sdhwy" % p)
+        _pm["%sdhwy" % p] = float(_mh) * 1.609344
+
+    if _f.get("operator"):
+        _c.append("r.operator_name LIKE :%sop" % p)
+        _pm["%sop" % p] = "%" + str(_f["operator"]) + "%"
+    if _f.get("min_acres"):
+        _c.append("g.area_km2 * 247.105 >= :%sac" % p)
+        _pm["%sac" % p] = float(_f["min_acres"])
+    return _c, _pm
+
+
 def _lease_ids_near(engine, towns, roads, miles_city, miles_hwy):
     """Lease numbers within N miles of the NAMED towns/routes, or None.
 
@@ -14427,10 +14531,19 @@ def run(engine=None):
                         _tw_leases = None
                         if "geo_leases" not in _geo_on:
                             _tw_leases = _ensure_lease_geojson(engine, _say)[1]
+                        # THE SAME FILTER THE LEASES ARE DRAWN WITH, so the
+                        # shading answers the question the panel is asking.
+                        # _lv_choice is the whole panel dict; the townships
+                        # take the parts that are about WHICH leases, and
+                        # ignore mode and colour_by, which are about how to
+                        # draw them.
+                        _tw_where, _tw_params = _lease_filter_sql(_lv_choice)
                         _tn, _tl = add_township_layer(
                             m, engine, show=True,
                             bounds=_layer_bounds,
                             lease_url=_tw_leases,
+                            lease_where=_tw_where,
+                            lease_params=_tw_params,
                             lease_by=(_lv_choice.get("colour_by")
                                       or st.session_state.get(
                                           "wm_lease_color_by", "producing")))
@@ -17995,80 +18108,24 @@ def render_lease_view(engine, compact=False, default_mode=None):
     # "Wrong is worse than missing": a filter that silently matches nothing
     # is a map that looks broken. Say what it will draw while there is still
     # a chance to change it.
-    _where, _params = ["1=1"], {}
-    if _src:
-        _where.append("r.source IN (%s)"
-                      % ",".join(":s%d" % i for i in range(len(_src))))
-        _params.update({"s%d" % i: v for i, v in enumerate(_src)})
-    if _st_:
-        _where.append("r.lease_status IN (%s)"
-                      % ",".join(":t%d" % i for i in range(len(_st_))))
-        _params.update({"t%d" % i: v for i, v in enumerate(_st_)})
-    if _stsel:
-        _where.append("g.province_state IN (%s)"
-                      % ",".join(":ps%d" % i for i in range(len(_stsel))))
-        _params.update({"ps%d" % i: v for i, v in enumerate(_stsel)})
-    if _cosel:
-        # THE SAME CONTAINMENT RULE THE BROWSER USES, spelled in T-SQL. A
-        # straddling lease is stamped "Campbell & Converse"; county = 'Campbell'
-        # would miss it, and then this count and the map would disagree --
-        # which is the failure the 640-acre boundary already taught once.
-        # Normalise both separators, wrap in commas, test containment.
-        _co_clauses = []
-        for _i, _v in enumerate(_cosel):
-            _co_clauses.append(
-                "',' + LOWER(REPLACE(REPLACE(REPLACE("
-                "g.county, ' & ', ','), '&', ','), ', ', ',')) + ',' "
-                "LIKE :co%d" % _i)
-            _params["co%d" % _i] = "%," + str(_v).strip().lower() + ",%"
-        _where.append("(" + " OR ".join(_co_clauses) + ")")
-    if _wetpct:
-        _where.append("g.wetland_pct >= :wpmin")
-        _params["wpmin"] = float(_wetpct)
-    if _wetty:
-        _where.append("g.wetland_type IN (%s)"
-                      % ",".join(":wt%d" % i for i in range(len(_wetty))))
-        _params.update({"wt%d" % i: v for i, v in enumerate(_wetty)})
-    if _elmin is not None:
-        _where.append("g.elevation_ft >= :elmin")
-        _params["elmin"] = float(_elmin)
-    if _elmax is not None:
-        _where.append("g.elevation_ft <= :elmax")
-        _params["elmax"] = float(_elmax)
-    # MILES -> KM HERE TOO, with the same constant the browser uses. Two
-    # conversions that disagree would put the count and the map back into
-    # the argument the 640-acre section already settled once.
-    # NAMED -> the precomputed pair table (distance to THAT town/route).
-    # UNNAMED -> the stamped nearest-anything column. Same control, two
-    # questions, and the help text says which is being asked.
-    if _mi_city and _twnsel:
-        _where.append(
-            "EXISTS (SELECT 1 FROM dataview.dv_tract_place_dist d "
-            "WHERE d.tract_id = g.tract_id AND d.dist_km <= :dcity AND "
-            "d.place_name IN (%s))"
-            % ",".join(":pn%d" % i for i in range(len(_twnsel))))
-        _params.update({"pn%d" % i: v for i, v in enumerate(_twnsel)})
-        _params["dcity"] = float(_mi_city) * 1.609344
-    elif _mi_city:
-        _where.append("g.dist_city_km <= :dcity")
-        _params["dcity"] = float(_mi_city) * 1.609344
-    if _mi_hwy and _rdsel:
-        _where.append(
-            "EXISTS (SELECT 1 FROM dataview.dv_tract_road_dist d "
-            "WHERE d.tract_id = g.tract_id AND d.dist_km <= :dhwy AND "
-            "d.road_name IN (%s))"
-            % ",".join(":rn%d" % i for i in range(len(_rdsel))))
-        _params.update({"rn%d" % i: v for i, v in enumerate(_rdsel)})
-        _params["dhwy"] = float(_mi_hwy) * 1.609344
-    elif _mi_hwy:
-        _where.append("g.dist_hwy_km <= :dhwy")
-        _params["dhwy"] = float(_mi_hwy) * 1.609344
-    if _op:
-        _where.append("r.operator_name LIKE :op")
-        _params["op"] = "%" + _op + "%"
-    if _ac:
-        _where.append("g.area_km2 * 247.105 >= :ac")
-        _params["ac"] = float(_ac)
+    # ── THE FILTER, FROM THE ONE DEFINITION ─────────────────────────────
+    # These predicates used to be spelled out here, seventy-four lines of
+    # them, and nowhere else -- which is why the township shading could not
+    # obey them without a second copy. They live in _lease_filter_sql now,
+    # and the township aggregate composes the SAME clauses into an EXISTS.
+    #
+    # The locals above still matter: _panel below sends them to the second
+    # screen. Only the SQL construction moved.
+    _panel_filt = {
+        "source": _src, "status": _st_, "state": _stsel, "county": _cosel,
+        "wet_min_pct": _wetpct, "wet_types": _wetty,
+        "elev_min": _elmin, "elev_max": _elmax,
+        "miles_city": _mi_city, "towns": _twnsel,
+        "miles_hwy": _mi_hwy, "roads": _rdsel,
+        "operator": _op, "min_acres": _ac,
+    }
+    _lf_clauses, _params = _lease_filter_sql(_panel_filt)
+    _where = ["1=1"] + _lf_clauses
     # COUNT WHAT THE LABEL SAYS. A plain COUNT(*) over this join counts
     # right-TRACT PAIRS, and the label beside it says "lease(s)". Today every
     # lease has exactly one tract (24,178 / 24,178 / 24,178) so the two agree

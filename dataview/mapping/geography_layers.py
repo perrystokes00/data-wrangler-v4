@@ -1874,7 +1874,8 @@ def _twp_bounds(wkt):
 
 
 def add_township_layer(m, engine, show=True, state="WY", bounds=None,
-                       lease_url=None, lease_by="producing"):
+                       lease_url=None, lease_by="producing",
+                       lease_where=None, lease_params=None):
     """PLSS townships shaded by leased acreage. (drawn, leased_townships).
 
     ONE QUERY, AGGREGATED IN SQL. Pulling 24,178 leases to count them in
@@ -1894,6 +1895,31 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
         except Exception:
             pass
     clause = " AND ".join(where)
+    # ── THE SHADING OBEYS THE LEASE FILTERS ─────────────────────────────
+    # "Lease filters don't filter townships?" They did not: this counted
+    # every tract in the township, so a map filtered to 42 leases near
+    # Casper still coloured all 2,888 townships by their full leased
+    # acreage. The panel said one thing and the map said another -- the
+    # failure this feature has already paid for twice.
+    #
+    # AN EXISTS ON THE JOIN, NOT A WHERE. On a LEFT JOIN a WHERE over `g`
+    # would drop the unmatched townships entirely, quietly turning this into
+    # the other design -- hide what does not match -- when what was asked
+    # for is the grid intact and the COLOUR filtered.
+    #
+    # The clauses come from _lease_filter_sql, the same definition the
+    # panel's count uses, with prefixed parameters so they cannot collide
+    # with :st / :s / :n / :w / :e above.
+    _lease_join = ""
+    if lease_where:
+        _lease_join = (
+            " AND EXISTS (SELECT 1"
+            "   FROM dataview.dv_land_right r"
+            "   JOIN dataview.dv_land_right_tract x"
+            "     ON x.land_right_id = r.land_right_id"
+            "  WHERE x.tract_id = g.tract_id AND "
+            + " AND ".join(lease_where) + ")")
+        params.update(lease_params or {})
     # LOCAL, and named so: this module has no module-level `json`, and a bare
     # name that resolves only when the line runs is the failure CLAUDE.md
     # opens its list with.
@@ -1914,7 +1940,7 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                   -- the same trick h3_refresh uses for wells -- and this
                   -- becomes a GROUP BY on an indexed column.
                   LEFT JOIN dataview.dv_land_tract_geom g
-                    ON  g.plss_id = t.plss_id
+                    ON  g.plss_id = t.plss_id{_lease_join}
                  WHERE {clause}
                  GROUP BY t.plss_id, t.township_label, t.bbox_wkt
             """), params).fetchall()
