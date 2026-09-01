@@ -99,16 +99,13 @@ def render(engine=None):
     c1, c2, c3 = st.columns([4, 1.3, 1.3])
     root = c1.text_input("Crawl root", DEFAULT_ROOT, disabled=running)
     workers = c2.number_input("Workers", 1, 32, 6, disabled=running)
-    apply = c3.checkbox("Apply", value=True, disabled=running,
-                        help="Write dv_* (promote apply). Off = plan/count only.")
+    apply = c3.checkbox("Apply", value=True, disabled=running)
 
     ALL_EXTS = [".las", ".dlis", ".lis", ".segy", ".sgy", ".p190", ".pdf",
                 ".shp", ".xlsx", ".docx", ".xml", ".json", ".txt", ".witsml"]
     sel_exts = st.multiselect(
         "Extensions to process (leave empty = all)", ALL_EXTS, default=[],
-        disabled=running,
-        help="Scope the run to specific file types. Empty means every supported "
-             "format.")
+        disabled=running)
 
     b1, b2 = st.columns(2)
     if b1.button("▶ Run", type="primary", disabled=running,

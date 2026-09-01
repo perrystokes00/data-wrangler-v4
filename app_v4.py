@@ -803,8 +803,7 @@ with st.sidebar:
             _dc, _bc = st.columns([4, 1])
             with _bc:
                 st.write("")  # nudge the button down to align with the field
-                if st.button("🔄", key="sb_list_dbs",
-                             help="List databases on this server"):
+                if st.button("🔄", key="sb_list_dbs"):
                     try:
                         from dataview.core.db import DBConfig, connect as _lc
                         _lr = _lc(DBConfig(
@@ -876,8 +875,7 @@ with st.sidebar:
                 _scur = _sdefault
             _spick = st.selectbox(
                 "Data model", _sfiles, index=_sfiles.index(_scur),
-                format_func=lambda f: _slabels.get(f, f), key="sb_schema_pick",
-                help="Target schema to load into. Switching clears any in-progress import.")
+                format_func=lambda f: _slabels.get(f, f), key="sb_schema_pick")
             if S.get("schema_file") != _spick or S.get("ppdm_schema") is None:
                 try:
                     import json as _sjson

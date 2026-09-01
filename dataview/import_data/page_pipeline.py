@@ -379,8 +379,7 @@ def render(S):
                     password = st.text_input("Password", type="password")
                 default_driver = "ODBC Driver 17 for SQL Server"
                 driver_index   = all_drivers.index(default_driver) if default_driver in all_drivers else 0
-                driver = st.selectbox("ODBC Driver", all_drivers, index=driver_index,
-                                      help="Detected drivers on this machine. Pick the highest version available.")
+                driver = st.selectbox("ODBC Driver", all_drivers, index=driver_index)
             with col_r:
                 st.markdown("#### Connection Notes")
                 st.info("**Minimum permissions required:**\n"
@@ -644,9 +643,7 @@ def render(S):
                         ) if len(_sheet_names) > 1 else _sheet_names[0]
                         _header_row = _xcol2.number_input(
                             "Header row", min_value=1, max_value=50,
-                            value=1, key="stg_xl_header",
-                            help="Row number containing column headers"
-                        ) - 1
+                            value=1, key="stg_xl_header") - 1
                         _skip_rows = _xcol3.number_input(
                             "Skip rows after header", min_value=0, max_value=50,
                             value=0, key="stg_xl_skip"
@@ -931,15 +928,10 @@ def render(S):
                     _date_fmt = st.selectbox(
                         "Date format in source",
                         ["Auto-detect", "DD-MM-YYYY (DMY)", "MM-DD-YYYY (MDY)", "YYYY-MM-DD (YMD)"],
-                        key="norm_date_fmt",
-                        help="Specify if auto-detection picks the wrong format"
-                    )
+                        key="norm_date_fmt")
                 with _c2:
                     st.markdown("<div style='margin-top:1.65rem'></div>", unsafe_allow_html=True)
-                    if st.button("⚙️ Run Normalization", use_container_width=True,
-                                 help="Optional — trims whitespace, uppercases code columns, "
-                                      "and standardizes date formats. Promote handles these "
-                                      "automatically, but run this if your source data needs cleanup."):
+                    if st.button("⚙️ Run Normalization", use_container_width=True):
                         with st.spinner("Normalizing..."):
                             if S.demo:
                                 result = normalize_demo(df, col_types)
@@ -1348,8 +1340,7 @@ def render(S):
             # ── Clear All / Match All ─────────────────────────────────────
             ca1, ca2, ca3 = st.columns([1, 1, 5])
             with ca1:
-                if st.button("✖ Clear All", use_container_width=True,
-                             help="Remove all source-column mappings"):
+                if st.button("✖ Clear All", use_container_width=True):
                     for m in mp.mapped:
                         if not m.auto_generated:
                             mp.set_source(m.ppdm_col, "")
@@ -1358,8 +1349,7 @@ def render(S):
                     st.session_state["mapping_grid_ver"] = st.session_state.get("mapping_grid_ver", 0) + 1
                     st.rerun()
             with ca2:
-                if st.button("⚡ Match All", use_container_width=True,
-                             help="Re-run auto-match against source columns"):
+                if st.button("⚡ Match All", use_container_width=True):
                     S.col_mapping       = None
                     S.fk_samples_loaded = False
                     S["mapping_grid_snapshot"] = None
@@ -1514,7 +1504,7 @@ def render(S):
                     use_container_width=True,
                     type="primary" if _pending_edits else "secondary",
                     disabled=not _pending_edits,
-                    help="Lock in all edits made to the grid above.",
+
                 )
                 if _apply_btn:
                     _apply_mapping_edits(edited_df, mapped_visible, mp)
@@ -1550,8 +1540,7 @@ def render(S):
              "Fulfilled constraints disappear as you go.")
 
         # Clear FK cache button — forces recheck of all FK values
-        if st.button("🔄 Re-check FK Values", key="clear_fk_cache_btn",
-                     help="Clears cached FK violation results and re-queries the database"):
+        if st.button("🔄 Re-check FK Values", key="clear_fk_cache_btn"):
             for _ck in list(st.session_state.keys()):
                 if (_ck.startswith("_fk_exists_") or _ck.startswith("_fk_graph_")
                         or _ck.startswith("_fk_ever_sat_") or _ck.startswith("_fk_prev_counts_")):
@@ -2009,8 +1998,7 @@ def render(S):
                 st.rerun()
         with _nav3:
             st.markdown("<div style='height:1.8em'></div>", unsafe_allow_html=True)
-            if st.button("🔄 Reset all", use_container_width=True,
-                         help="Wipe the whole session and start over at Stage 1."):
+            if st.button("🔄 Reset all", use_container_width=True):
                 st.session_state["_confirm_reset"] = True
 
         if st.session_state.get("_confirm_reset"):
@@ -2093,11 +2081,7 @@ def render(S):
                     ["Insert", "Merge (upsert on PK)"],
                     horizontal=True,
                     key="promote_mode_radio",
-                    help=(
-                        "**Insert** — standard INSERT INTO … SELECT. Fails if PK already exists.\n\n"
-                        "**Merge** — UPDATE existing rows on PK match, INSERT new rows. "
-                        "Use to add/update columns on rows already in the target table."
-                    ),
+
                 )
                 _do_merge = _promote_mode.startswith("Merge")
 

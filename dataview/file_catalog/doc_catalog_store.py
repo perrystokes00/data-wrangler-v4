@@ -368,10 +368,7 @@ def render_catalog_widget(
     do_cat = st.checkbox(
         f"Catalog this {label} in File Inventory",
         value=False,
-        key=_key,
-        help="Adds a record to GLOBAL_FILE_CATALOG so this file "
-             "appears in My Work and can be tracked."
-    )
+        key=_key)
 
     if do_cat:
         if engine is None:

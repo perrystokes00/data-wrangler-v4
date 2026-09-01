@@ -425,9 +425,7 @@ def _render_inventory(engine):
             st.markdown("<br>", unsafe_allow_html=True)
             create_vault = st.checkbox(
                 "Create vault structure", value=False,
-                key="dvc_create_vault",
-                help=r"Creates \raw \curated \enriched \archive under the folder"
-            )
+                key="dvc_create_vault")
 
         # Extension filter
         all_exts = [
@@ -758,9 +756,7 @@ def _render_admin(engine):
         vault_root = st.text_input(
             "Vault root path",
             value=VAULT_ROOT,
-            key="dvc_admin_vault",
-            help=r"Default is C:\Bulk. Manager sets this per deployment."
-        )
+            key="dvc_admin_vault")
         if st.button("Create vault structure", key="dvc_create_vault_btn"):
             try:
                 paths = ensure_vault(vault_root)

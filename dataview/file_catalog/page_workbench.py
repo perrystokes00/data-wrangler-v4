@@ -217,24 +217,7 @@ def _tab_scan(engine, dialect):
             "OSDU / JSON Well Log",
         ],
         key="wb_scan_exts",
-        help=(
-            "**PDF** — .pdf\n\n"
-            "**Well Log** — .las  ·  .dlis  ·  .dlf  ·  .dis  ·  .lis\n\n"
-            "**Seismic** — .segy  ·  .sgy  ·  .seg  ·  .p190  ·  .p90  ·  .p1\n\n"
-            "**Shapefile** — .shp  ·  .gpkg  ·  .kml  ·  .kmz\n\n"
-            "**Office** — .xlsx  ·  .xls  ·  .xlsm  ·  .docx  ·  .doc  ·  .csv  ·  .tsv\n\n"
-            "**WITSML** — .xml\n"
-            "*(WITSML 1.3.1 / 1.4.1 — trajectory, log, mudLog, well, wellbore)*\n\n"
-            "**OSDU / JSON Well Log** — .json\n"
-            "*(16 OSDU schemas: Well, Wellbore, WellLog, WellboreTrajectory, "
-            "WellboreMarkerSet, WellborePressureData, WellboreCompletion, "
-            "WellCoreAnalysis, ProductionVolume, RockFluidOrganisation/SCAL, "
-            "Field, Reservoir, SeismicAcquisitionSurvey, SeismicHorizon, "
-            "SeismicFault, Document — plus JSON Well Log Format/JSONWLF)*\n\n"
-            "**Image** — .tif  ·  .tiff  ·  .png  ·  .jpg  ·  .jpeg\n"
-            "*(Phase 1 scan only — no extractor. Useful for inventorying "
-            "core photos, well plat images, seismic sections etc.)*"
-        ),
+
     )
     _exts = {e for e, g in EXT_GROUP.items() if g in ext_groups}
 
@@ -269,8 +252,7 @@ def _tab_scan(engine, dialect):
         min_value=1, max_value=16,
         value=int(st.session_state.get("wb_phase2_workers", 8)),
         key="wb_phase2_workers_slider",
-        help="Files per chunk extracted in parallel. Lower for "
-             "DLIS-heavy batches; higher for many small files. Default 8.",
+
     )
     st.session_state["wb_phase2_workers"] = _w
 
@@ -305,12 +287,8 @@ def _tab_scan(engine, dialect):
             m1.metric("Total cataloged",    f"{tot:,}")
             m2.metric("Extracted",          f"{enr:,}")
             m3.metric("Pending extraction", f"{tot-enr-skip:,}")
-            m4.metric("Skipped",            skip,
-                      help="Files skipped — too large for extraction. "
-                           "HEADER_EXTRACTED='S' in catalog.")
-            m5.metric("Cataloged",          int(df["Cataloged"].sum()),
-                      help="Files whose rows are captured in the cat_* mirrors "
-                           "(CATALOG_READINESS='CATALOGED').")
+            m4.metric("Skipped",            skip)
+            m5.metric("Cataloged",          int(df["Cataloged"].sum()))
             m6.metric("Flagged",            int(df["Flagged"].sum()))
             st.dataframe(df, hide_index=True, use_container_width=True)
         else:
@@ -477,8 +455,7 @@ def _tab_scan(engine, dialect):
             f"☑ Select ALL  ({len(_ext_counts)} extension types · "
             f"{_total_all_files:,} files)",
             key="wb_sel_all",
-            help="Check to mark every extension for deletion. "
-                 "Uncheck individual rows in the grid to exclude them.",
+
         )
 
         st.markdown("---")
@@ -1673,16 +1650,11 @@ def _tab_browse(engine, dialect):
     # rejected, so a result set goes stale the moment you act on it.
     if b2.button("↻ Refresh list", key="wb_refresh_btn",
                  use_container_width=True,
-                 disabled=st.session_state.get("wb_results") is None,
-                 help="Re-run the current search — picks up readiness changes "
-                      "from loading or rejecting files."):
+                 disabled=st.session_state.get("wb_results") is None):
         _wb_run_search(engine)
         st.rerun()
 
-    if st.button("🗂 Refresh cataloged status", key="wb_backfill_cat",
-                 help="Reconcile every file's readiness to row reality: CATALOGED "
-                      "where cat_* rows exist, PROMOTED where they reached dv_*, and "
-                      "demote any CATALOGED with no rows behind it. Safe to re-run."):
+    if st.button("🗂 Refresh cataloged status", key="wb_backfill_cat"):
         try:
             try:
                 from dataview.file_catalog.catalog_readiness import reconcile_readiness
@@ -1735,18 +1707,14 @@ def _tab_browse(engine, dialect):
 
     v1, v2, v3 = st.columns([1, 1, 2])
     if v1.button(f"👁 View ({len(_picked)})", key="wb_sel_view",
-                 disabled=not _picked, use_container_width=True,
-                 help="Open the first ticked file in the viewer below. "
-                      "Use Prev/Next there to walk the rest."):
+                 disabled=not _picked, use_container_width=True):
         st.session_state["wb_nav_idx"] = _picked[0]
         st.rerun()
 
     _reason = v3.text_input(
         "Reason", key="wb_sel_reason", label_visibility="collapsed",
         placeholder="why are these bad? (stored on the blocklist)")
-    _confirm = v2.checkbox("Confirm", key=f"wb_sel_confirm_{_nonce}",
-                           help="Rejecting removes the file from the catalog. "
-                                "Tick to enable the button.")
+    _confirm = v2.checkbox("Confirm", key=f"wb_sel_confirm_{_nonce}")
 
     # Rejecting DELETES the rows a file staged (and retires its catalog row as
     # SKIPPED), so it needs both a selection and an explicit confirm — a stray
@@ -1849,10 +1817,7 @@ def _tab_browse(engine, dialect):
                 file_name=f"assignments_{datetime.now():%Y%m%d_%H%M}.xlsx",
                 mime=("application/vnd.openxmlformats-officedocument"
                       ".spreadsheetml.sheet"),
-                use_container_width=True,
-                help="Every row in the current results grid. Fill MATCHED_UWI "
-                     "(wells) or SURVEY_NAME (seismic); leave a row blank to skip "
-                     "it. Do NOT edit INVENTORY_ID — it's how import finds the row.")
+                use_container_width=True)
         except Exception as _xx:
             st.error(f"Excel export unavailable ({type(_xx).__name__}: {_xx}). "
                      "Needs openpyxl — `pip install openpyxl`.")
@@ -1861,9 +1826,7 @@ def _tab_browse(engine, dialect):
 
         # ---- Import -----------------------------------------------------------
         _up = st.file_uploader("Import filled Excel", type=["xlsx"],
-                               key="wb_assign_xlsx",
-                               help="Matches rows by INVENTORY_ID; applies every "
-                                    "non-blank MATCHED_UWI / SURVEY_NAME cell.")
+                               key="wb_assign_xlsx")
         if _up is not None and st.button("📥 Apply assignments from file",
                                          type="primary", key="wb_assign_import"):
             try:
@@ -2135,9 +2098,7 @@ def _wb_nav(engine, dialect, df):
     bc1.text_input("Reason", key="wb_bad_reason",
                    label_visibility="collapsed",
                    placeholder="why is this file bad?")
-    if bc2.button("🚫 Mark bad", key="wb_bad_btn",
-                  help="Fingerprint this file as bad, drop the rows it staged, "
-                       "and retire its catalog row — the next crawl will skip it."):
+    if bc2.button("🚫 Mark bad", key="wb_bad_btn"):
         try:
             _dropped = _mark_bad(engine, inv_id, fpath, row.get("FILE_NAME"),
                                  row.get("FILE_SIZE_KB"),
@@ -2332,8 +2293,7 @@ def _wb_batch(engine, dialect, df):
     _sel_all = st.checkbox(
         f"☑ Select ALL with a UWI  ({n_uwi} of {n} files loadable)",
         key="wb_batch_sel_all",
-        help="Marks every file that has a matched UWI. Uncheck rows in the "
-             "grid to exclude them.",
+
     )
 
     st.markdown("---")
@@ -2421,13 +2381,9 @@ def _wb_batch(engine, dialect, df):
         # Confirm gate: this deletes catalog rows and blocklists the files, and
         # the batch grid can hold 500 of them. Nonced with the editor so it
         # resets after each action without an illegal write to a widget key.
-        _bconfirm = ccol.checkbox("Confirm", key=f"wb_batch_bad_confirm_{_bnonce}",
-                                  help="Rejecting removes these files from the "
-                                       "catalog. Tick to enable.")
+        _bconfirm = ccol.checkbox("Confirm", key=f"wb_batch_bad_confirm_{_bnonce}")
         if bcol.button(f"🚫 Mark {len(_bad)} bad", key="wb_batch_bad_btn",
-                       disabled=not _bconfirm,
-                       help="Fingerprint these files as bad and remove them "
-                            "from the catalog — the next crawl will skip them."):
+                       disabled=not _bconfirm):
             reason = st.session_state.get("wb_batch_bad_reason")
             done, errs = 0, []
             for _, br in _bad.iterrows():
@@ -2515,10 +2471,7 @@ def _wb_batch(engine, dialect, df):
                 file_name=f"batch_selection_{datetime.now():%Y%m%d_%H%M}.xlsx",
                 mime=("application/vnd.openxmlformats-officedocument"
                       ".spreadsheetml.sheet"),
-                use_container_width=True,
-                help="Set Load = Y to capture a file, Bad = Y to discard it "
-                     "(Bad wins if both). Load needs a UWI in that row. Don't "
-                     "edit INVENTORY_ID — it's how import finds the file.")
+                use_container_width=True)
         except Exception as _bxx:
             st.error(f"Excel export unavailable ({type(_bxx).__name__}: {_bxx}). "
                      "Needs openpyxl — `pip install openpyxl`.")
@@ -2526,10 +2479,7 @@ def _wb_batch(engine, dialect, df):
         st.divider()
 
         _bup = st.file_uploader("Import curated batch Excel", type=["xlsx"],
-                                key="wb_batch_xlsx",
-                                help="Applies Bad = Y (mark bad + drop from "
-                                     "catalog) and Load = Y (capture into cat_*) "
-                                     "per row, matched by INVENTORY_ID.")
+                                key="wb_batch_xlsx")
         st.text_input("Reason for Bad rows", value="junk / bad format",
                       key="wb_batch_xlsx_reason")
         if _bup is not None and st.button("📥 Run batch from file",
@@ -3476,10 +3426,8 @@ def _tab_status(engine, dialect):
         _roots = []
 
     s1, s2, s3 = st.columns([3, 1, 1])
-    s1.selectbox("Scan root", [_SB_ALL] + _roots, key="sb_root",
-                 help="Limit to one scan root, or the whole catalog.")
-    s2.checkbox("This crawl only", value=False, key="sb_this_crawl",
-                help="Limit to files scanned today.")
+    s1.selectbox("Scan root", [_SB_ALL] + _roots, key="sb_root")
+    s2.checkbox("This crawl only", value=False, key="sb_this_crawl")
     if s3.button("🔄 Run / refresh", type="primary", key="sb_run",
                  use_container_width=True):
         _status_run(engine)
@@ -3509,17 +3457,11 @@ def _tab_status(engine, dialect):
     _held = int(_n.get(_cs.ST_HELD, 0))
     m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Files", f"{len(df):,}")
-    m2.metric("Promoted", f"{int(_n.get(_cs.ST_PROMOTED, 0)):,}",
-              help="Rows reached dataview.dv_*.")
-    m3.metric("Staged", f"{int(_n.get(_cs.ST_STAGED, 0)):,}",
-              help="Rows in cat_*, every gate passes — promote has not run yet.")
-    m4.metric("Held", f"{_held:,}",
-              help="Rows in cat_*, and promote refuses at least one of them. "
-                   "The backlog.")
+    m2.metric("Promoted", f"{int(_n.get(_cs.ST_PROMOTED, 0)):,}")
+    m3.metric("Staged", f"{int(_n.get(_cs.ST_STAGED, 0)):,}")
+    m4.metric("Held", f"{_held:,}")
     m5.metric("Not captured",
-              f"{int(_n.get(_cs.ST_INVENTORIED, 0)) + int(_n.get(_cs.ST_EXTRACTED, 0)):,}",
-              help="Inventoried or extracted, nothing staged. Fix identity in "
-                   "Browse & View.")
+              f"{int(_n.get(_cs.ST_INVENTORIED, 0)) + int(_n.get(_cs.ST_EXTRACTED, 0)):,}")
     m6.metric("Rejected", f"{int(_n.get(_cs.ST_SKIPPED, 0)):,}")
 
     # ── Which single fix clears the most ─────────────────────────────────────
@@ -3763,9 +3705,7 @@ def _tab_status(engine, dialect):
             else:
                 o1, o2 = st.columns([1, 4])
                 if o1.button("↗ Open natively", key="sb_view_native",
-                             use_container_width=True,
-                             help="Open in the OS default application. Costs "
-                                  "nothing here — the app does not parse it."):
+                             use_container_width=True):
                     try:
                         from dataview.file_catalog.catalog_docs import _open_native
                         _err = _open_native(_fpath)
@@ -3781,9 +3721,7 @@ def _tab_status(engine, dialect):
                 # pages through PyMuPDF each time. Off by default; the native
                 # open above needs no parse at all.
                 _show = o2.toggle(
-                    "Render preview in-app", key="sb_view_render", value=False,
-                    help="Parses the file to display it here. Leave off for "
-                         "large PDFs or SEG-Y and use Open natively instead.")
+                    "Render preview in-app", key="sb_view_render", value=False)
                 if _show:
                     try:
                         from dataview.file_catalog.file_viewer import view as _fview
@@ -3985,9 +3923,7 @@ def _tab_status(engine, dialect):
         # showed the new one. Validating the current edits at the moment of
         # the write makes that impossible rather than guarded against.
         if p2.button("✅ Apply these fixes", key="sb_apply", type="primary",
-                     use_container_width=True, disabled=not _edits,
-                     help="Validates every row first. If any is bad, nothing "
-                          "is written and the problems are listed."):
+                     use_container_width=True, disabled=not _edits):
             from dataview.file_catalog import catalog_status as _cs2
             _tot = {"uwi_rows": 0, "coord_rows": 0, "headers": 0}
             _fail = []
@@ -4062,11 +3998,7 @@ def _tab_status(engine, dialect):
     # 0. Capture. Sits BEFORE promote because that is the order the pipeline
     #    runs them in, and a file that was never captured cannot be promoted or
     #    held — it is not in the backlog yet, it is upstream of it.
-    if a0.button("📥 Run capture", key="sb_capture", use_container_width=True,
-                 help="Stage pending files' rows into the cat_* mirrors. "
-                      "Scoped to the Scan root chosen above. Files with no "
-                      "identity may land in the backlog afterwards — that is "
-                      "the pipeline working, and ① drains them."):
+    if a0.button("📥 Run capture", key="sb_capture", use_container_width=True):
         _root = (None if st.session_state.get("sb_root") in (None, _SB_ALL)
                  else st.session_state.get("sb_root"))
         try:
@@ -4088,11 +4020,7 @@ def _tab_status(engine, dialect):
 
     # 1. Cure the coord holds. The only reason with a real one-click fix.
     if a1.button("📍 Fill missing coords", key="sb_coords",
-                 use_container_width=True,
-                 help="Fill cat_well surface coordinates from the gold master, "
-                      "then from dv_well — promote's own pre-gate. Wells whose "
-                      "location is already known stop being held. The gate is "
-                      "not waived."):
+                 use_container_width=True):
         _filled, _note = _run_coord_enrich(engine)
         if _filled:
             st.success(f"Filled {_filled:,} coordinate row(s).{_note}")
@@ -4104,9 +4032,7 @@ def _tab_status(engine, dialect):
         st.rerun()
 
     # 2. Re-run promote so cleared rows actually lift.
-    if a2.button("⬆ Run promote", key="sb_promote", use_container_width=True,
-                 help="Lift every now-eligible row into dataview.dv_*. Run this "
-                      "after clearing a reason."):
+    if a2.button("⬆ Run promote", key="sb_promote", use_container_width=True):
         from dataview.file_catalog import promote_catalog as _pc
         raw = engine.raw_connection()
         _lines, _err = [], None
@@ -4153,8 +4079,7 @@ def _tab_status(engine, dialect):
              "retires their catalog rows as SKIPPED. Rows already promoted "
              "into dv_* are left alone. Undo with Restore.")
     if a3.button(f"🚫 Reject {len(_picked)} file(s)", key="sb_reject",
-                 use_container_width=True, disabled=_picked.empty,
-                 help=_help):
+                 use_container_width=True, disabled=_picked.empty):
         # RE-ASSERT THE PRECONDITION INSIDE THE HANDLER. `disabled=` is a UI
         # affordance, not a guarantee: it stops a human clicking and stops
         # nothing else. A replayed widget state, or a refactor that moves the
@@ -4193,11 +4118,7 @@ def _tab_status(engine, dialect):
     #    stamped extracted with nothing staged -- run capture afterwards and
     #    the rows come back.
     if a4.button(f"♻ Restore {len(_picked)} file(s)", key="sb_restore",
-                 use_container_width=True, disabled=_picked.empty,
-                 help="Takes the selected files off the blocklist, clears "
-                      "SKIPPED and marks them pending, so the next run "
-                      "re-extracts them. Files that were not rejected are "
-                      "left alone."):
+                 use_container_width=True, disabled=_picked.empty):
         if _picked.empty:
             st.error("Nothing ticked -- nothing was changed.")
             st.stop()
@@ -4281,11 +4202,7 @@ def _tab_status(engine, dialect):
                 _blsel = []
             if st.button(f"♻ Restore {len(_blsel)} from blocklist",
                          key="sb_blrestore", use_container_width=True,
-                         disabled=not _blsel,
-                         help="Clears the blocklist entry and, where the catalog "
-                              "row survived, marks the file pending again. A file "
-                              "whose row was removed comes back on the next scan "
-                              "of its folder."):
+                         disabled=not _blsel):
                 if not _blsel:
                     st.error("Nothing ticked — nothing was changed.")
                     st.stop()
@@ -4355,8 +4272,7 @@ def _tab_map(engine, dialect):
     show_seis  = c1.checkbox("Show seismic footprints", value=True,
                               key="wm_seis")
     show_all   = c2.checkbox("Include suspect coords", value=False,
-                              key="wm_all",
-                              help="Include wells that may have wrong coordinates")
+                              key="wm_all")
     tile_style = c3.selectbox("Base map",
         ["CartoDB positron","OpenStreetMap","CartoDB dark_matter"],
         key="wm_tiles")
@@ -5226,12 +5142,7 @@ def _seismic_coverage(engine):
         _val = c1.text_input(
             "Fallback CRS for SEG-Y with no CRS in the header (EPSG)",
             value=_cur, key="wb_segy_epsg",
-            placeholder="e.g. 32754  (WGS84 / UTM zone 54S)",
-            help="Applied ONLY to files whose text header declares no CRS — a "
-                 "declared one always wins. This is normal for SEG-Y: Rev 0/1 "
-                 "have no CRS field at all, so the projection usually comes "
-                 "from the survey report, not the file. One CRS per run, so "
-                 "re-extract one zone's folder at a time.")
+            placeholder="e.g. 32754  (WGS84 / UTM zone 54S)")
         _clean = "".join(ch for ch in str(_val or "") if ch.isdigit())
         if _clean:
             _os.environ["DV_SEGY_EPSG"] = _clean
@@ -5248,11 +5159,7 @@ def _seismic_coverage(engine):
         _folders = ["(all seismic)"] + list(df["folder"])
         f1, f2 = st.columns([3, 1])
         _pick = f1.selectbox("Re-extract which folder?", _folders,
-                             key="wb_segy_reextract_folder",
-                             help="Clears HEADER_EXTRACTED so the next run "
-                                  "re-parses these files. Needed after any "
-                                  "extractor change or CRS change — the stamp "
-                                  "keys on file content, not on your settings.")
+                             key="wb_segy_reextract_folder")
         if f2.button("🔄 Arm re-extract", key="wb_segy_reextract"):
             try:
                 _sql = (f"UPDATE file_catalog.GLOBAL_FILE_CATALOG "
@@ -5405,10 +5312,7 @@ def _structure_scorecard(engine):
                 delta_color="off")
         _cols[2].metric(
             "No source file", format(_nofile, ","),
-            "not in the percentages", delta_color="off",
-            help="Rows carrying no INVENTORY_ID: generated, hand-seeded, or "
-                 "loaded by a path that does not stamp one. They came from "
-                 "no file, so they are counted but not classified.")
+            "not in the percentages", delta_color="off")
 
         # ── the two bar panels ─────────────────────────────────────────
         # Drawn before the tables because this is the part that is READ. The
@@ -5513,11 +5417,9 @@ def _pipeline_report(engine):
         sc1, sc2 = st.columns([3, 1])
         _ALL = "(whole catalog)"
         scsel = sc1.selectbox(
-            "Scan root", [_ALL] + _roots, index=0, key="score_root_sel",
-            help="Limit to a scan root, or the whole catalog.")
+            "Scan root", [_ALL] + _roots, index=0, key="score_root_sel")
         this_crawl = sc2.checkbox(
-            "This crawl only", value=True, key="score_this_crawl",
-            help="Limit to files scanned today (the current crawl).")
+            "This crawl only", value=True, key="score_this_crawl")
         if not st.button("Run scorecard", key="score_run",
                          use_container_width=True):
             return
@@ -5790,13 +5692,8 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
         # form — so it sits above the run-config form below.
         ci1, ci2 = st.columns([1, 4])
         _arm = ci1.checkbox(
-            "Arm clear", value=False, key="fp_clearinv_arm",
-            help="Safety latch — tick this, then press Clear inventory.")
-        if ci2.button("🧹 Clear inventory", key="fp_clearinv", disabled=not _arm,
-                      help="Empty the inventory list (GLOBAL_FILE_CATALOG). File IDs "
-                           "are deterministic, so re-scanning rebuilds it and any "
-                           "extracted headers re-link. dv_* / reference data left "
-                           "untouched."):
+            "Arm clear", value=False, key="fp_clearinv_arm")
+        if ci2.button("🧹 Clear inventory", key="fp_clearinv", disabled=not _arm):
             try:
                 from sqlalchemy import text as _t
                 with engine.begin() as _c:
@@ -5815,8 +5712,7 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
         with st.container():
             fp1, fp2, fp3 = st.columns(3)
             fp_root  = fp1.text_input("Scan root folder", value="", key="fp_root",
-                                      placeholder=r"D:\data",
-                                      help="Quotes and doubled separators are cleaned. A path pasted from JSON or a SQL result often has \\\\ in it, which Windows opens fine but which would catalog every file a second time.")
+                                      placeholder=r"D:\data")
             # NORMALISE BEFORE IT REACHES ANYTHING. A doubled-separator root
             # scans correctly and silently duplicates the whole catalog,
             # because the id is a hash of the path string. Explorer's
@@ -5826,37 +5722,24 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
             fp_vault = fp2.text_input("Vault root", value=r"C:\Bulk\Vault",
                                       key="fp_vault")
             fp_report = fp3.text_input("Report root", value=r"C:\Bulk\reports",
-                                       key="fp_report",
-                                       help="Folder for the run log, enrich "
-                                            "report, and inventory report.")
+                                       key="fp_report")
             fp_exts_raw = st.text_input(
                 "Formats to scan", value="", key="fp_exts",
-                placeholder="all supported types — or e.g.  .las, .dlis, .pdf",
-                help="Blank = scan every supported type. To narrow the whole run "
-                     "(scan · extract · capture), type a comma-separated list of "
-                     "extensions, e.g.  .las, .dlis  — the leading dot is optional.")
+                placeholder="all supported types — or e.g.  .las, .dlis, .pdf")
             s1, s2, s4, s5 = st.columns(4)
             fp_inventory = s1.checkbox(
-                "Inventory", value=True, key="fp_inventory",
-                help="Scan the folder and build/update the catalog. On = (re)inventory "
-                     "first; off = skip the scan and process the existing catalog.")
+                "Inventory", value=True, key="fp_inventory")
             fp_capture = s2.checkbox(
-                "Capture", value=True, key="fp_capture",
-                help="After inventory, parse documents (PDF surveys / scout tickets + "
-                     "shapefiles) for every file with a resolved UWI. Off = stop after "
-                     "inventory.")
+                "Capture", value=True, key="fp_capture")
             fp_vaulton = False   # Vault removed from the pipeline; run it from
             #                      the "📦 Vault" section of this page.
             fp_promote = s4.checkbox("Promote", value=True,  key="fp_promote")
-            fp_apply   = s5.checkbox("Apply",   value=False, key="fp_apply",
-                                     help="Move promote rows into dv_*. "
-                                          "Off = plan/count only.")
+            fp_apply   = s5.checkbox("Apply",   value=False, key="fp_apply")
             tcol, ccol = st.columns([1.5, 4])
             fp_workers = tcol.number_input(
                 "Parse workers", min_value=1, max_value=64,
                 value=int(st.session_state.get("fp_workers", 6)),
-                step=1, key="fp_workers",
-                help="Parallel parse workers for the extract stage.")
+                step=1, key="fp_workers")
             # THE RECOGNISER STAGE HAS EXISTED SINCE JULY AND NOTHING TURNED
             # IT ON. pipeline_run._stage_recognise is complete and wired into
             # run_pipeline — but the parameter defaults to False and this page
@@ -5868,25 +5751,11 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
             fp_recognise = ccol.checkbox(
                 "🔍 Use the recogniser for capture",
                 value=bool(st.session_state.get("fp_recognise", True)),
-                key="fp_recognise",
-                help="Read tables with the document vocabulary instead of the "
-                     "per-format extractors. Covers scout tickets, casing "
-                     "records and end-of-well reports — the extractors only "
-                     "handle the formats somebody wrote a handler for.")
+                key="fp_recognise")
             fp_force = ccol.checkbox(
                 "♻ Force re-extract (ignore what is already catalogued)",
                 value=bool(st.session_state.get("fp_force", False)),
-                key="fp_force",
-                help="Normally a file that is already CATALOGED with an "
-                     "unchanged hash is passed over — right for a re-run over "
-                     "a big tree, wrong the moment the CODE changes. 1,638 LAS "
-                     "files sat skipped as 'already done' while no stage had "
-                     "ever processed them, and the only way back in was a "
-                     "hand-written DELETE. Files you explicitly SKIPPED stay "
-                     "skipped: this ignores 'already processed', not 'leave "
-                     "this alone'. Bounded by the scope below, like every "
-                     "other stage — forcing decides WHETHER done files are "
-                     "redone, not WHICH files are in scope.")
+                key="fp_force")
             fp_scope = ccol.radio(
                 "Which files does this run process?",
                 options=["path", "queue"],
@@ -5896,41 +5765,21 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
                 horizontal=True,
                 format_func=lambda v: ("Only under the scan root"
                                        if v == "path"
-                                       else "The whole pending inventory"),
-                help="Only the SCAN stage was ever scoped to the folder you "
-                     "give it. Every stage after it claimed from the whole "
-                     "catalog's pending queue, so a run pointed at one folder "
-                     "still extracted and captured files from every other tree "
-                     "ever scanned — including rows for files you have since "
-                     "moved away. 'Only under the scan root' bounds the whole "
-                     "run to that folder. 'The whole pending inventory' is the "
-                     "old behaviour, kept for finishing work already scanned.")
+                                       else "The whole pending inventory"))
             fp_multicore = ccol.checkbox(
                 "⚡ Use all CPU cores (multi-core parse)",
                 value=bool(st.session_state.get("fp_multicore", True)),  # default: multi-core ON
-                key="fp_multicore",
-                help="ON: run the pipeline in a detached process so the extract "
-                     "stage uses a true process pool across every core — same speed "
-                     "as the CLI's --parse-mode process. Best for the SEG-Y / LAS / "
-                     "PDF parsers, which are GIL-bound otherwise. OFF: run in-app on "
-                     "threads (safe default; parsing is capped to one core).")
+                key="fp_multicore")
             bcol1, bcol2 = st.columns([1.5, 4])
             fp_batch = bcol2.checkbox(
                 "📦 Batch mode — inventory all, then process N at a time",
                 value=bool(st.session_state.get("fp_batch", False)),
-                key="fp_batch",
-                help="ON: walk the whole tree once to inventory it, then process "
-                     "the catalog in batches until the queue is clear. Best for a "
-                     "large corpus — bounds memory, gives resume points, and the "
-                     "filesystem is only walked once. OFF: a single straight-through "
-                     "run.")
+                key="fp_batch")
             fp_batch_size = bcol1.number_input(
                 "Batch size", min_value=50, max_value=100000,
                 value=int(st.session_state.get("fp_batch_size", 1000)),
                 step=50, key="fp_batch_size",
-                disabled=not fp_batch,
-                help="Files processed per batch (extract→…→promote), looped until "
-                     "the inventory is cleared.")
+                disabled=not fp_batch)
             run_clicked = st.button(
                 "▶ Run pipeline", type="primary", key="fp_run",
                 use_container_width=True,
@@ -5986,8 +5835,7 @@ Run with **Apply off first** to review the counts, then turn it on to commit.
 
         stop_clicked = st.button(
             "⏹ Stop", key="fp_stop", use_container_width=True,
-            disabled=not running,
-            help="Abort after the current stage finishes — partial results kept.")
+            disabled=not running)
 
         # Guard against re-entry: don't start a second run if one is already
         # going (e.g. a stray rerun while running).
@@ -6471,9 +6319,7 @@ def _pipeline_stages(engine, dialect):
         c1, c2 = st.columns([1, 3])
         en_dry = c1.checkbox("Dry run", value=True, key="pl_en_dry")
         en_rev = c1.checkbox(
-            "Reverse-capture", value=False, key="pl_en_rev",
-            help="Write document values back into the reference where it's "
-                 "missing them. Slow (full WELL_MASTER scan) — off by default.")
+            "Reverse-capture", value=False, key="pl_en_rev")
         if c2.button("Run enrichment", type="primary", key="pl_en_run",
                      use_container_width=True):
             from dataview.file_catalog import enrich_file_headers as _en
@@ -6523,10 +6369,7 @@ def _pipeline_stages(engine, dialect):
         v1, v2 = st.columns(2)
         v_vault = v1.text_input("Vault root", value=r"C:\Bulk\Vault", key="pl_v_vault")
         v_mode  = v2.selectbox("Mode", ["copy", "hardlink", "symlink"], index=0,
-                               key="pl_v_mode",
-                               help="copy = duplicate bytes (any volume). "
-                                    "hardlink / symlink = no extra disk, same "
-                                    "volume only.")
+                               key="pl_v_mode")
         v3, v4 = st.columns([1, 3])
         v_dry = v3.checkbox("Dry run", value=True, key="pl_v_dry")
         if v4.button("Run vault copy", type="primary", key="pl_v_run",
@@ -6626,9 +6469,7 @@ def _pipeline_stages(engine, dialect):
                                     step=10, key="pl_dc_limit")
         dc_workers = dc2.number_input(
             "Workers", min_value=1, max_value=16, value=1, step=1,
-            key="pl_dc_workers",
-            help="1 = serial (safe). >1 only if the cataloger modules open "
-                 "their own connection per call.")
+            key="pl_dc_workers")
         dc_dry = dc3.checkbox("Dry run", value=True, key="pl_dc_dry")
         dc_hdr = st.checkbox(
             "Headers only (DLIS/LIS skip the channel walk — much faster; "

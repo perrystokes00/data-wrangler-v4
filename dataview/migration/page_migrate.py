@@ -270,9 +270,7 @@ def _bench(server, src_db, src_schema, stg_schema, tgt_db, tgt_schema,
             _bump()
             st.rerun()
         if b2.button(f"Pair globally (every table)", key="mig_pair_g",
-                     use_container_width=True,
-                     help="Use when the alias holds everywhere, not just on "
-                          "this target — e.g. kb_elevation ≡ KB_ELEV"):
+                     use_container_width=True):
             syn.add(None, tgt_col, pick_s)
             _bump()
             st.rerun()
@@ -287,10 +285,7 @@ def _set_rule(tgt, col):
     with st.expander(f"Set a value for {col.column_name} "
                      f"(no source needed)", expanded=False):
         kind = st.radio("Kind", ["const", "expr", "transform"],
-                        horizontal=True, key=f"mig_rk_{tgt}_{col.column_name}",
-                        help="const = a fixed literal · expr = raw SQL, "
-                             "evaluated per row · transform = reshape the "
-                             "mapped source value")
+                        horizontal=True, key=f"mig_rk_{tgt}_{col.column_name}")
         val = ""
         if kind == "const":
             val = st.text_input("Value", key=f"mig_rv_{tgt}_{col.column_name}")
@@ -333,8 +328,7 @@ def _refs_and_run(server, src_db, src_schema, stg_schema, tgt_db, tgt_schema,
 
     st.divider()
     c1, c2, c3, c4 = st.columns(4)
-    if c1.button("① Stage", key="mig_stage", use_container_width=True,
-                 help=f"Copy {src_schema}.{src} into {stg_schema}.{stg}"):
+    if c1.button("① Stage", key="mig_stage", use_container_width=True):
         res = ds.stage_from_table(eng, src, src_schema, stg_schema)
         (st.success if res.ok else st.error)(res.message)
         _bump()
@@ -361,10 +355,7 @@ def _refs_and_run(server, src_db, src_schema, stg_schema, tgt_db, tgt_schema,
             out.append(f"!! {type(e).__name__}: {e}")
         st.session_state["mig_refout"] = out or ["every value resolves"]
 
-    seed = c3.checkbox("seed missing codes", key="mig_seed",
-                       help="Register unresolved reference values. Accepts the "
-                            "source's vocabulary as-is — fine for codes you "
-                            "trust, blunt for messy ones.")
+    seed = c3.checkbox("seed missing codes", key="mig_seed")
 
     dry = c4.button("③ Dry run", key="mig_dry", use_container_width=True)
     app = st.button("④ Promote to PPDM (apply)", key="mig_apply",

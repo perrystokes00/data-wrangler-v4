@@ -87,9 +87,7 @@ def render():
         c1, c2 = st.columns(2)
         workers = c1.number_input("Workers", 1, 32, 6, key="cap_workers")
         parallel = c2.checkbox(
-            "Multi-core (ProcessPool)", value=False, key="cap_par",
-            help="Under Streamlit the spawn re-imports the app; leave OFF here. "
-                 "Use the detached pipeline for true multi-core capture.")
+            "Multi-core (ProcessPool)", value=False, key="cap_par")
         exts = st.text_input("Limit to extensions (blank = all)", "", key="cap_exts")
         if st.button("▶ Run capture", key="cap_btn", type="primary"):
             _exts = [e.strip() for e in exts.split(",") if e.strip()] or None

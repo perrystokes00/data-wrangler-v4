@@ -1260,10 +1260,7 @@ def render(ss, server, database, schema="dataview", directory=None):
     _inherited = _clean0(directory) or _clean0(ss.get("bdl_dir"))
     _target = _clean0(st.text_input(
         "Folder or file", value=_clean0(ss.get("la_target")) or _inherited,
-        key="la_target",
-        help="A folder plans every file in it (skip what you don't want); "
-             "a single file plans just that one. Quotes from Explorer's "
-             "'Copy as path' are stripped for you."))
+        key="la_target"))
     _is_dir = bool(_target) and os.path.isdir(_target)
     _is_file = bool(_target) and os.path.isfile(_target)
     if _target and not (_is_dir or _is_file):
@@ -1398,11 +1395,7 @@ def render(ss, server, database, schema="dataview", directory=None):
                                                else stat)})
             _rows_g.sort(key=lambda r: (r["load #"], r["shape"], r["file"]))
             _only_un = st.checkbox(
-                "⚠ Show unassigned only", key="la_grid_unonly",
-                help="Filter to files whose shape has no table yet (skipped "
-                     "files hidden too). Edits made in the filtered view "
-                     "apply on 🔃 Re-sort / 💾 Adopt like any other; hidden "
-                     "rows keep their current settings.")
+                "⚠ Show unassigned only", key="la_grid_unonly")
             if _only_un:
                 _rows_g = [r for r in _rows_g
                            if not r["→ table"] and r["status"] != "⏭ skipped"]
@@ -1515,20 +1508,14 @@ def render(ss, server, database, schema="dataview", directory=None):
                 return []
 
             c_r, c_a, c_b = _form_g.columns([1, 1, 2])
-            if c_r.form_submit_button("🔃 Re-sort by load order",
-                          help="Applies your table overrides, plan flags and "
-                               "skips, then re-orders the grid parents-first."):
+            if c_r.form_submit_button("🔃 Re-sort by load order"):
                 _conf = _harvest(edited_g)
                 if _conf:
                     st.error(" ".join(_conf))
                 else:
                     ss["la_grid_ver"] = _ver + 1
                     st.rerun()
-            if c_a.form_submit_button("💾 Adopt table assignments",
-                          help="Remembers shape → table for every row where "
-                               "you set one (all files of the shape). Columns "
-                               "map in Phase 2 via synonyms/exact matches — "
-                               "or plan the shape with the AI for a full map."):
+            if c_a.form_submit_button("💾 Adopt table assignments"):
                 _eng_g = get_engine(server, database)
                 _conflict = _harvest(edited_g)      # skips/flags survive Adopt
                 if _conflict:
@@ -1560,9 +1547,7 @@ def render(ss, server, database, schema="dataview", directory=None):
                        if not (g.get("assigned") or "")]
             if _un_now and st.button(
                     f"🤖 Propose tables for {len(_un_now)} unassigned "
-                    f"shape(s)", key="la_propose",
-                    help="One batch call. Scanning stays local and instant; "
-                         "asking the AI is a separate, deliberate step."):
+                    f"shape(s)", key="la_propose"):
                 _eng_p = get_engine(server, database)
                 _unk = []
                 for i, g in _un_now:
@@ -1655,9 +1640,7 @@ def render(ss, server, database, schema="dataview", directory=None):
         st.markdown("**Queue**")
         if not _q and ss.get("la_groups"):
             if st.button("▶ Build the queue from this scan",
-                         key="la_qbuild", type="primary",
-                         help="Every unskipped file, in load order, parents "
-                              "first. The assistant walks them itself."):
+                         key="la_qbuild", type="primary"):
                 # FK ORDER, not scan order. The first cut read only the
                 # manual override, so every row tied at 999 and sorted by
                 # scan sequence — which put stations first and wells last,
@@ -1709,9 +1692,7 @@ def render(ss, server, database, schema="dataview", directory=None):
                        for i, r in enumerate(_q)]
             _pick = st.selectbox(
                 "▶ Work on", _labels,
-                index=min(_idx, len(_labels) - 1), key=f"la_qpick_{len(_q)}",
-                help="Jump the arrow to any file. Loading still follows FK "
-                     "sense: a child loaded before its parent just holds.")
+                index=min(_idx, len(_labels) - 1), key=f"la_qpick_{len(_q)}")
             _pi = _labels.index(_pick)
             if _pi != _idx:
                 ss["la_q_idx"] = _pi
@@ -1774,10 +1755,7 @@ def render(ss, server, database, schema="dataview", directory=None):
     # no duplicated analyze path to drift out of sync.
     _bypass = st.checkbox(
         "🔬 Bypass the synonym store (AI only) — for comparison",
-        key="la_bypass",
-        help="Analyze without the store, to see what the AI maps unaided. "
-             "The comparison is printed under the grid. Turn it off for "
-             "normal work — the store is faster, free, and deterministic.")
+        key="la_bypass")
     _auto = bool(ss.pop("la_autorun", False))
     if st.button("🤖 Analyze and plan", type="primary", key="la_go") or _auto:
         if not fpath or not os.path.exists(fpath):
@@ -1891,10 +1869,7 @@ def render(ss, server, database, schema="dataview", directory=None):
         if st.button(f"🚀 Load {os.path.basename(plan['file'])} into "
                      f"{plan['table']} now",
                      key=f"la_fast_{_pver}", type="primary",
-                     use_container_width=True,
-                     help="Checks foreign keys, then loads. Nothing below "
-                         "needs answering — the steps are there if you want "
-                         "to look first."):
+                     use_container_width=True):
             _eng_f = get_engine(server, database)
             _stat_f = st.status("Checking foreign keys…", expanded=True)
             try:
@@ -1982,14 +1957,8 @@ def render(ss, server, database, schema="dataview", directory=None):
 
     _c1, _c2 = _form_m.columns([1, 2])
     _teach = _c2.checkbox("Also teach my changes to the synonym store",
-                          key=f"la_teach_{_pver}_{_mver}",
-                          help="Writes each changed row as an operator-grade "
-                               "synonym for this table, so the next file "
-                               "with that header maps itself. Leave off for "
-                               "a one-file quirk.")
-    if _c1.form_submit_button("✔ Apply mapping",
-                              help="Applies your edits and re-runs the fit "
-                                   "pre-flight."):
+                          key=f"la_teach_{_pver}_{_mver}")
+    if _c1.form_submit_button("✔ Apply mapping"):
         _new, _dups = {}, []
         _claimed = {}
         for _r in _edited.to_dict("records"):
@@ -2163,11 +2132,7 @@ def render(ss, server, database, schema="dataview", directory=None):
                                   ["—"] + cols,
                                   index=(_guess(lambda c: c in ("base", "code")
                                                 or "code" in c, -1) + 1),
-                                  key=f"la_p_code_{_pver}",
-                                  help="The tops file carries unit codes "
-                                       "(SHNNu, SSXS) — they become the NOT-"
-                                       "NULL strat_unit_id; blank codes fall "
-                                       "back to the condensed unit name.")
+                                  key=f"la_p_code_{_pver}")
             interp_v = g6.text_input("interp_id (NOT NULL)",
                                      value="RMOTC_TOPS", key=f"la_p_interp_{_pver}")
             ouom_v = g7.text_input("depth_ouom", value="ft", key=f"la_p_ouom_{_pver}")
@@ -2348,10 +2313,7 @@ def render(ss, server, database, schema="dataview", directory=None):
                                             optional=True),
                                   key=f"la_pv_gas_{_pver}")
             zdrop = st.checkbox("Drop zero volumes", value=False,
-                                key=f"la_pv_zdrop_{_pver}",
-                                help="Unticked keeps 0s (a well producing 0 "
-                                     "gas is data). Ticking roughly halves "
-                                     "the row count for this field.")
+                                key=f"la_pv_zdrop_{_pver}")
             if st.button("Unpivot volumes", key=f"la_pv_go_{_pver}"):
                 fl = {"OIL": None if oil_cv == "—" else oil_cv,
                       "WATER": None if wat_cv == "—" else wat_cv,
@@ -2478,9 +2440,7 @@ def render(ss, server, database, schema="dataview", directory=None):
     # resolved while the file is still a file.
     st.markdown("**④b Foreign key check**")
     _fkver = int(ss.get("la_fk_ver", 0))
-    if st.button("🔗 Check foreign keys", key=f"la_fkscan_{_pver}_{_fkver}",
-                 help="Reads the mapped values and finds any with no parent "
-                      "row yet."):
+    if st.button("🔗 Check foreign keys", key=f"la_fkscan_{_pver}_{_fkver}"):
         with st.spinner("Comparing mapped values against their parents…"):
             try:
                 ss["la_fk"] = fk_scan(get_engine(server, database), schema,
@@ -2517,9 +2477,7 @@ def render(ss, server, database, schema="dataview", directory=None):
         _allkey = f"la_fkall_{_i}_{_pver}_{_fkver}"
         _all = st.checkbox(
             f"☑ Add all {len(_f['missing'])} value(s) to {_f['parent']}",
-            key=_allkey,
-            help="Ticks every row's add box. Untick to clear them all; "
-                 "individual rows can still be changed afterwards.")
+            key=_allkey)
         _fg = pd.DataFrame([{"add": bool(_all),
                              "value": v,
                              "rows": n,
@@ -2659,11 +2617,7 @@ def render(ss, server, database, schema="dataview", directory=None):
         st.caption("Excel source: the first sheet is staged directly, with "
                    "no CSV conversion.")
     if _can_load and st.button(f"🚀 Load this file into {plan['table']} now",
-                 key=f"la_go_{_pver}", type="primary",
-                 help="Stages THIS file, promotes with THIS plan's mapping "
-                      "(same engine as the bulk path: UWI pad, id rules, "
-                      "hold filters), reports the counts. No grid, no "
-                      "skips."):
+                 key=f"la_go_{_pver}", type="primary"):
         _stat = st.status("Loading…", expanded=True)
         try:
             _eng_l = get_engine(server, database)

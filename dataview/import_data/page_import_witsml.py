@@ -513,8 +513,7 @@ def render(engine) -> None:
     uploaded = st.file_uploader(
         "Drop WITSML file (.xml)", type=["xml"], key="witsml_loader_upload")
     source_label = st.text_input(
-        "Source label", value="WITSML", key="witsml_source",
-        help="Written to the source column on every inserted row.")
+        "Source label", value="WITSML", key="witsml_source")
 
     if not uploaded:
         st.info("Drop a WITSML .xml file above to begin.")

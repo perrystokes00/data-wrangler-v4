@@ -231,19 +231,16 @@ def render_reconciliation(st, engine, fk_specs, *, resolved_by="STEWARD", key_pr
         st.session_state.setdefault(mode_key, ("none", None))
 
         bc1, bc2, bc3, bc4 = st.columns([1.5, 1.8, 1.6, 1.1])
-        if bc1.button("✓ Add all as new", key=f"{key_prefix}addall_{cn}",
-                      help="Register every unmatched value as a new canonical code"):
+        if bc1.button("✓ Add all as new", key=f"{key_prefix}addall_{cn}"):
             st.session_state[mode_key] = ("add", None)
             st.session_state[ver_key] += 1
         bulk_code = bc2.selectbox("Remap all to", opts, key=f"{key_prefix}bulk_{cn}",
                                   label_visibility="collapsed")
-        if bc3.button("→ Remap all", key=f"{key_prefix}remapall_{cn}",
-                      help="Crosswalk every value to the code chosen at left"):
+        if bc3.button("→ Remap all", key=f"{key_prefix}remapall_{cn}"):
             if bulk_code:
                 st.session_state[mode_key] = ("remap", bulk_code)
                 st.session_state[ver_key] += 1
-        if bc4.button("Clear", key=f"{key_prefix}clearall_{cn}",
-                      help="Reset all rows (both would NULL until you decide)"):
+        if bc4.button("Clear", key=f"{key_prefix}clearall_{cn}"):
             st.session_state[mode_key] = ("none", None)
             st.session_state[ver_key] += 1
 

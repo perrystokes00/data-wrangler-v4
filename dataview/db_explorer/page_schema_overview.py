@@ -67,8 +67,7 @@ def run(engine=None):
                               index=_schemas.index(_default), key="ov_schema")
     with top[2]:
         st.write("")  # nudge the button down to align with the selectbox
-        if st.button("🔄 Refresh", use_container_width=True,
-                     help="Re-read the live catalog"):
+        if st.button("🔄 Refresh", use_container_width=True):
             st.session_state.pop(f"_schema_model::{schema}", None)
             st.rerun()
 
@@ -93,8 +92,7 @@ def run(engine=None):
     _wc = model.get("well_count")
     if _wc is not None:
         m = st.columns(4)
-        m[0].metric("Wells", f"{_wc:,}",
-                    help=f"Rows in {model['well_table']}")
+        m[0].metric("Wells", f"{_wc:,}")
         m[1].metric("Tables", len(tables))
         m[2].metric("Rows (all tables)", f"{total_rows:,}")
         m[3].metric("Subject areas", len(model["areas"]))

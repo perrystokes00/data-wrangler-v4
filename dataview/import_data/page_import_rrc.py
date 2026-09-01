@@ -317,15 +317,13 @@ def render(engine) -> None:
         "RRC Header file",
         placeholder=r"C:\RRC\maf016.cc003",
         key="rrc_hdr_path",
-        help="RRC MAF016 well header file — county-specific (cc003) "
-             "or statewide.",
+
     )
     loc_path = c2.text_input(
         "RRC Location file (optional)",
         placeholder=r"C:\RRC\w1permits.txt",
         key="rrc_loc_path",
-        help="RRC W-1 permit file with lat/lon coordinates. "
-             "If omitted, wells load without coordinates.",
+
     )
 
     c3, c4, c5 = st.columns(3)
@@ -335,8 +333,7 @@ def render(engine) -> None:
         "County filter (optional)",
         placeholder="220,310,240",
         key="rrc_county_filter",
-        help="Comma-separated RRC county codes to include. "
-             "Leave blank for all counties in the file.",
+
     )
     limit = c5.number_input(
         "Row limit (0 = all)", min_value=0, value=0, key="rrc_limit")

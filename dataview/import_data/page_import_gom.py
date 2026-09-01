@@ -43,9 +43,7 @@ def render(engine) -> None:
     uploaded = st.file_uploader(
         "Drop BOEM file here, or browse",
         type=["xlsx", "xls", "tsv", "txt", "csv"],
-        help="BOEM well-header export. Excel (.xlsx, .xls), "
-             "tab-separated (.tsv, .txt), or comma-separated (.csv). "
-             "First row must be the 26-column BOEM header.",
+
         key="gom_loader_upload",
     )
 
@@ -68,8 +66,7 @@ def render(engine) -> None:
         path_input = st.text_input(
             "Absolute path",
             value=default_path,
-            help="Use this when the file is on disk and too large to upload, "
-                 "or for batch / automated runs.",
+
             key="gom_loader_path_input",
         )
         st.session_state["gom_loader_path"] = path_input
@@ -77,8 +74,7 @@ def render(engine) -> None:
     chunk_size = st.number_input(
         "Chunk size",
         min_value=500, max_value=20000, value=5000, step=500,
-        help="Rows per batched executemany call. 5000 is a good default. "
-             "Increase for fewer round-trips; decrease if you see memory pressure.",
+
     )
 
     # ── Resolve which source to use ──────────────────────────────────────

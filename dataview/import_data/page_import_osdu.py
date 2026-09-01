@@ -1091,12 +1091,10 @@ def render(engine) -> None:
 
     _cs, _ca = st.columns(2)
     source_label = _cs.text_input(
-        "Source label", value="OSDU", key="osdu_source",
-        help="Written to the source column on every inserted row.")
+        "Source label", value="OSDU", key="osdu_source")
     area_label = _ca.text_input(
         "Area", value="", key="osdu_area",
-        placeholder="e.g. Permian Basin",
-        help="Optional area tag for well map filtering.")
+        placeholder="e.g. Permian Basin")
 
     # ── Resolve source: uploaded file wins over directory path ────────────────
     if not uploaded and not dir_path.strip():

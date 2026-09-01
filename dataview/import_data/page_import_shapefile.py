@@ -458,7 +458,7 @@ def render(engine) -> None:
         "Shapefile or directory path",
         placeholder=r"C:\Data\wells.shp  or  C:\RRC\shapefiles",
         key="shp_well_path",
-        help="Single .shp file or directory containing multiple .shp files.",
+
     )
 
     c_s, c_a = st.columns(2)
@@ -466,8 +466,7 @@ def render(engine) -> None:
         "Source label", value="SHAPEFILE", key="shp_well_source")
     area_label = c_a.text_input(
         "Area", value="", key="shp_well_area",
-        placeholder="e.g. Permian Basin, Andrews County",
-        help="Optional area tag for filtering on the well map.")
+        placeholder="e.g. Permian Basin, Andrews County")
 
     if not path_input.strip():
         st.info("Enter a shapefile path or directory to begin.")

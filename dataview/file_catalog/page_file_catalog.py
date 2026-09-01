@@ -173,8 +173,7 @@ def _tab_scan(engine, dialect):
         min_value=1, max_value=16,
         value=int(st.session_state.get("fc_phase2_workers", 8)),
         key="fc_phase2_workers_slider",
-        help="Files per chunk extracted in parallel. Lower for DLIS-heavy "
-             "batches; higher for many small files. Default 8.",
+
     )
     st.session_state["fc_phase2_workers"] = _w
 
@@ -1425,9 +1424,7 @@ def _tab_pipeline(engine, dialect):
                                     step=10, key="pl_dc_limit")
         dc_workers = dc2.number_input(
             "Workers", min_value=1, max_value=16, value=1, step=1,
-            key="pl_dc_workers",
-            help="1 = serial (safe). >1 only if the cataloger modules open "
-                 "their own connection per call.")
+            key="pl_dc_workers")
         dc_dry = dc3.checkbox("Dry run", value=True, key="pl_dc_dry")
         if st.button("Run deep catalog", type="primary", key="pl_dc_run",
                      use_container_width=True):

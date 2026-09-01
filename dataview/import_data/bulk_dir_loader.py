@@ -2356,9 +2356,7 @@ def render_match_map(ss, server, database, schema="dataview"):
                     f"⏭ Skip {_no}**{r['target']}**"
                     + (f"  ⟵ `{r.get('src_file')}`" if r.get("src_file") else "")
                     + " — don't map, don't promote",
-                    key=f"bdlskip_{r['skey']}",
-                    help="The staged rows stay in the staging table; they just never reach "
-                         "dataview. Nothing is deleted.")
+                    key=f"bdlskip_{r['skey']}")
                 # ⚠ THE SILENT LOSS — a nullable target means nothing else will ever tell you
                 if r.get("dropped_cols"):
                     _d = r["dropped_cols"]
@@ -3125,9 +3123,7 @@ def render_fk_resolution(ss, server, database, schema="dataview"):
         for _n, _p in enumerate(_seedable):
             _allmap[_p] = _cols[_n % len(_cols)].checkbox(
                 f"☑ Add all — {_p} ({len(open_parents[_p]['values'])})",
-                value=True, key=f"bdlfkall_{_p}",
-                help="Seed every unmatched value into this parent. Untick "
-                     "to clear them all and decide row by row.")
+                value=True, key=f"bdlfkall_{_p}")
 
     with st.form("bdl_phase4"):
         editors = {}
@@ -3702,8 +3698,7 @@ def render_promote(ss, server, database, schema="dataview"):
                 esel = c2.selectbox("Easting", ["—"] + scols,
                                     index=(scols.index(e_g) + 1) if e_g in scols else 0,
                                     key=f"bdl_ll_e_{skey}")
-                epsg_v = c3.text_input("EPSG", key=f"bdl_ll_epsg_{skey}",
-                                       help="source CRS, e.g. 32056")
+                epsg_v = c3.text_input("EPSG", key=f"bdl_ll_epsg_{skey}")
                 if c4.button("Convert", key=f"bdl_ll_go_{skey}"):
                     if (nsel == "—" or esel == "—" or nsel == esel
                             or not str(epsg_v).strip().isdigit()):
@@ -3745,9 +3740,7 @@ def render_promote(ss, server, database, schema="dataview"):
     # after promote it's either a hard error or — worse — a silent NULL in your vault.
     if _qa is not None:
         meta_q = ss.get("bdl_mapmeta", {})
-        if st.button("🔎 Check data quality (staging)",
-                     help="Profiles every mapped column against its target column's real type "
-                          "and width. Nothing is changed — it reports what promote would do."):
+        if st.button("🔎 Check data quality (staging)"):
             rep = {}
             for skey, cmap in maps.items():
                 target, stg = meta_q.get(skey, (skey, skey))
@@ -3794,9 +3787,7 @@ def render_promote(ss, server, database, schema="dataview"):
         # ── repair what is deterministically repairable ─────────────────────────────
         if _repair is not None and ss.get("bdl_qa"):
             rc1, rc2 = st.columns([1, 3])
-            if rc1.button("🔧 Plan repairs",
-                          help="Work out which staged values can be repaired without guessing "
-                               "— fractions, units, thousands separators. Nothing changes yet."):
+            if rc1.button("🔧 Plan repairs"):
                 plan_all, refuse_all = {}, {}
                 for skey, cmap in maps.items():
                     target, stg = meta_q.get(skey, (skey, skey))
@@ -3849,8 +3840,7 @@ def render_promote(ss, server, database, schema="dataview"):
         # here — every row loads and some dates are simply wrong — so infer per column from
         # its own values, and where the column genuinely can't say, refuse rather than pick.
         if _repair is not None and ss.get("bdl_qa"):
-            if st.button("📅 Check date formats",
-                         help="Infers each date column's format from its own values."):
+            if st.button("📅 Check date formats"):
                 found = []
                 for skey, cmap in maps.items():
                     target, stg = meta_q.get(skey, (skey, skey))
@@ -4046,9 +4036,7 @@ def render_promote(ss, server, database, schema="dataview"):
             # NULLs, FK conflicts and duplicate keys with the server's own message, before
             # anything half-commits. One transaction (not per-table) so children see their
             # parents' rows, exactly as they would in the real run.
-            if dc1.button("🧪 Dry run (rollback)",
-                          help="Runs the real INSERTs and rolls them back — nothing is written. "
-                               "Shows what would fail, and what would load."):
+            if dc1.button("🧪 Dry run (rollback)"):
                 res, failed, p = [], None, None
                 with eng.connect() as cx:
                     tr = cx.begin()
@@ -4697,9 +4685,7 @@ def render_backlog(server, database, schema="dataview"):
         # the parent is real data rather than a row minted to satisfy a key.
         if c1.button(f"⬇ Seed {_rec_all} well(s) from the reference master",
                      key="bdl_backlog_seed", disabled=not _rec_all,
-                     use_container_width=True,
-                     help="Copies name, operator and location as the master "
-                          "states them. The held rows promote on the next run."):
+                     use_container_width=True):
             n, already = sfm.seed(eng, _rec)
             if n:
                 st.success(f"Seeded {n} well(s). Run Promote — the held rows "
@@ -4720,9 +4706,7 @@ def render_backlog(server, database, schema="dataview"):
                                  key="bdl_backlog_arm")
             if c2.button(f"⊘ Null the well link on their rows",
                          key="bdl_backlog_null", disabled=not _armed,
-                         use_container_width=True,
-                         help="Blanks the well key in STAGING so the rows "
-                              "promote unattached. dv_* is not touched."):
+                         use_container_width=True):
                 _n = 0
                 for _t, _c in sfm.CHILDREN:
                     try:
@@ -4866,8 +4850,7 @@ def run():
     ss = st.session_state
     hc1, hc2 = st.columns([4, 1])
     hc1.header("Bulk Tabular Loader")
-    if hc2.button("↻ Reset run", help="Clear scan, mappings and staged state and start over "
-                                       "(keeps server/database/paths)"):
+    if hc2.button("↻ Reset run"):
         keep = {k: ss[k] for k in ("bdl_server", "bdl_db", "bdl_dir", "bdl_cat", "bdl_bulk",
                                    "bdl_recursive", "bdl_schema") if k in ss}
         for k in [k for k in ss.keys() if k.startswith("bdl_") or k.startswith("_cat")]:
@@ -4915,11 +4898,7 @@ def run():
     else:
         directory = clean_path(st.text_input(
             "Directory or single file (CSV / Excel)",
-            value=ss.get("bdl_dir", ""),
-            help="A folder scans everything in it; a single FILE scans just "
-                 "that one and runs the same six phases. Quotes from "
-                 "Explorer's 'Copy as path' are stripped for you, as is a "
-                 "leading '& ' from PowerShell."))
+            value=ss.get("bdl_dir", "")))
         if directory and os.path.isfile(directory):
             st.caption(f"📄 Single file — {os.path.basename(directory)}. "
                        f"Phases 1–6 run on it alone.")
@@ -4927,11 +4906,7 @@ def run():
                                 value=ss.get("bdl_recursive", False))
         force = st.checkbox(
             "Force re-extract (ignore the file catalog)",
-            value=ss.get("bdl_force", False),
-            help="Unchanged files are normally skipped — their content hash already "
-                 "matches dv_global_file_catalog and their rows are loaded. Tick this "
-                 "when the EXTRACTOR changed rather than the data: the bytes are "
-                 "identical, so the gate would skip files that now extract differently.")
+            value=ss.get("bdl_force", False))
         ss["bdl_force"] = force
     # Persist the shared config NOW. The 🧭 branch below renders and
     # returns, so the assignment further down never ran in assistant mode and
@@ -4984,9 +4959,7 @@ def run():
             _c1, _c2 = st.columns([1, 2])
             _days = _c1.number_input("older than (days)", min_value=0, max_value=365, value=7,
                                      step=1, key="bdl_sweep_days")
-            _keep = _c2.checkbox("keep the OCR do-later bucket", value=True, key="bdl_sweep_keep",
-                                 help="Those documents were deferred FOR work. A queue that "
-                                      "empties itself after a week isn't a queue.")
+            _keep = _c2.checkbox("keep the OCR do-later bucket", value=True, key="bdl_sweep_keep")
             if st.button("Preview sweep", key="bdl_sweep_prev"):
                 try:
                     ss["bdl_sweep_list"] = sweep_work(bulk_dir, int(_days), dry_run=True,

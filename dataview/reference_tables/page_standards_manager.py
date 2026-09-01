@@ -424,8 +424,7 @@ def _render_reference_tab(engine, name: str, cfg: dict):
                 if col == pk:
                     row_vals[col] = st.text_input(
                         f"{col} (primary key)*",
-                        key=f"add_{pk}_{col}",
-                        help="This is the canonical code — keep it SHORT and UPPERCASE")
+                        key=f"add_{pk}_{col}")
                 elif col in ("uom_type",):
                     row_vals[col] = st.selectbox(
                         col,

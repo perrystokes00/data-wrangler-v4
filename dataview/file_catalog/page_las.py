@@ -63,7 +63,7 @@ def run():
             "SOURCE tag",
             value=st.session_state.get(_SOURCE_KEY, "LAS_IMPORT"),
             key="las_source_input",
-            help="Stamped on every inserted row as SOURCE.",
+
         )
         st.session_state[_SOURCE_KEY] = source
 
@@ -71,7 +71,7 @@ def run():
             "Load WELL_LOG_CURVE_VALUE (depth samples)",
             value=False,
             key="las_load_values",
-            help="Can produce millions of rows per file. Leave off for catalogue-only loads.",
+
         )
 
     tab_single, tab_batch = st.tabs(["📄 Single File", "📁 Batch Directory"])
@@ -224,7 +224,7 @@ def _render_batch(engine, source: str, load_values: bool):
         value=st.session_state.get(_FOLDER_KEY, ""),
         key="las_batch_folder",
         placeholder=r"e.g. C:\Data\LAS_Files",
-        help="All .las files in this folder will be scanned.",
+
     )
     if folder:
         st.session_state[_FOLDER_KEY] = folder

@@ -472,8 +472,7 @@ def _render_aoi_picker(engine, dialect):
         options=options,
         key="fs_aoi_picker",
         label_visibility="collapsed",
-        help="Optional. Limits the selection to wells inside the "
-             "chosen layer's polygon(s).",
+
     )
 
     if choice == options[0]:

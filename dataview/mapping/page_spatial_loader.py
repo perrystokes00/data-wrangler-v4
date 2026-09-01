@@ -143,9 +143,7 @@ def render(engine=None):
     } for r in ok]), hide_index=True, use_container_width=True, height=260)
 
     _picked = st.multiselect(
-        "Layers to load", [r["layer"] for r in ok], key="sl_pick",
-        help="A 137-layer geodatabase is mostly CAD annotation and raster "
-             "auxiliary tables. Take the ones that mean something.")
+        "Layers to load", [r["layer"] for r in ok], key="sl_pick")
     if not _picked:
         return
 
@@ -167,9 +165,7 @@ def render(engine=None):
     _src = c2.selectbox(
         "Source", _srcs,
         index=_srcs.index("SHAPEFILE") if "SHAPEFILE" in _srcs else 0,
-        key="sl_src",
-        help="Must already exist in dv_r_source. Add a new code on the "
-             "Reference Tables page — an import should not mint one.")
+        key="sl_src")
 
     if st.button(f"⬇ Load {len(_picked)} layer(s)", type="primary",
                  key="sl_load", use_container_width=True):

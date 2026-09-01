@@ -5412,7 +5412,7 @@ def _seis_filter_box(label, key, values, help_text=None):
     opts = ["All"] + values
     if st.session_state.get(key) not in opts:
         st.session_state.pop(key, None)
-    sel = st.selectbox(label, opts, key=key, help=help_text)
+    sel = st.selectbox(label, opts, key=key)
     return None if sel == "All" else sel
 
 
@@ -5650,10 +5650,10 @@ def _render_seis_basket():
     # dead-ending on a disabled button.
     _step = 0
     if _bp.button("◀", key="seis_basket_prev_btn",
-                  use_container_width=True, help="Previous line"):
+                  use_container_width=True):
         _step = -1
     if _bn.button("▶", key="seis_basket_next_btn",
-                  use_container_width=True, help="Next line"):
+                  use_container_width=True):
         _step = 1
     if _step:
         _to = _multi[(_idx + _step) % len(_multi)]
@@ -5673,8 +5673,7 @@ def _render_seis_basket():
             st.session_state["_seis_pick"] = dict(_hit)
             st.rerun()
     if _b2.button("Send to map", key="seis_basket_send_btn",
-                  use_container_width=True,
-                  help="Draw only these lines on the map."):
+                  use_container_width=True):
         _lines = sorted("%s|%s" % (h.get("survey"), h.get("line"))
                         for h in _multi if h.get("line"))
         _survs = sorted({str(h.get("survey")) for h in _multi})
@@ -5696,9 +5695,7 @@ def _render_seis_basket():
     if st.session_state.pop("_seis_gal_close", False):
         st.session_state["seis_basket_all"] = False
     st.checkbox("▦ Show all %d sections, one after another" % len(_multi),
-                key="seis_basket_all",
-                help="Every picked line stacked down the page. Each one is "
-                     "a file read and a figure, so it is opt-in.")
+                key="seis_basket_all")
     # AFTER the rerun -- st.rerun() raises and discards anything already
     # rendered, the scar that hid the colour-grid errors for a session.
     _bm = st.session_state.pop("_seis_basket_msg", None)
@@ -5821,9 +5818,7 @@ def _render_seis_pick(lines=None, df3d=None):
             st.success(_pm)
         _pc = st.columns([1, 1, 3])
         if _pc[0].button("Show on map", key="seis_push_map_btn",
-                         disabled=not _f,
-                         help="Draw exactly the %d match(es) above, and "
-                              "nothing else." % len(_f)):
+                         disabled=not _f):
             # EVERYTHING SELECTED IS "all", NOT A PICK OF EVERYTHING. A
             # pick listing every line looks identical today but freezes
             # the map against whatever is catalogued next.
@@ -5836,10 +5831,7 @@ def _render_seis_pick(lines=None, df3d=None):
                     "pick", _ps, _pl,
                     "Map set to %d line(s) from %d survey(s)."
                     % (len(_pl), len(_ps)), msg_key="seis_push_msg")
-        if _pc[1].button("Show all", key="seis_push_all_btn",
-                         help="Undo any pick and draw every survey -- the "
-                              "way back from a selection made here or on "
-                              "the second screen."):
+        if _pc[1].button("Show all", key="seis_push_all_btn"):
             _write_map_seis("all", [], [], "Map showing every survey.",
                             msg_key="seis_push_msg")
         # SAY WHAT THE MAP IS DOING NOW, which is not what the filters show
@@ -7163,9 +7155,7 @@ def _render_mud_log(engine, uwi):
             data=_html.encode("utf-8"),
             file_name="mudlog_%s.html"
                       % (_ex.header.get("Well Name", "well").replace(" ", "")),
-            mime="text/html", key="ml_html_dl",
-            help="Opens in any browser with no server. Scroll the log, drag "
-                 "the column dividers, zoom, and press F11 for full screen.")
+            mime="text/html", key="ml_html_dl")
     except Exception as _hexc:
         st.caption("Full-screen page unavailable: %s" % _hexc)
 
@@ -9272,9 +9262,7 @@ def _render_seed_reference(engine):
             _use_bb = st.checkbox(
                 "Only inside the drawn box  (%.3f–%.3f lat, %.3f–%.3f lon)"
                 % (_bb[0], _bb[1], _bb[2], _bb[3]),
-                key="wm_seed_use_bbox",
-                help="Loads only the reference wells inside the shape you "
-                     "drew, instead of the whole county.")
+                key="wm_seed_use_bbox")
         else:
             st.caption("Draw a box or circle on the map to load a smaller "
                        "area than a whole county.")
@@ -9305,9 +9293,7 @@ def _render_seed_reference(engine):
         _, _tot, _new = _counts
         _m1, _m2 = st.columns(2)
         _m1.metric("In the master", format(_tot, ","))
-        _m2.metric("Not yet in dv_well", format(_new, ","),
-                   help="What this would insert. The rest are already here "
-                        "and are left untouched.")
+        _m2.metric("Not yet in dv_well", format(_new, ","))
         _what = "the drawn box" if _use_bb else _county
         if not _new:
             st.success("Every located well in %s is already in the database."
@@ -9481,12 +9467,7 @@ def _render_saved_places(engine):
     # one that is absent.
     _own = _pick in ((_load_user_prefs().get("places") or {}))
     if _pl5.button("\u270e", key="wm_place_edit_btn", use_container_width=True,
-                   disabled=not _own,
-                   help=("Rename this place, or point it at the box you "
-                         "have drawn" if _own else
-                         "Built-in places and petroleum regions cannot be "
-                         "edited \u2014 they come from code and from your "
-                         "data")):
+                   disabled=not _own):
         # A REQUEST FLAG CONSUMED BEFORE THE WIDGETS DRAW. The rename box
         # is pre-filled with the current name, so it has to exist only
         # once a place is chosen -- setting its value after it exists is
@@ -9496,10 +9477,7 @@ def _render_saved_places(engine):
             st.session_state.get("wm_place_ren_ver", 0) + 1)
         st.rerun()
     if _pl3.button("🗑", key="wm_place_del", use_container_width=True,
-                   disabled=not _own,
-                   help=("Remove this saved place" if _own else
-                         "Built-in places and petroleum regions cannot be "
-                         "removed — they come from code and from your data")):
+                   disabled=not _own):
         if _delete_place(_pick):
             st.rerun()
     # NOT "the current view" -- Python is never told where you panned or
@@ -9542,11 +9520,7 @@ def _render_saved_places(engine):
         placeholder=("name this area…" if _can_save
                      else "draw a box to save"),
         disabled=not _can_save,
-        help=("Names the extent you drew or drilled and adds it to Go to."
-              if _can_save else
-              "Nothing to save yet. The map cannot tell Python where you "
-              "panned or zoomed to — draw a box with the rectangle tool, "
-              "or run a search, and THAT extent is what a name saves."),
+
         label_visibility="collapsed")
     if _newname.strip() and _can_save:
         # NORMALISE BEFORE STORING. The fallback is a different shape
@@ -9625,9 +9599,7 @@ def _render_saved_places(engine):
                 label_visibility="collapsed")
             if _bc[2].button("Save", key="wm_bnd_save_btn",
                              use_container_width=True,
-                             disabled=not _bname.strip(),
-                             help="Store the LAST shape you drew as a named "
-                                  "boundary."):
+                             disabled=not _bname.strip()):
                 _berr = _save_drawn_boundary(
                     engine, _bname, _btype, _bshapes[-1])
                 st.session_state["wm_bnd_msg"] = (
@@ -9686,11 +9658,7 @@ def _render_saved_places(engine):
                    or st.session_state.get("_active_drill_bbox"))
             if _e2.button("Use the box I drew", key="wm_place_repoint_btn",
                           use_container_width=True,
-                          disabled=not _rb,
-                          help=("Point %s at the extent currently drawn"
-                                % _ed) if _rb else
-                          "Draw a box first, then this will point the "
-                          "place at it"):
+                          disabled=not _rb):
                 _err = _repoint_place(_ed, _rb)
                 st.session_state["wm_place_edit_msg"] = (
                     _err or "\u201c%s\u201d now points at the box you "
@@ -10296,10 +10264,7 @@ def run(engine=None):
         # doesn't regenerate a PDF nobody asked for.
         _pdf_key = f"_summary_pdf_{cache_key}"
         if bp.button("⬇ PDF", key="summary_pdf_btn",
-                     use_container_width=True,
-                     help="Generate a PDF with a real text layer. Prefer "
-                          "this over printing the saved HTML — printed "
-                          "PDFs contain no searchable or extractable text."):
+                     use_container_width=True):
             with st.spinner(f"Rendering {len(_summary_uwis)} ticket(s)…"):
                 _pdf, _err = _scout_ticket_pdf(
                     all_html, f"Scout Tickets — {len(_summary_uwis)} wells",
@@ -10530,17 +10495,11 @@ def run(engine=None):
             # draws next -- the crash lands nowhere near its cause.
             if _render_held:
                 if st.button("▶ Resume", key="wm_render_resume_btn",
-                             use_container_width=True,
-                             help="Draw the well and hexagon layers again."):
+                             use_container_width=True):
                     st.session_state.pop("_wm_render_hold", None)
                     st.rerun()
             elif st.button("⛔ Abort", key="wm_render_abort_btn",
-                           use_container_width=True,
-                           help=("Stop a render that is taking too long. It "
-                                 "lands at the next drawing step, then holds "
-                                 "the well and hexagon layers off so the page "
-                                 "comes back. Nothing is lost -- Resume "
-                                 "draws them again.")):
+                           use_container_width=True):
                 # No st.rerun(): this expander draws near the TOP of the
                 # render, so continuing costs one pass instead of two and
                 # everything below reads _render_held on this very run.
@@ -10550,11 +10509,7 @@ def run(engine=None):
         with _rc1:
             if st.button("🔄 Reset page",
                          key="wm_reset_page",
-                         use_container_width=True,
-                         help=("Clear caches AND session state, then "
-                               "reload. Use when the page is in a weird "
-                               "state and you want a fresh start without "
-                               "restarting Streamlit.")):
+                         use_container_width=True):
                 # Clear @st.cache_data — drops cached query results
                 # (BCP wells/grid/H3 outputs). Next call re-queries.
                 try:
@@ -10608,8 +10563,7 @@ def run(engine=None):
             "⛔ Render held — wells and hexagons are not being drawn. "
             "Your selection, tray and view are all kept.")
         if _hb2.button("▶ Resume", key="wm_render_resume2_btn",
-                       use_container_width=True,
-                       help="Draw the well and hexagon layers again."):
+                       use_container_width=True):
             st.session_state.pop("_wm_render_hold", None)
             st.rerun()
 
@@ -11557,11 +11511,7 @@ def run(engine=None):
         area_sel = st.selectbox(
             "🗂 Schema", _area_labels_display,
             key="wm_area_sel",
-            help="Which database schema to query. 'All schemas' reads "
-                 "both dataview (onshore) and dataview_gom (offshore). "
-                 "Gulf of America reads only dataview_gom. Geographic "
-                 "filtering (plays, state regions) lives in the Region "
-                 "selector in the left control panel.",
+
         )
 
         # Auto-zoom to the area's centroid when the selection changes.
@@ -11680,15 +11630,7 @@ def run(engine=None):
         # default", and it leaves a deliberate later choice alone.
         if _conn_db and _conn_db in _db_options:
             st.session_state.setdefault("wm_map_db", _conn_db)
-        _map_db = st.selectbox("📊 Database", _db_options, key="wm_map_db",
-                                help="Which database the map reads from "
-                                     "(engine + bcp). Only databases carrying "
-                                     "a dataview.dv_well table are listed — "
-                                     "the map cannot read an arbitrary "
-                                     "database. Other sources reach the map by "
-                                     "being federated into "
-                                     "dataview_federation.v_well, which is how "
-                                     "the national reference draws.")
+        _map_db = st.selectbox("📊 Database", _db_options, key="wm_map_db")
 
     # ── Spatial constraint ("Constrain to") — standing, composes w/ Query ─
     # Geography filter applied after Query and before the map renders. Its
@@ -11965,11 +11907,9 @@ def run(engine=None):
         # Total depth (final_td, ft). 0 on a bound = unbounded that side.
         _tc1, _tc2 = st.columns(2)
         _td_lo = _tc1.number_input("Min TD (ft)", min_value=0, max_value=60000,
-                                   step=500, key="wm_q_td_lo",
-                                   help="0 = no minimum")
+                                   step=500, key="wm_q_td_lo")
         _td_hi = _tc2.number_input("Max TD (ft)", min_value=0, max_value=60000,
-                                   step=500, key="wm_q_td_hi",
-                                   help="0 = no maximum")
+                                   step=500, key="wm_q_td_hi")
         qvalue = (int(_td_lo), int(_td_hi)) if (_td_lo or _td_hi) else None
         if qvalue:
             st.caption(f"TD {qvalue[0] or '0'}–{qvalue[1] or '∞'} ft")
@@ -12060,11 +12000,7 @@ def run(engine=None):
         # than discovered after a surprising result.
         st.radio(
             "Search", ["Mapped wells", "Whole database"],
-            horizontal=True, key="wm_ai_scope",
-            help="Mapped wells filters the wells already on the map. Whole "
-                 "database queries dv_well directly and REPLACES what is "
-                 "displayed, ignoring the current area — use it when the "
-                 "answer may lie outside what is loaded.")
+            horizontal=True, key="wm_ai_scope")
         # ── NEAR A FEATURE — the deterministic spatial search ──────────────
         # Sits under the AI question deliberately. The geometry is IN THE
         # DATABASE, so "which wells are near line C" is one STDistance away —
@@ -12097,10 +12033,7 @@ def run(engine=None):
                 _nm = _nf2.selectbox("Name", _names, key=f"wm_near_name_{_feat}")
                 _dist = _nf3.number_input(
                     "Within (m)", min_value=10, max_value=int(_NEAR_MAX_M),
-                    step=100, key="wm_near_dist",
-                    help="Straight-line distance on the ellipsoid. "
-                         "STDistance on a geography column returns METRES "
-                         "whatever CRS the source data arrived in.")
+                    step=100, key="wm_near_dist")
                 if _nf4.button("📍 Find", key="wm_near_run",
                                use_container_width=True):
                     _uwis = _wells_near_feature(engine, _feat, _nm, _dist)
@@ -12281,10 +12214,7 @@ def run(engine=None):
                                 "dv_well." + (f"\n\n{_why}" if _why else ""))
                         else:
                             _all_cols = st.checkbox(
-                                "All columns", key="ai_hdr_all",
-                                help=f"Show every populated column "
-                                     f"({len(_hdf.columns)}) instead of the "
-                                     f"common ones.")
+                                "All columns", key="ai_hdr_all")
                             _view = _hdf
                             if not _all_cols:
                                 _pick = [c for c in WELL_HEADER_CORE
@@ -12835,10 +12765,7 @@ def run(engine=None):
         # against gas is a real question about a field, not a preference.
         if "db_production_heat" in active_db:
             st.radio("Heatmap weight", ["BOE", "Oil", "Gas"],
-                     key="wm_db_prod_heat_wt", horizontal=True,
-                     help="BOE counts 6 Mcf of gas as one barrel. Intensity "
-                          "is sqrt-scaled so a few giant wells do not wash "
-                          "out the rest of the field.")
+                     key="wm_db_prod_heat_wt", horizontal=True)
 
         # 🌀 WELL PATHS ARE COMPUTED, NOT LOADED. Nothing in any load
         # builds them: the survey stations carry md/incl/azim, and the
@@ -12869,11 +12796,7 @@ def run(engine=None):
                 _pc1.caption(f"🌀 {_stored:,} stored path(s). Recompute after "
                              f"loading more surveys.")
             if _pc2.button("Compute paths", key="wm_compute_paths",
-                           use_container_width=True,
-                           help="Minimum curvature from md/incl/azim, projected to "
-                                "WGS84, generalised, and stored. Only wells whose "
-                                "closure would be visible at map scale are kept — "
-                                "a vertical hole is a dot and stays a marker."):
+                           use_container_width=True):
                 try:
                     with st.spinner("Computing well paths…"):
                         _res, _probs = _wp.compute_paths(
@@ -13278,7 +13201,7 @@ def run(engine=None):
                     "H3 Resolution",
                     options=[4, 5, 6, 7],
                     value=_cur_res,
-                    help="R4: continent · R5: state · R6: county · R7: play",
+
                 )
                 if _h3_res_choice != _cur_res:
                     st.session_state["h3_resolution"] = int(_h3_res_choice)
@@ -13901,11 +13824,7 @@ def run(engine=None):
             _h3_src_pick = st.selectbox(
                 "Density source",
                 ["Loaded wells", "Reference (4M)", "Everything"],
-                key="h3_density_source",
-                help="Which wells the hexagons count. The density views union "
-                     "this database, the Gulf schema and the national "
-                     "reference; blending them makes a count nobody can "
-                     "interpret, so pick one.")
+                key="h3_density_source")
             if _h3_src_pick == "Reference (4M)":
                 _h3_schema = "well_ref"
                 _h3_has_sources = True      # the reference needs no area pick
@@ -16037,30 +15956,14 @@ def run(engine=None):
         # columns are built -- session_state carries it, so the layout that
         # draws is the layout the last toggle asked for.
         _rvb.toggle(
-            "▦ Lease strip", key="wm_lease_strip",
-            help="A narrow lease panel beside the map, where the nav "
-                 "sidebar is. Same session, so it needs no Connect and the "
-                 "map redraws at once. The sidebar folds away to pay for "
-                 "the width; the panel can be moved to its own window from "
-                 "its foot.")
+            "▦ Lease strip", key="wm_lease_strip")
         _rvh.toggle(
-            "⏸ Hold for Map", key="wm_hold_map",
-            help="Don't redraw the map on every option change. Pick your "
-                 "area, query and layers, then press Apply to draw once. "
-                 "Map interactions — drawing a box, drilling, picking a "
-                 "line — are never held; only the options above are.")
+            "⏸ Hold for Map", key="wm_hold_map")
         # THE ONE CONTROL THAT MAKES CLICKING FREE. See the _ret block above
         # for why a pick and a rebuild are the same signal. Its own column so
         # it reads as a mode, not an action -- it stays on until turned off.
         _frozen = _rvf.toggle(
-            "🔒 Freeze map", key="wm_freeze_map",
-            help="Stop clicks rebuilding the map. Hover still identifies "
-                 "every well and line, and the box / circle tools still "
-                 "select — so you can explore freely and pick in one go. "
-                 "Turn OFF to click a single well or line open into a "
-                 "scout ticket. OFF by default: a click opening what you "
-                 "clicked is what people expect, and freezing is the "
-                 "deliberate trade of that for speed.")
+            "🔒 Freeze map", key="wm_freeze_map")
         # ── RECORD WHAT THIS SESSION DOES ───────────────────────────────
         # Writes the core operations -- the spatial lookups, the WHERE the
         # AI filter built, what each returned -- to a JSONL in C:\Bulk\
@@ -16071,10 +15974,7 @@ def run(engine=None):
         # happens inside the operations, so nothing here has to be kept in
         # step with what the page draws.
         _rec_on = _rvr.toggle(
-            "🎬 Record", key=workflow_capture.ON_KEY,
-            help="Write what this session asks the database to C:\\Bulk\\"
-                 "reports, so it can be replayed and re-checked later. "
-                 "Records operations and their results, not keystrokes.")
+            "🎬 Record", key=workflow_capture.ON_KEY)
         if _rec_on and not workflow_capture.current_path():
             _p = workflow_capture.start()
             if _p:
@@ -16087,15 +15987,7 @@ def run(engine=None):
                 st.caption("🎬 recording → `%s`" % os.path.basename(_wfp))
         if _rvc.button("✗ Clear wells", key="wells_clear_viewport",
                        use_container_width=True,
-                       disabled=not _wells_on_map(),
-                       help=("Remove ALL displayed wells — the drilled "
-                             "selection (rectangle / circle), the base well "
-                             "layer, the Results and the tray — leaving just "
-                             "the basemap. Re-select an area or run a Query "
-                             "to load wells again."
-                             if _wells_on_map() else
-                             "Nothing to clear — no wells are selected or "
-                             "displayed.")):
+                       disabled=not _wells_on_map()):
             _clear_wells_state()
             st.rerun()
         # THE TRASH ICON IN THE DRAW TOOLBAR CANNOT DO THIS. It empties
@@ -16137,14 +16029,7 @@ def run(engine=None):
                         if st.session_state.get(_k)]
         if _rvb.button("✗ Clear box", key="wm_clip_clear",
                        use_container_width=True,
-                       disabled=not _constraints,
-                       help=("Drop every area constraint (%s) and stop "
-                             "clipping, so layers cover the whole state "
-                             "again. Wells, tray and view are kept — "
-                             "✗ Clear wells is for those."
-                             % ", ".join(_c.lstrip("_") for _c in _constraints)
-                             if _constraints else
-                             "Nothing to clear — no area constraint is set.")):
+                       disabled=not _constraints):
             # A REQUEST for the toggle: the Clip checkbox is built later on
             # this same run, and assigning a widget its own key after it
             # exists raises on a LATER run -- scar #6.
@@ -16163,10 +16048,7 @@ def run(engine=None):
                  % (", ".join(_constraints) or "none"))
             st.rerun()
         if _rv1.button("🎯 Reset view", key="wells_reset_view",
-                       use_container_width=True,
-                       help="Re-frame the map on what is currently selected. "
-                            "Wells, tray and Results are kept — only the "
-                            "pan/zoom is reset."):
+                       use_container_width=True):
             # Tell the view-persist JS to wipe its sessionStorage copy BEFORE
             # it tries to restore, or the browser puts the old view straight
             # back and the button appears to do nothing.
@@ -16198,11 +16080,7 @@ def run(engine=None):
             _md1, _md2, _md3, _md4 = st.columns(4)
             with _md1:
                 _show_legend = st.checkbox(
-                    "🏷 Map legends", key="wm_show_legend",
-                    help="Floating keys on the map: well status bottom-right, "
-                         "leases bottom-left. Both fold to their title bar "
-                         "— the fold is remembered in the browser, so "
-                         "collapsing one costs no redraw.")
+                    "🏷 Map legends", key="wm_show_legend")
             with _md2:
                 # STILL A SELECTBOX, FOR A DIFFERENT REASON NOW. The old one
                 # was that this lived in a ~200px column and three horizontal
@@ -16220,12 +16098,7 @@ def run(engine=None):
                 st.selectbox(
                     "🟦 Lease colour",
                     ["producing", "vintage", "size", "owner", "status"],
-                    key="wm_lease_color_by",
-                    help="Producing (3 groups), Vintage (effective decade, "
-                         "dark = older) and Size (acreage band, dark = "
-                         "bigger) all work. Owner is synthetic. Status is a "
-                         "single value once non-authorized leases are "
-                         "filtered out.")
+                    key="wm_lease_color_by")
             with _md3:
                 # SHOW ONLY WHAT IS IN THE BOX. Selecting cells outlines them
                 # and leaves everything else drawn, which is right for
@@ -16233,16 +16106,10 @@ def run(engine=None):
                 # _capture_map_view, so a saved place comes back clipped the
                 # way it was saved.
                 st.checkbox(
-                    "🔲 Clip to selection", key="wm_clip_to_box",
-                    help="Draw only what falls inside the box or circle you "
-                         "drew — hexagons by their centre, wells and leases "
-                         "by position. Drawing a box switches this on by "
-                         "itself; ✗ Clear box turns it off again.")
+                    "🔲 Clip to selection", key="wm_clip_to_box")
             with _md4:
                 _ppdm_symbols = st.checkbox(
-                    "🛢 PPDM well symbols", key="wm_ppdm_symbols",
-                    help="Draw wells as standard PPDM/API symbols (shape = "
-                         "status) instead of plain coloured dots")
+                    "🛢 PPDM well symbols", key="wm_ppdm_symbols")
             # Click-to-centre is NOT here. It is a button ON the map -- see
             # dv_click_centre. A map control buried in a collapsed expander
             # BELOW the map is a control nobody finds, which is exactly how
@@ -18128,10 +17995,7 @@ def render_lease_view(engine, compact=False, default_mode=None):
             _seed if _seed in LEASE_MODES else LEASE_MODES[0])
     _mode = st.radio(
         "What the map draws", LEASE_MODES,
-        key="lv_mode", horizontal=(not compact),
-        help="townships is the overview, leases is the detail. Drawing "
-             "both at once is what makes the map unreadable in the "
-             "middle zooms.")
+        key="lv_mode", horizontal=(not compact))
     _by = st.selectbox(
         "Colour leases by", list(LEASE_COLOUR_BY),
         index=(list(LEASE_COLOUR_BY).index(_cur["colour_by"])
@@ -18170,9 +18034,7 @@ def render_lease_view(engine, compact=False, default_mode=None):
     _cosel = st.multiselect("County", _counties,
                             default=[s for s in _cur.get("county") or []
                                      if s in _counties],
-                            key="lv_county",
-                            help="A lease that straddles two counties is "
-                                 "listed under both.")
+                            key="lv_county")
     _src = st.multiselect("Source", _srcs,
                           default=[s for s in _cur["source"] if s in _srcs],
                           key="lv_src")
@@ -18201,9 +18063,7 @@ def render_lease_view(engine, compact=False, default_mode=None):
             "Elevation (ft)", int(_el_lo), int(_el_hi),
             (int(_cur.get("elev_min") or _el_lo),
              int(_cur.get("elev_max") or _el_hi)),
-            step=100, key="lv_elev",
-            help="Wyoming runs about 3,360 to 10,550 ft, so this separates "
-                 "basin from mountain. Nothing here is below 100 ft.")
+            step=100, key="lv_elev")
         # ONLY A REAL NARROWING COUNTS. Left at the full span it is not a
         # filter, and sending it as one would hide every tract whose
         # elevation was never stamped.
@@ -18220,15 +18080,11 @@ def render_lease_view(engine, compact=False, default_mode=None):
     _twnsel = st.multiselect("Near which town(s)", _towns,
                              default=[x for x in _cur.get("towns") or []
                                       if x in _towns],
-                             key="lv_towns",
-                             help="Leave empty to measure to whichever town "
-                                  "is nearest.")
+                             key="lv_towns")
     _rdsel = st.multiselect("Near which highway(s)", _routes,
                             default=[x for x in _cur.get("roads") or []
                                      if x in _routes],
-                            key="lv_roads",
-                            help="Interstates and US highways. Leave empty "
-                                 "to measure to whichever is nearest.")
+                            key="lv_roads")
     # ── WETLAND, AS A SHARE RATHER THAN A FLAG ──────────────────────────
     # 23,059 of 24,178 leases contain SOME wetland -- a creek across a
     # section counts -- so a yes/no would mark 95% of Wyoming and mean
@@ -18236,26 +18092,19 @@ def render_lease_view(engine, compact=False, default_mode=None):
     _wetpct = st.number_input("Minimum wetland %", min_value=0.0,
                               max_value=100.0, step=1.0, format="%.0f",
                               value=float(_cur.get("wet_min_pct") or 0),
-                              key="lv_wetpct",
-                              help="Share of the lease that is NWI wetland. "
-                                   "0 means no limit; 95% hold some.")
+                              key="lv_wetpct")
     _wetty = st.multiselect("Wetland type", _wtypes,
                             default=[x for x in _cur.get("wet_types") or []
                                      if x in _wtypes],
-                            key="lv_wetty",
-                            help="The dominant class by area within the "
-                                 "lease. Riverine is much the commonest.")
+                            key="lv_wetty")
     _mi_city = st.number_input("Within miles of a town", min_value=0.0,
                                step=1.0, format="%.0f",
                                value=float(_cur.get("miles_city") or 0),
-                               key="lv_micity",
-                               help="0 means no limit.")
+                               key="lv_micity")
     _mi_hwy = st.number_input("Within miles of a highway", min_value=0.0,
                               step=1.0, format="%.0f",
                               value=float(_cur.get("miles_hwy") or 0),
-                              key="lv_mihwy",
-                              help="Interstates and US highways (TIGER "
-                                   "S1100). 0 means no limit.")
+                              key="lv_mihwy")
 
     # ── A NAME WITHOUT A DISTANCE FILTERS NOTHING, AND SAID NOTHING ─────
     # "I didn't see matching leases moving at all." Picking Casper on its

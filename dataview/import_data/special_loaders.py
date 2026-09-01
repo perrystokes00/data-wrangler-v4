@@ -349,13 +349,10 @@ def render(engine=None):
             # NOTE the keys end in _btn: _is_action_key() must recognise these
             # or the sub-page persist sweep tries to self-assign a button key
             # and crashes on a LATER page. See CLAUDE.md, Streamlit scar 6.
-            plan = cols[0].button("Plan", key="sl_%s_plan_btn" % k,
-                                  help="Dry run — writes nothing.")
+            plan = cols[0].button("Plan", key="sl_%s_plan_btn" % k)
             go = cols[1].button("Load", key="sl_%s_apply_btn" % k,
                                 type="primary")
-            undo = cols[2].button("Undo", key="sl_%s_undo_btn" % k,
-                                  help="Remove only the rows this loader "
-                                       "wrote, by its own stamp.")
+            undo = cols[2].button("Undo", key="sl_%s_undo_btn" % k)
 
             # st.rerun() RAISES, so anything rendered before it is destroyed.
             # The outcome is stashed and drawn on the next run instead.

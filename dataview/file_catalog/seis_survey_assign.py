@@ -114,9 +114,7 @@ def seis_survey_grid(engine):
 
     name = st.text_input(
         "Survey name", key="seis_grp_name",
-        placeholder="e.g. NPR-3 2D",
-        help="Stored with SURVEY_NAME_SOURCE='manual', which stops enrich and "
-             "re-extract overwriting it. It does NOT survive a database reset.")
+        placeholder="e.g. NPR-3 2D")
 
     # ── select all / clear ──────────────────────────────────────────────────
     # Buttons rather than a master checkbox: a checkbox whose state drives

@@ -596,18 +596,11 @@ def _tab_scan(engine, dialect):
         replace = st.checkbox("Replace previous results", value=True, key="inv_replace")
     with col_b:
         max_workers = st.number_input("Threads", min_value=1, max_value=16,
-                                       value=4, key="inv_threads",
-                                       help="Used for both Phase 1 (crawl) "
-                                            "and Phase 2 (header extraction). "
-                                            "Lower for DLIS-heavy batches; "
-                                            "higher for many small files.")
+                                       value=4, key="inv_threads")
 
     run_triage_after = st.checkbox(
         "🔎 Run triage after scan",
-        value=True, key="inv_run_triage",
-        help="After headers are extracted: normalize UWI14/NAME_NORM, "
-             "cross-fill names↔UWIs from sibling files, match the well "
-             "reference, and tier the inventory (HIGH / REVIEW / LOW).")
+        value=True, key="inv_run_triage")
 
     st.caption("ℹ️ Scan collects file metadata only. Duplicate detection runs server-side after load.")
     st.divider()
@@ -2107,9 +2100,7 @@ def _tab_admin(engine, dialect, user, role):
 
                 if c_impersonate.button(
                     f"👤 Login As {su['full_name'].split()[0]}",
-                    key="u_edit_impersonate",
-                    help=f"View the app as {su['full_name']} ({su['role']})"
-                ):
+                    key="u_edit_impersonate"):
                     # Store original user before switching
                     orig_user = current_user()
                     st.session_state["inv_original_user"] = orig_user

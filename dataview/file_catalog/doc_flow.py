@@ -803,9 +803,7 @@ def render(engine=None, target=None):        # engine accepted, unused — the
             path = target
         else:
             path = clean_path(st.text_input(
-                "Folder or file", key="df_path",
-                help="Quotes from Explorer's 'Copy as path' are stripped "
-                     "for you."))
+                "Folder or file", key="df_path"))
     with c2:
         try:
             from docshape.packs import available
@@ -852,10 +850,7 @@ def render(engine=None, target=None):        # engine accepted, unused — the
     # Default is the everyday job; the rest is one toggle away.
     vocab = st.toggle(
         "🔧 Vocabulary tools", value=bool(ss.get("df_vocab")),
-        key="df_vocab_tog",
-        help="Teach the recogniser new wordings and table types. This is "
-             "an occasional admin task — leave it off to just read "
-             "documents.")
+        key="df_vocab_tog")
     ss["df_vocab"] = vocab
 
     if not vocab:
@@ -1054,12 +1049,10 @@ def render(engine=None, target=None):        # engine accepted, unused — the
         _goto(qi - 1)
     if cN.button("▶ Next", key="df_next", disabled=qi >= len(files_o) - 1):
         _goto(qi + 1)
-    if cT.button("⚑ Triage & next", key="df_tri",
-                 help="Mark this document's gaps for the assistant, move on."):
+    if cT.button("⚑ Triage & next", key="df_tri"):
         tri.add(f)
         _goto(qi + 1)
-    if cS.button("▶▶ Next incomplete", key="df_skip",
-                 help="Jump past complete documents."):
+    if cS.button("▶▶ Next incomplete", key="df_skip"):
         for j in range(qi + 1, len(files_o)):
             if stat[files_o[j]] != "✔ complete":
                 _goto(j)

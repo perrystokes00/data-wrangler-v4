@@ -802,8 +802,7 @@ def run(engine, dialect=None):
 
     top = st.columns([6, 1.2])
     top[0].subheader("📂 Well Documents")
-    if top[1].button("🔄 Refresh", use_container_width=True,
-                     help="Reload from the catalog — use after adding new data"):
+    if top[1].button("🔄 Refresh", use_container_width=True):
         try:
             st.cache_data.clear()
         except Exception:
@@ -858,10 +857,7 @@ def run(engine, dialect=None):
     scope = st.radio(
         "Include",
         ["Documents only", "All catalogued files"],
-        horizontal=True, key="wd_scope",
-        help="Documents only = PDF / Office / text / image files. "
-             "All catalogued files also counts LAS-DLIS logs and well-bearing "
-             "shapefiles, so those wells appear on the map too.")
+        horizontal=True, key="wd_scope")
     # Bound ONCE and passed to both queries. Computing it inline at each call
     # site is how the two drifted in the first place — the map honoured the
     # setting and the document table didn't.
@@ -894,25 +890,13 @@ def run(engine, dialect=None):
              f"**{int(wells['n_files'].sum()):,}** file(s) · "
              f"{len(mapped):,} plotted.")
     show_zones = st.checkbox(
-        "Show seismic coverage (2D zones + 3D footprints)", value=False,
-        help="Amber blobs = roughly where each 2D survey sits; teal rectangles "
-             "= 3D survey footprints. These ignore the well filters above "
-             "(seismic isn't well-bound).")
+        "Show seismic coverage (2D zones + 3D footprints)", value=False)
     show_geo = st.checkbox(
         "Show geographic entities (fields, leases, boundaries, pipelines)",
-        value=False,
-        help="Outlines captured from shapefiles that classify as FIELD / "
-             "LAND_TRACT / BOUNDARY / PIPELINE. Read straight from "
-             "GLOBAL_FILE_CATALOG.SPATIAL_OUTLINE, so they appear as soon as "
-             "the file is cataloged — no promote needed. Not well-bound, so "
-             "the well filters above don't apply.")
+        value=False)
 
     zoom_to = st.radio(
-        "Zoom to", ["Wells", "Everything"], horizontal=True, key="wd_zoom",
-        help="Wells = frame only the well markers (recommended). Everything = "
-             "also fit the seismic and geographic overlays, which can be on "
-             "another continent — or in the wrong ocean if a survey is "
-             "mis-georeferenced — and will zoom the map right out.")
+        "Zoom to", ["Wells", "Everything"], horizontal=True, key="wd_zoom")
 
     # ── map (click a dot to pick a well) ────────────────────────────────────
     click_uwi = None

@@ -267,10 +267,7 @@ def render(engine=None):
     pack_name = c2.selectbox("Vocabulary", packs,
                              index=packs.index("petroleum")
                              if "petroleum" in packs else 0, key="ds_pack")
-    use_sandbox = c3.toggle("🧪 Sandbox", key="ds_sandbox",
-                            help="Try wordings without touching the live "
-                                 "vocabulary. Promote them once a batch "
-                                 "confirms they hold.")
+    use_sandbox = c3.toggle("🧪 Sandbox", key="ds_sandbox")
 
     pack, overlay, overlay_path, sandbox, sb_path = load_layered(
         pack_name, use_sandbox=use_sandbox)

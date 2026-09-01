@@ -293,9 +293,7 @@ def run(engine=None, dialect: str = "mssql", embedded: bool = False):
     vt1, vt2 = st.columns([1, 3])
     mon_vault_on = vt1.checkbox(
         "Vault after processing", key="mon_vault_on",
-        value=ss.get("mon_vault_on", False),
-        help="Copy catalogued files into the governed vault and stamp "
-             "VAULT_PATH. In Run-all this runs between process and promote.")
+        value=ss.get("mon_vault_on", False))
     vt2.text_input("Vault root", key="mon_vault_root",
                    value=ss.get("mon_vault_root", r"C:\Bulk\Vault"),
                    label_visibility="collapsed", placeholder=r"C:\Bulk\Vault",
@@ -312,9 +310,7 @@ def run(engine=None, dialect: str = "mssql", embedded: bool = False):
             st.rerun()
     elif not _busy:
         if st.button("▶️ Run all (crawl → pool → promote)", type="primary",
-                     use_container_width=True,
-                     help="Crawl the folder, then automatically start the pool, "
-                          "then promote — no clicking between stages."):
+                     use_container_width=True):
             _root = (ss.get("mon_root") or "").strip()
             if not _root:
                 st.warning("Set the folder to crawl below first.")

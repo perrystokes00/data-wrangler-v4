@@ -227,12 +227,9 @@ def run(engine=None, dialect=None):
             _lbl, _help = ("⇄ Back to the main loader",
                            "Same folder, route B (bulk_dir_loader): the default — UWI gate, "
                            "file catalog, BCP staging, data-quality report, dry run, verify.")
-        if top[1].button(_lbl, key="lr_switch", help=_help):
+        if top[1].button(_lbl, key="lr_switch"):
             _switch_route(ss); st.rerun()
-        if top[2].button("⚗ Specialised loaders", key="lr_special_btn",
-                         help="Core photographs and analyses, mud logs, well "
-                              "detail -- sources whose files cannot describe "
-                              "themselves, each owning its own tables."):
+        if top[2].button("⚗ Specialised loaders", key="lr_special_btn"):
             ss["lr_route"] = "S"; ss["lr_scroll_top"] = True; st.rerun()
         top[3].caption(
             "Route B · main loader — CSV · Excel · LAS · DLIS · LIS · WITSML · PDF · Word"
