@@ -9,3 +9,9 @@
 # Tens of megabytes each and reproducible from USGS 3DEP, so they are
 # generated, never committed.
 *.png
+# Baked aerial imagery, e.g. static/naip_teapot_wells.jpg from
+# tools/build_terrain_overlay.py. Same reasoning as the terrain rasters
+# above: 18 MB for the Teapot tile alone, and re-bakeable from NAIP, so
+# it is generated on the machine that needs it, never carried in git.
+*.jpg
+*.jpeg
