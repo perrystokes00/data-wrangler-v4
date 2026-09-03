@@ -627,7 +627,7 @@ def score_file(fields: dict, engine=None) -> dict:
 
     # Cataloging only needs a way to IDENTIFY the well — a UWI or a well name.
     # Either is enough to catalog: the well can be located or created from it,
-    # and enrichment from well_master_gold fills the gaps (lat/long, etc.)
+    # and enrichment from well_master_public_v2 fills the gaps (lat/long, etc.)
     # afterwards. lat/long is NOT a cataloging requirement — it's a PROMOTE
     # requirement, satisfied later (often by enrichment). So a recognized
     # document with a clean UWI or a well name is READY to catalog.

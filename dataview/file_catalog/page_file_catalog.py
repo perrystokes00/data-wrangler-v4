@@ -1316,7 +1316,7 @@ def _tab_pipeline(engine, dialect):
         _db = _host = "?"
     st.caption(f"Target: **{_host} / {_db}**")
 
-    REF = "WELL_REF.well_ref.well_master_gold"   # 3-part cross-DB reference
+    REF = "WELL_REF.well_ref.well_master_public_v2"   # 3-part cross-DB reference
 
     # ── ① Enrich Headers ───────────────────────────────────────────────────
     with st.expander(

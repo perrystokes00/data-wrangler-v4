@@ -501,6 +501,30 @@ def _install_timers():
             _wrapped._dw_timed = True
             _g[_name] = _wrapped
             _n_wrapped += 1
+    # ── AND THE LAYER MODULE, WHICH IS WHERE A LEASE RENDER'S WORK IS ─────
+    # Everything above wraps THIS module's globals, so a lease render could
+    # account for _add_wells (0.084s mean) and nothing else: add_lease_layer,
+    # add_township_layer and add_places_layer live in geography_layers and
+    # were never wrapped. "build: geography layers" was therefore one 2.6s
+    # bar with six layers inside it and no way to tell which one cost it.
+    #
+    # WRAPPED ON THE MODULE, not on the names this file imported. Every call
+    # site imports lazily inside the function that draws, so rebinding the
+    # module attribute reaches all of them; rebinding a local name here would
+    # reach none, and would look like it worked.
+    try:
+        from dataview.mapping import geography_layers as _gl
+        for _name, _fn in list(vars(_gl).items()):
+            if (isinstance(_fn, types.FunctionType)
+                    and _name.startswith("add_")
+                    and not getattr(_fn, "_dw_timed", False)):
+                _w2 = _timed("gl." + _name, _fn)
+                _w2._dw_timed = True
+                setattr(_gl, _name, _w2)
+                _n_wrapped += 1
+    except Exception as _texc:
+        _say("[map] layer timing unavailable: %s" % str(_texc)[:120])
+
     if _n_wrapped:
         _say("[map] timing enabled on %d function(s); DW_MAP_TIMERS=0 to "
               "switch off" % _n_wrapped)
@@ -553,6 +577,57 @@ def _install_rerun_trace():
 # sheet corners, and the published 2D basemap. A place added by hand from the
 # current view is stored the same way.
 _BUILTIN_PLACES = {
+    # THE WHOLE COUNTRY, so there is a way BACK. Every other entry zooms
+    # IN, and the only route out to the continental view was the browser
+    # zoom control -- which Python never learns about, so nothing else on
+    # the page agreed that the scope had changed. A place applies itself
+    # and sets bounds the layers can read, which is what makes this an
+    # entry in the list rather than a zoom button.
+    #
+    # The lower 48 rather than all fifty states: Alaska and Hawaii would
+    # stretch the extent across the Pacific and put the continental US in
+    # a corner of it, which is not what "USA" means when you are looking
+    # for the H3 density picture.
+    # AND IT ARRIVES SET UP FOR THAT SCALE. A place carries a "view" that
+    # _apply_map_view consumes before the widgets are built -- the same
+    # channel a saved place uses -- so this is the existing mechanism, not
+    # a special case for one entry.
+    #
+    # HEXES, NOT POINTS, AND THAT IS THE WHOLE REASON. Four million
+    # individual wells across the continent is a smear that answers
+    # nothing, which is why the reference layer has a zoom floor at all.
+    # R4 is ~370 km per hex, which _h3_resolution_for_zoom already calls
+    # the continent view -- so the place and the auto-resolution agree
+    # rather than fighting on the first pan.
+    "USA (lower 48)": {
+        "bounds": [[24.5, -125.0], [49.4, -66.9]],
+        # THE SOURCE IS PART OF THE VIEW, not a separate decision. The
+        # density views union three arms and "Loaded wells" is this
+        # database only -- so at continental extent it drew Teapot and
+        # called it the United States. The 4M master is what "USA" means
+        # here. It costs: 276,679 cells in 4.43s against 1,405 in 0.11s,
+        # which is the right price for the view that was asked for and
+        # the wrong one for every other place, so it lives on this entry
+        # rather than in the default.
+        "view": {"h3_layer_on": True, "h3_resolution": 4,
+                 "wells_layer_on": False, "map_mode": "h3",
+                 "h3_density_source": "Reference (4M)",
+                 # ── EVERY OTHER GEO LAYER OFF, REFERENCE WELLS KEPT ─
+                 # Fields, boundaries, pipelines, seismic, well paths and
+                 # the production layers are all field-scale geometry
+                 # drawn from THIS database -- at continental extent they
+                 # are a few specks over Wyoming, and each one is queried
+                 # and serialised on every render to produce them.
+                 #
+                 # REFERENCE WELLS STAY ON, and that is the one that
+                 # looks like an exception and is not. It is the layer
+                 # the hexes hand over TO: its points load here, the zoom
+                 # gate holds them until 8, and crossing that line paints
+                 # them with no rerun. Switch it off at this scale and
+                 # zooming in shows nothing until something triggers a
+                 # rebuild -- Python is never told about a zoom.
+                 "pills": ["⚫ Reference wells"]},
+    },
     "Teapot Dome (NPR-3), WY": [[43.2291, -106.2482], [43.3424, -106.1585]],
 }
 
@@ -927,8 +1002,71 @@ def _geojson_to_wkt(geom: dict) -> str:
 # feature silently absent in exactly the state saved to preserve it, and the
 # save looked like it had worked. Same shape as the four lists that must
 # agree in CLAUDE.md, and the same fix: stop maintaining two.
+# h3_density_source IS IN HERE FOR THE SAME REASON THE REST ARE: a place
+# that restores the layers but not the source they read shows the right
+# hexes over the wrong wells. At USA scale "Loaded wells" is a dot over
+# Wyoming, which is exactly what it looked like.
 _VIEW_KEYS = ("map_mode", "wells_layer_on", "h3_layer_on", "h3_resolution",
-              "wm_clip_to_box", "wm_lease_color_by")
+              "wm_clip_to_box", "wm_lease_color_by",
+              "h3_density_source")
+
+# ── The geography chips ───────────────────────────────────────────────────
+# UP HERE, NOT INSIDE THE RENDER, because a saved place stores its pills as
+# LABELS and _apply_map_view restores them into the widget's key. Streamlit
+# raises when a stored value is not one of the options, so the restore has to
+# be able to see the current list -- and the list and the filter that guards
+# it must be the same list, or they drift.
+GEO_PILL_DEFS = [
+    ("geo_fields",     "🟩 Fields"),
+    ("geo_boundaries", "🟪 Boundaries"),
+    ("geo_pipelines",  "➖ Pipelines"),
+    ("geo_seismic",    "🟪 Seismic"),
+    ("geo_refwells",   "⚫ Reference wells"),
+    ("geo_wellpath",   "🌀 Well paths"),
+    # THE RENDERERS WERE ALREADY HERE. _add_production_bubbles and
+    # _add_production_heatmap survived the July cull of the seven data-layer
+    # checkboxes -- the comment above active_db = set() says so: "the render
+    # blocks are now dead but harmless, and can be stripped separately".
+    # They were never stripped, so this is a switch being reconnected, not a
+    # feature being written. Both read db_* flags, so they come back the
+    # moment the chips set them.
+    ("db_production",      "📈 Production bubbles"),
+    ("db_production_heat", "🔥 Production heat"),
+]
+GEO_PILL_LABELS = {_lbl for _f, _lbl in GEO_PILL_DEFS}
+
+# ── WHAT THE REFERENCE WELLS CAN BE COLOURED BY ───────────────────────────
+# THE PERCENTAGES ARE IN THE LABELS ON PURPOSE. Measured 2 Sep in one scan of
+# all 4,031,052 master rows, counting a value as present only when it is
+# neither NULL nor a sentinel -- 1,526,990 rows carry the literal string
+# 'UNKNOWN', so a plain non-NULL count called well type 93.7% filled when it
+# is 55.8%. Picking a colouring is picking how much of the map stays grey,
+# and that belongs in front of the choice rather than in a comment.
+#
+# WYOMING IS THE EXCEPTION AND IT IS THE STATE IN USE. Type and status are
+# the two best columns nationally and BOTH are empty here: zero of 1,681 at
+# Teapot, zero of 12,879 in Natrona. Spud is the reverse -- 35% nationally,
+# 79% at Teapot -- so the national winner is the wrong default for a Wyoming
+# view, and the label says so rather than leaving it to be discovered.
+REFWELL_BY_LABELS = {
+    "status":   "Well status — 72% of US, none in WY",
+    "type":     "Well type — 56% of US, none in WY",
+    "operator": "Operator — 52% of US, 100% at Teapot",
+    "depth":    "Total depth — 50% of US, 95% at Teapot",
+    "spud":     "Spud decade — 35% of US, 79% at Teapot",
+    "field":    "Field — 29% of US, 100% at Teapot",
+}
+REFWELL_BY_DEFAULT = "status"
+
+
+# Places saved before this list changed carry the OLD text. Leases,
+# Townships, Horizons, Well symbols, Federated Wells and the loaded well
+# points have all gone, so those chips are DROPPED from a place that
+# stored them rather than restored as switches with nothing behind them.
+# Nothing is renamed today; the map stays so the next rename has a place
+# to live, because silently losing a layer a saved view had switched on
+# is the kind of quiet wrong this codebase tries not to ship.
+GEO_PILL_RENAMES = {}
 
 
 def _capture_map_view() -> dict:
@@ -970,7 +1108,13 @@ def _apply_map_view(view: dict) -> None:
     if not isinstance(view, dict):
         return
     if "pills" in view:
-        st.session_state["wm_geo_pills"] = list(view["pills"] or [])
+        # RENAME WHAT MOVED, DROP WHAT WENT. A stored label that is no longer
+        # an option makes st.pills raise, and it would raise on RESTORE -- so
+        # the failure would land on Go, pointing at the place picker, with
+        # nothing to say it came from a chip list edited weeks earlier.
+        _p = [GEO_PILL_RENAMES.get(_x, _x) for _x in (view["pills"] or [])]
+        st.session_state["wm_geo_pills"] = [_x for _x in _p
+                                            if _x in GEO_PILL_LABELS]
     for _k in _VIEW_KEYS:
         if _k in view:
             st.session_state[_k] = view[_k]
@@ -1611,7 +1755,7 @@ def _add_status_legend(m, df, ppdm=False):
     # greying the map to hide a legend. sessionStorage is what the view-persist
     # JS below already uses for exactly this reason: the browser owns it.
     legend_body = (
-        "<details id='wm-status-legend' open style='position:fixed;"
+        "<details id='wm-status-legend' style='position:fixed;"
         "bottom:22px;right:12px;z-index:9999;"
         "background:rgba(255,255,255,0.94);padding:6px 11px 8px;"
         "border-radius:6px;box-shadow:0 1px 5px rgba(0,0,0,0.35);"
@@ -1622,8 +1766,8 @@ def _add_status_legend(m, df, ppdm=False):
         "<script>(function(){"
         "var d=document.getElementById('wm-status-legend');"
         "if(!d){return;}"
-        "try{if(sessionStorage.getItem('dv_legend_open')==='0')"
-        "{d.removeAttribute('open');}}catch(e){}"
+        "try{if(sessionStorage.getItem('dv_legend_open')==='1')"
+        "{d.setAttribute('open','');}}catch(e){}"
         "d.addEventListener('toggle',function(){"
         "try{sessionStorage.setItem('dv_legend_open',d.open?'1':'0');}"
         "catch(e){}});"
@@ -3769,6 +3913,74 @@ def _cached_layer_geojson(_engine, layer_id: str) -> str | None:
     return get_layer_geojson(_engine, layer_id)
 
 
+# Property names a contour layer might carry its level in, most specific
+# first. Teapot's Contours_10ft uses CONTOUR.
+_CONTOUR_PROPS = ("CONTOUR", "ELEVATION", "ELEV", "LEVEL")
+
+# THE DEFAULT INTERVAL, AND IT IS READ IN TWO PLACES. The draw path needs it
+# because the Registered layers expander is collapsed by default -- the
+# selectbox may never be drawn in a session, and a default that only exists
+# on the widget would leave the map at the source interval while the panel,
+# once opened, said 100 ft. That is the density-fallback shape again: the
+# control saying one thing and the gate doing another. One constant, both
+# sites.
+#
+# 100 ft on a 950 ft relief is 438 lines instead of 3,768, and the layer is
+# 279 MB at its source 10 ft interval.
+_DEFAULT_CONTOUR_STEP = 100
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _contour_levels(_engine, layer_id: str):
+    """The level values in a contour layer: property, range, spacing.
+
+    REGEX OVER THE TEXT, NOT json.loads. Measured on Teapot's 10 ft
+    contours -- 279 MB, 3,768 lines, 6.6M vertices -- parsing the blob
+    costs 10.9s and scanning it for the numbers costs 0.1s. A caption that
+    says "4,830 to 5,780 ft" must not make the page pay eleven seconds to
+    print it, and the parse it would trigger is the same one that makes
+    this layer expensive in the first place.
+
+    Returns None for a layer that carries no level property, which is how
+    every other registered layer reaches this and moves on.
+    """
+    _s = _cached_layer_geojson(_engine, layer_id)
+    if not _s:
+        return None
+    for _p in _CONTOUR_PROPS:
+        _vals = {float(_v) for _v in re.findall(
+            r'"%s"\s*:\s*(-?\d+(?:\.\d+)?)' % _p, _s)}
+        # Two values is a flag, not a contour set; three is the smallest
+        # thing worth calling a range.
+        if len(_vals) > 2:
+            _o = sorted(_vals)
+            _gaps = {int(round(_b - _a)) for _a, _b in zip(_o, _o[1:])}
+            _gaps.discard(0)
+            return {"prop": _p, "lo": _o[0], "hi": _o[-1], "n": len(_o),
+                    "base": min(_gaps) if _gaps else 0}
+    return None
+
+
+def _filter_contours(gj, prop, step):
+    """Keep only levels that are multiples of `step`.
+
+    THE SOURCE INTERVAL IS THE FLOOR. Teapot is contoured every 10 ft, so
+    asking for 25 silently gives you 50 -- the multiples of 25 that exist
+    are exactly the multiples of 50. The control therefore offers steps the
+    data can actually honour rather than letting someone pick a number that
+    quietly means something else.
+    """
+    _f = []
+    for _ft in (gj.get("features") or []):
+        _v = (_ft.get("properties") or {}).get(prop)
+        if isinstance(_v, (int, float)) and float(_v) % step:
+            continue
+        _f.append(_ft)
+    _out = dict(gj)
+    _out["features"] = _f
+    return _out
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _qry_zoom_targets(_engine) -> list[dict]:
     """
@@ -4061,6 +4273,15 @@ def _add_h3_layer(
                 "color": f["properties"]["line"],
                 "weight": f["properties"]["w"],
                 "fillOpacity": 0.55,
+                # THE CLASS THE ZOOM HANDOFF READS. The hexes answer
+                # "where are wells" and the reference points answer
+                # "which well is this"; they should not both be on
+                # screen, because a 370 km hex over a field is a sheet
+                # of colour across the very wells it exists to point at.
+                # geography_layers._refwell_zoom_gate hides whichever
+                # one the zoom does not want, on the SAME threshold, so
+                # the handoff has no gap and no overlap.
+                "className": "dv-hex",
                 # Inert in Circle-selection mode so a press-drag can pass
                 # through to Leaflet.draw, exactly as the old per-polygon
                 # options["interactive"] did.
@@ -6607,6 +6828,19 @@ def _add_shapefile_layer(m, engine, layer):
                     (layer.get("tooltip_fields") or "").split(",") if f.strip()]
 
     gj = None
+    # ── AN IMAGE LAYER: lay the PNG on its bounds and stop ─────────────────
+    # A hypsometric fill is one picture, not geometry. It draws in
+    # milliseconds where the contour layer it was interpolated from costs ~7s
+    # of json.loads per render, and it carries its extent in the bbox columns
+    # the registry already has -- so it needs no new table and appears in the
+    # same Show grid as everything else.
+    if source_type == "IMAGE":
+        # ONE IMPLEMENTATION, IN geography_layers. The lease screen shares
+        # this map today; if it ever draws its own, a second copy of this
+        # branch is two renderers that must agree.
+        from dataview.mapping.geography_layers import add_image_layer
+        add_image_layer(m, layer, say=_say)
+        return
     if source_type == "SHAPEFILE":
         fpath = layer.get("file_path","")
         if fpath and os.path.exists(fpath) and HAS_GPD:
@@ -6625,15 +6859,45 @@ def _add_shapefile_layer(m, engine, layer):
             gj = json.loads(gj_str)
         except Exception:
             return
+        # ── THIN THE CONTOURS, IF ASKED ────────────────────────────────────
+        # Teapot's 10 ft contours are 3,768 lines and 6.6M vertices, and all
+        # of it is serialised into the map HTML on every render. At 50 ft that
+        # is 765 lines. The check is cheap for every other layer: the level
+        # scan is cached and returns None for anything without a level
+        # property, and nothing is filtered when the chosen step IS the
+        # source interval.
+        _step = int(st.session_state.get("wm_contour_step")
+                    or _DEFAULT_CONTOUR_STEP)
+        if _step > 0:
+            _lv = _contour_levels(engine, layer["layer_id"])
+            if _lv and _step > int(_lv["base"] or 0):
+                _before = len(gj.get("features") or [])
+                gj = _filter_contours(gj, _lv["prop"], _step)
+                _after = len(gj.get("features") or [])
+                if _after != _before:
+                    _say("[map] %s thinned to %d ft: %d -> %d line(s)"
+                         % (layer_name, _step, _before, _after))
 
     if not gj:
         return
 
     icon_ch = LAYER_CATEGORY_DISPLAY.get(layer.get("layer_category",""), "📁").split()[0]
 
-    def _style(_, c=color, w=weight, o=opacity,
+    # A FEATURE MAY CARRY ITS OWN COLOUR, and if it does that wins. The
+    # registry stores ONE style per layer, which is right for a fault set
+    # or a contour but wrong for 32 sedimentary basins: one brown outline
+    # for all of them says where the basins are and never which is which.
+    #
+    # ADDITIVE, so nothing else changes. A layer whose features carry no
+    # _c/_fc -- which is every layer that existed before this -- falls
+    # through to the registered style exactly as it did. The loader that
+    # wants per-feature colour writes the properties; the registry keeps
+    # holding the default for everything else.
+    def _style(feat, c=color, w=weight, o=opacity,
                fc=fill_color, fo=fill_opacity, d=dash):
-        s = {"color":c,"weight":w,"opacity":o,"fillColor":fc,"fillOpacity":fo}
+        _p = (feat or {}).get("properties") or {}
+        s = {"color": _p.get("_c") or c, "weight": w, "opacity": o,
+             "fillColor": _p.get("_fc") or fc, "fillOpacity": fo}
         if d:
             s["dashArray"] = d
         return s
@@ -9434,33 +9698,57 @@ def _render_saved_places(engine):
 
     A FRAGMENT BECAUSE NONE OF THIS DRAWS THE MAP. Streamlit reruns the whole
     script on any widget change, and this page costs ~13 s to build, so
-    picking a name in the Go-to box used to pay a full map rebuild for a
-    control that does not move the camera. A fragment reruns in isolation,
-    and the map is drawn above this, so it is left untouched.
+    opening the box, renaming, deleting or saving pays no map rebuild at
+    all. A fragment reruns in isolation, and the map is drawn above this,
+    so it is left untouched.
 
-    Only "Go" moves the camera, and only it calls st.rerun(scope="app").
-    Every other action here -- save, rename, re-point, delete, cancel --
-    changes this block and nothing else, so a fragment-scoped rerun is both
-    correct and free.
+    PICKING A PLACE is the one thing here that moves the camera, so it is
+    the one thing that asks for st.rerun(scope="app"). It used to take a
+    separate "Go" click; the pick now fires it directly, because a confirm
+    step that is easy to forget leaves the map showing one place while the
+    box names another. Every other action -- save, rename, re-point,
+    delete, cancel -- changes this block and nothing else, so a
+    fragment-scoped rerun is both correct and free.
     """
     # SAVED PLACES sit beside Reset view because they are the same kind of
     # control: both move the CAMERA and neither touches the wells. One
     # click to a known field beats hunting for a county on a world map,
     # which is how every demo currently opens.
-    _pl1, _pl2, _pl5, _pl3, _pl4 = st.columns(
-        [2.2, 0.7, 0.7, 0.7, 1.1])
+    # NO GO BUTTON. Picking a place IS the instruction; a second click to
+    # confirm it was ceremony, and the kind that is forgotten -- which left
+    # the map sitting where it was while the box said somewhere else, with
+    # nothing on screen to say why.
+    try:
+        _pcols = st.columns([2.9, 0.7, 0.7, 1.1], vertical_alignment="bottom")
+    except TypeError:
+        # Older Streamlit has no vertical_alignment; the buttons sit a little
+        # high beside a labelled box, which is cosmetic and not worth a
+        # version guard failing over.
+        _pcols = st.columns([2.9, 0.7, 0.7, 1.1])
+    _pl1, _pl5, _pl3, _pl4 = _pcols
     _places = _saved_places(engine)
     _pick = _pl1.selectbox(
-        "Go to", ["— pick a place —"] + sorted(_places),
-        key="wm_place_pick", label_visibility="collapsed")
-    if _pl2.button("📍 Go", key="wm_place_go", use_container_width=True,
-                   disabled=_pick.startswith("—")):
-        _go_to_place(_places[_pick])
-        # THE ONE ACTION HERE THAT MOVES THE CAMERA. _go_to_place sets
-        # _drawn_bounds and _reset_saved_view, and nothing consumes either
-        # until the map renders -- so this is the only control in the
-        # fragment that has to cost a full rebuild.
-        st.rerun(scope="app")
+        "Go to:", ["— pick a place —"] + sorted(_places),
+        key="wm_place_pick")
+    # FIRE ON CHANGE, FROM THE FRAGMENT BODY -- not from an on_change
+    # callback. The camera move needs a full app rerun (_go_to_place sets
+    # _drawn_bounds and _reset_saved_view, and nothing consumes either until
+    # the map renders), and st.rerun cannot be called from a callback. A
+    # widget change reruns this fragment, so the comparison happens here and
+    # asks for the app-wide rerun exactly where the Go button used to.
+    #
+    # _place_last_pick is NOT a widget key, so writing it is safe. Writing
+    # wm_place_pick itself would be scar #6: assigning a widget's own key
+    # after the widget exists raises on a LATER run, on whatever page draws
+    # next. The selection therefore STAYS on the chosen place, which two
+    # other readers depend on -- the region outline follows this picker, and
+    # a rename re-points it.
+    _last_pick = st.session_state.get("_place_last_pick")
+    if _pick != _last_pick:
+        st.session_state["_place_last_pick"] = _pick
+        if _pick and not _pick.startswith("—"):
+            _go_to_place(_places[_pick])
+            st.rerun(scope="app")
     # Editing and deleting are offered only for entries that CAN be
     # changed. A built-in or a region would come straight back on the next
     # run, and a control that appears to work and does not is worse than
@@ -12069,8 +12357,15 @@ def run(engine=None):
             "Question",
             key="wm_ai_question",
             label_visibility="collapsed",
+            # THE THIRD EXAMPLE EARNS ITS PLACE. The first two are depth and
+            # date against columns; this one adds PROXIMITY to a named
+            # feature, which is the part nobody guesses is available -- and
+            # it is the question a geologist actually asks. Perry's wording,
+            # kept as he wrote it.
             placeholder='e.g. "horizontal wells deeper than 10,000 ft in Loving '
-                        'County" or "wells spudded after 2020 with production"',
+                        'County" or "wells spudded after 2020 with production" '
+                        'or "Well drilled below 5000 ft and after 1980 near '
+                        'lineA."',
             height=80,
         )
         _ai_col1 = _b_col
@@ -12435,6 +12730,14 @@ def run(engine=None):
                                          use_container_width=True):
                     st.session_state["wm_shp_on"] = [
                         str(r["id"]) for _n, r in _grid.iterrows() if r["Show"]]
+                    # AND DRAW IT. Switching layers on changes options, so
+                    # "Hold for Map" withheld the render behind ANOTHER
+                    # Apply: the layer was on, the map was built with it,
+                    # and nothing was displayed -- which reads as "the
+                    # contours are not drawing". A button labelled Apply
+                    # that needs a second apply is not a hold, it is a bug.
+                    # Same one-shot the place picker uses.
+                    st.session_state["_draw_now"] = True
                     # COLOURS TOO, and only where they CHANGED. Writing every
                     # row on every Apply would be six UPDATEs per layer for no
                     # reason, and would stamp row_changed on layers nobody
@@ -12550,6 +12853,43 @@ def run(engine=None):
             if active_shp:
                 st.caption("Showing %d of %d layer(s)."
                            % (len(active_shp), len(_by_id)))
+                # ── CONTOUR INTERVAL, for whichever shown layer has levels ──
+                # Only appears when a contour layer is actually on, because a
+                # control for something not on screen is a control that looks
+                # broken. Manual on purpose: the alternative is following the
+                # zoom, and Python is never told about a pan or a zoom -- three
+                # designs tried and none could work.
+                _clv, _clayer = None, None
+                for _sl in active_shp:
+                    _clv = _contour_levels(engine, _sl.get("layer_id"))
+                    if _clv:
+                        _clayer = _sl
+                        break
+                if _clv:
+                    _base = int(_clv["base"] or 10)
+                    # STEPS THE DATA CAN HONOUR. A source contoured every 10 ft
+                    # has no 25 ft lines, and offering 25 would quietly draw 50.
+                    _steps = [s for s in (10, 20, 25, 50, 100, 200, 250, 500)
+                              if s >= _base and s % _base == 0]
+                    _cc1, _cc2 = st.columns([1, 2])
+                    _cc1.selectbox(
+                        "Contour interval",
+                        _steps, key="wm_contour_step",
+                        # SAME CONSTANT THE DRAW PATH READS. index applies
+                        # only until the key exists, so a chosen value still
+                        # wins on later runs -- and until then the control
+                        # and the gate cannot disagree.
+                        index=(_steps.index(_DEFAULT_CONTOUR_STEP)
+                               if _DEFAULT_CONTOUR_STEP in _steps else 0),
+                        format_func=lambda s: "%d ft" % s)
+                    _cc2.caption(
+                        "**%s** — elevation %s to %s ft, %s ft of relief, "
+                        "%d levels contoured every %d ft."
+                        % (_clayer.get("layer_name", "Contours"),
+                           "{:,.0f}".format(_clv["lo"]),
+                           "{:,.0f}".format(_clv["hi"]),
+                           "{:,.0f}".format(_clv["hi"] - _clv["lo"]),
+                           _clv["n"], _base))
         else:
             st.caption("No layers registered yet.")
 
@@ -12706,6 +13046,53 @@ def run(engine=None):
         # much more work than it needs to be.
         active_db = set()
     with mapcol:
+        # ── NO AREA MEANS THE WHOLE COUNTRY, AND NOTHING DRAWN ON IT ────
+        # A cold start had no scope and no answer: the camera sat on a box
+        # wider than the continent showing a bare basemap, which looks exactly
+        # like a map that failed to load. The country is the honest default
+        # for "you have not told me where to look".
+        #
+        # EXTENT ONLY. THE LAYERS STAY OFF. This deliberately does NOT reuse
+        # the USA place's view: picking that place is an instruction and it
+        # turns on the density that answers the question you just asked, but
+        # STARTING there is not a request for anything. Every layer here
+        # costs -- the 4M density is 4.4s and 276,679 cells -- and spending
+        # that before anyone has asked for it is the thing this map keeps
+        # getting wrong. The bounds come from the place so there is still one
+        # definition of "lower 48"; only the view differs, because the two
+        # situations differ.
+        #
+        # ONCE PER SESSION, NOT A RULE. Written as a rule -- "whenever no area
+        # is defined" -- it would re-assert on every render and fight anyone
+        # who switched a layer on while zoomed out, which is the fixed-key
+        # widget failure wearing a different hat. It decides what you start
+        # with, then gets out of the way.
+        # SAY WHY, EVERY TIME. This did not fire on a cold start and
+        # there was no way to tell which of the three inputs stopped it
+        # -- a decision with no output is a decision that cannot be
+        # diagnosed, which is the swallowed-exception failure in a
+        # different shape.
+        _say("[map] cold-start check: done=%s drawn=%s clip=%s state=%r"
+             % (bool(st.session_state.get("_usa_default_done")),
+                bool(st.session_state.get("_drawn_bounds")),
+                bool(_clip_bounds_now()),
+                st.session_state.get("wm_sc_state")))
+        if not st.session_state.get("_usa_default_done"):
+            st.session_state["_usa_default_done"] = True
+            _no_area = (
+                not st.session_state.get("_drawn_bounds")
+                and not _clip_bounds_now()
+                and str(st.session_state.get("wm_sc_state")
+                        or "").strip() in ("", "— all states —"))
+            if _no_area:
+                _say("[map] no area defined -- lower 48, no layers")
+                _go_to_place({
+                    "bounds": _BUILTIN_PLACES["USA (lower 48)"]["bounds"],
+                    "view": {"h3_layer_on": False, "wells_layer_on": False,
+                             "map_mode": "none", "pills": []},
+                })
+
+
         # ── restore a saved view, BEFORE the widgets below exist ─────────
         # Go stores the request and asks for a full rerun; this is the top of
         # that rerun and the last safe moment to set these keys. See
@@ -12713,35 +13100,38 @@ def run(engine=None):
         _pv_req = st.session_state.pop("_place_pending", None)
         if _pv_req:
             _apply_map_view(_pv_req)
+            # AND DRAW IT. Going to a place is an instruction, not an option
+            # tweak -- but the view it restores SETS options (its chips, the
+            # wells and H3 toggles), so the signature changes and "Hold for
+            # Map" then withheld the redraw behind Apply. The camera had
+            # moved and the map had not, which reads as a picker that does
+            # nothing: the symptom Perry hit the moment holding became the
+            # default. Same reasoning that keeps wm_place_* out of the
+            # signature in the first place -- a place applies itself.
+            st.session_state["_draw_now"] = True
 
         # ── Spatial geography layer toggles ─────────────────────────────────
         # Chips above the map for the native-geography layers (dv_*.geog).
         # Each selection adds a geo_* flag to active_db, drawn by the render
         # section below via the geography_layers module. st.pills when available
         # (wraps naturally), else a 3-col checkbox fallback.
-        _geo_defs = [
-            ("geo_fields",     "🟩 Fields"),
-            ("geo_leases",     "🟦 Leases"),
-            ("geo_townships",  "▦ Townships"),
-            ("geo_boundaries", "🟪 Boundaries"),
-            ("geo_pipelines",  "➖ Pipelines"),
-            ("geo_seismic",    "🟪 Seismic"),
-            ("geo_horizons",   "〰️ Horizons"),
-            ("geo_wellsym",    "● Well symbols"),
-            ("geo_wellpts",    "⚫ Loaded wells"),
-            ("geo_wellpath",   "🌀 Well paths"),
-            ("geo_refwells",   "🔵 Federated wells"),
-            # THE RENDERERS WERE ALREADY HERE. _add_production_bubbles and
-            # _add_production_heatmap survived the July cull of the seven
-            # data-layer checkboxes -- the comment above active_db = set()
-            # says so: "the render blocks are now dead but harmless, and can
-            # be stripped separately". They were never stripped, so this is a
-            # switch being reconnected, not a feature being written. Both read
-            # db_* flags, so they come back the moment the chips set them.
-            ("db_production",      "📈 Production bubbles"),
-            ("db_production_heat", "🔥 Production heat"),
-        ]
+        # ONE list, defined at module level -- see GEO_PILL_DEFS. The restore
+        # in _apply_map_view has to filter against exactly these labels, and
+        # a second copy here is how the two would quietly disagree.
+        _geo_defs = GEO_PILL_DEFS
         _label_to_flag = {lbl: flag for flag, lbl in _geo_defs}
+        # A LIVE SESSION ALREADY HOLDS THE OLD LABELS. Streamlit keeps
+        # session_state across a hot reload, so the first rerun after this
+        # list changed would hand st.pills a value like "🟦 Leases" that is
+        # no longer an option, and it raises. Assigning the key HERE is the
+        # legal direction -- scar #6 is about assigning after the widget
+        # exists, not before it is drawn.
+        _cur = st.session_state.get("wm_geo_pills")
+        if _cur:
+            _fixed = [GEO_PILL_RENAMES.get(_x, _x) for _x in _cur]
+            _fixed = [_x for _x in _fixed if _x in GEO_PILL_LABELS]
+            if _fixed != list(_cur):
+                st.session_state["wm_geo_pills"] = _fixed
         if hasattr(st, "pills"):
             _picked = st.pills(
                 "🌍 Geography layers",
@@ -12763,6 +13153,14 @@ def run(engine=None):
         # "wm_db_prod_heat_wt", "BOE") -- but the widget that set it did not,
         # so the layer had one permanent setting and no way to say so. Oil
         # against gas is a real question about a field, not a preference.
+        # Shown only while the layer is on, like the heatmap weight below.
+        if "geo_refwells" in active_db:
+            st.selectbox(
+                "Colour reference wells by",
+                options=list(REFWELL_BY_LABELS),
+                format_func=lambda _k: REFWELL_BY_LABELS[_k],
+                key="wm_refwell_by")
+
         if "db_production_heat" in active_db:
             st.radio("Heatmap weight", ["BOE", "Oil", "Gas"],
                      key="wm_db_prod_heat_wt", horizontal=True)
@@ -13075,8 +13473,24 @@ def run(engine=None):
             # NB: _mode_col is already a nested column (inside `mapcol`), so we
             # can't sub-divide it again — Streamlit allows only one level of
             # column nesting. Stack the two toggles vertically here instead.
-            _h3_on = st.toggle("🔶 H3 density", key="h3_layer_on", **_h3_kw)
-            _wells_on = st.toggle("📍 Wells", key="wells_layer_on", **_w_kw)
+            # SWITCHING A LAYER ON *IS* THE REQUEST TO DRAW IT. These stay in
+            # the option signature -- the bookkeeping below still measures
+            # what is on screen against what was asked for -- but they must
+            # not be HELD. "Hold for Map" exists so that setting five options
+            # costs one redraw; a layer toggle is not a setting on the way to
+            # a redraw, it is the redraw.
+            #
+            # Held, the control looks broken: the toggle moves and no wells
+            # appear, which is exactly how this was reported. Third place the
+            # same defect surfaced after holding became the default, so the
+            # fix goes where the intent is expressed rather than on the gate.
+            # A callback may write session_state (it may not call st.rerun),
+            # and it runs before the rerun the widget triggers.
+            _draw = lambda: st.session_state.__setitem__("_draw_now", True)
+            _h3_on = st.toggle("🔶 H3 density", key="h3_layer_on",
+                               on_change=_draw, **_h3_kw)
+            _wells_on = st.toggle("📍 Wells", key="wells_layer_on",
+                                  on_change=_draw, **_w_kw)
             # When H3 is switched back on by hand, make sure the hexes are
             # actually shown — a prior drill may have set grid_visible=False.
             if _h3_on and not st.session_state.get("_h3_layer_prev", _h3_on):
@@ -13352,20 +13766,48 @@ def run(engine=None):
                 # "the lower 48" actually asks for.
                 # THE DATA FIRST, THE COUNTRY AS A FALLBACK.
                 lat0, lon0, zoom0 = 39.5, -98.35, 4
+                # ── CLAMPED TO THE LOWER 48 ─────────────────────────
+                # THE DATA EXTENT IS NOT THE VIEW ANY MORE. v_well is
+                # federated over the 4M master, so "the extent of the data"
+                # is the whole country plus whatever sits outside it -- the
+                # cold start framed [[20.0, -137.35], [59.0, -59.35]], which
+                # is Canada to Mexico with the lower 48 as a band across the
+                # middle. Technically correct and useless: nothing in this
+                # database is in Hudson Bay.
+                #
+                # The clamp is an INTERSECTION, so a database holding only
+                # Teapot still opens on Teapot -- the extent only loses the
+                # part that reaches past the country. LOWER48 comes from the
+                # place, so there is one definition of it.
+                _l48 = _BUILTIN_PLACES["USA (lower 48)"]["bounds"]
                 _viewport_bounds = _qry_data_extent(engine)
+                if _viewport_bounds is not None:
+                    try:
+                        _vs = max(float(_viewport_bounds[0][0]), _l48[0][0])
+                        _vw = max(float(_viewport_bounds[0][1]), _l48[0][1])
+                        _vn = min(float(_viewport_bounds[1][0]), _l48[1][0])
+                        _ve = min(float(_viewport_bounds[1][1]), _l48[1][1])
+                        # A DEGENERATE INTERSECTION MEANS THE DATA IS NOT IN
+                        # THE LOWER 48 AT ALL -- Alaska, the Gulf, a bad
+                        # coordinate. Clamping to nothing would open on a
+                        # sliver; the country is the honest answer.
+                        _viewport_bounds = ([[_vs, _vw], [_vn, _ve]]
+                                            if _vs < _vn and _vw < _ve
+                                            else [list(_l48[0]), list(_l48[1])])
+                    except (TypeError, ValueError, IndexError):
+                        _viewport_bounds = [list(_l48[0]), list(_l48[1])]
                 if _viewport_bounds is None:
                     # Nothing loaded to frame: the lower-48 box, which is
                     # still the right answer for an empty database.
-                    _viewport_bounds = [[24.5, -125.0], [49.4, -66.9]]
+                    _viewport_bounds = [list(_l48[0]), list(_l48[1])]
                 else:
                     lat0 = (_viewport_bounds[0][0] + _viewport_bounds[1][0]) / 2
                     lon0 = (_viewport_bounds[0][1] + _viewport_bounds[1][1]) / 2
                     zoom0 = 7
-                    _say("[map] opening on the data extent %.3f,%.3f .. "
-                         "%.3f,%.3f" % (_viewport_bounds[0][0],
-                                        _viewport_bounds[0][1],
-                                        _viewport_bounds[1][0],
-                                        _viewport_bounds[1][1]))
+                    _say("[map] opening on the data extent, clamped to the "
+                         "lower 48: %.3f,%.3f .. %.3f,%.3f"
+                         % (_viewport_bounds[0][0], _viewport_bounds[0][1],
+                            _viewport_bounds[1][0], _viewport_bounds[1][1]))
             elif not dff.empty:
                 # Wells loaded — center on their centroid
                 lat0  = dff["lat"].mean()
@@ -13464,6 +13906,15 @@ def run(engine=None):
         # the URL; checked. The map is built with no tiles and the chosen
         # basemap added as an explicit, named TileLayer instead, which is
         # exactly what the loop below does for the others.
+        # ── THE SPAN THAT WAS 39% OF A RENDER AND HAD NO NAME ─────────
+        # "build: wells layer" was the FIRST mark of a lease render, so
+        # it was charging 1.36s for everything since the render began --
+        # 3,500 lines of page and panels, then the map itself -- while
+        # naming a block that is skipped when wells are off. Reading it
+        # as "the wells layer is slow" is the exact wrong conclusion the
+        # _phase docstring warns about, and there was no way to look
+        # closer because nothing between the two marks was measured.
+        _mark("build: page + panels")
         m = folium.Map(location=[lat0, lon0], zoom_start=zoom0,
                        tiles=None,
                        max_zoom=bm.get("max_zoom", 19))
@@ -13607,7 +14058,36 @@ def run(engine=None):
         # ignored it. _clip_box is the durable one: set by the rectangle
         # handler and by nothing else, cleared only by ✗ Clear box. That is
         # what "anything added is constrained by the box" has to read.
-        _layer_bounds = st.session_state.get("_drawn_bounds") or _clip_bounds_now()
+        _layer_bounds = (st.session_state.get("_drawn_bounds")
+                         or _clip_bounds_now())
+        # ── AND IF NOTHING WAS DRAWN, THE CHOSEN AREA ────────────────────
+        # ONE PLACE DECIDES SCOPE, because three layers read it and they were
+        # disagreeing. A state/county pick writes _drawn_bounds ONCE, to move
+        # the camera, and that oneshot is consumed before any layer draws --
+        # so by the next render the reference wells sampled the continent,
+        # the townships drew all 2,888 in the state, and the leases clipped
+        # to nothing at all. Three different wrong answers to "what am I
+        # looking at", from three copies of the same missing fallback.
+        #
+        # The selection is a value the APP set, not a guess about the
+        # viewport -- the same reason these layers read bounds rather than
+        # try to learn the pan. Computed here, once, and handed down.
+        if _layer_bounds is None and _us_geo is not None and HAS_US_GEO:
+            _lb_st = st.session_state.get("wm_sc_state")
+            _lb_co = st.session_state.get("wm_sc_county")
+            if _lb_st and _lb_st != "— all states —":
+                _lb_bb = _us_geo.bbox(
+                    _lb_st,
+                    _lb_co if (_lb_co and _lb_co != "— all counties —")
+                    else None)
+                if _lb_bb:
+                    _layer_bounds = [[_lb_bb[0], _lb_bb[1]],
+                                     [_lb_bb[2], _lb_bb[3]]]
+                    _say("[map] layer scope from selection: %s%s -> "
+                         "%.4f,%.4f .. %.4f,%.4f"
+                         % (_lb_st, "/" + _lb_co if _lb_co and _lb_co
+                            != "— all counties —" else "",
+                            _lb_bb[0], _lb_bb[1], _lb_bb[2], _lb_bb[3]))
         if _is_oneshot_fit_this_render:
             st.session_state.pop("_drawn_bounds", None)
             st.session_state.pop("_drawn_bounds_oneshot", None)
@@ -13621,6 +14101,8 @@ def run(engine=None):
                 name="Labels", overlay=True,
                 control=False, opacity=1.0,
             ).add_to(m)
+
+        _mark("build: base map + basemaps")
 
         # ── REGION OUTLINE (us_geo) ──────────────────────────────────────
         # A petroleum region IS its counties — the registry defines Eagle Ford
@@ -13687,26 +14169,41 @@ def run(engine=None):
                         _is_sel = feat["properties"].get("county") == _sel
                         return {
                             "color": "#1D6FB8" if _is_sel else "#6b7785",
-                            "weight": 2.5 if _is_sel else 0.8,
-                            "fillColor": "#1D6FB8",
-                            "fillOpacity": 0.15 if _is_sel else 0.0,
-                            # AN INVISIBLE FILL IS STILL A HIT TARGET.
-                            # fillOpacity 0 hides the county but Leaflet keeps
-                            # hit-testing the polygon, so an unselected county
-                            # blanketed the map and swallowed every hover: the
-                            # reference wells are radius-2 circles, about a 4px
-                            # target, and missing one by a pixel returned
-                            # "County: X" instead. Reported as "the wells do
-                            # not have a popup, I am only getting the county
-                            # name" -- and the popup was bound the whole time.
+                            # THE SELECTED COUNTY IS A LINE, NOT A WASH.
+                            # Three separate layers made this mistake in
+                            # one afternoon -- townships at 0.55, the
+                            # draw box at 0.20, this at 0.15 -- and each
+                            # covered the aerial and the reference wells
+                            # inside the very area chosen to look at
+                            # them. Dropping it to 0.04 was still a
+                            # fill; the answer is no fill at all.
                             #
-                            # fill:false removes the fill entirely, so only the
-                            # OUTLINE is interactive. Nothing changes visually
-                            # because there was nothing to see. The selected
-                            # county keeps its wash and stays clickable.
-                            "fill": bool(_is_sel),
+                            # AND THE FILL WAS A HAZARD HERE, not just
+                            # ugly. fillOpacity 0 hides a polygon but
+                            # Leaflet keeps hit-testing it, so the
+                            # selected county blanketed its own wells --
+                            # 3px targets -- and swallowed the clicks
+                            # meant for them. That is the bug already
+                            # fixed for UNSELECTED counties; the
+                            # selected one kept its fill and kept the
+                            # bug, in the one county being worked in.
+                            #
+                            # fill:false leaves only the OUTLINE
+                            # interactive, and the weight carries the
+                            # selection, which is what the eye follows.
+                            "weight": 3.0 if _is_sel else 0.8,
+                            "fillColor": "#1D6FB8",
+                            "fillOpacity": 0.0,
+                            "fill": False,
                         }
 
+                    # ── ONE ENTRY IN THE LAYER CONTROL, NOT TWO ──────
+                    # The outlines and their names are one thing to a reader,
+                    # so they go in one FeatureGroup and toggle together. Two
+                    # entries would let a session end up with labels floating
+                    # over no boundaries.
+                    _cgrp = folium.FeatureGroup(name="County boundaries",
+                                                show=True)
                     folium.GeoJson(
                         _fc,
                         name="County boundaries",
@@ -13716,7 +14213,53 @@ def run(engine=None):
                         tooltip=folium.GeoJsonTooltip(
                             fields=["county"], aliases=["County:"]),
                         control=True,
-                    ).add_to(m)
+                    ).add_to(_cgrp)
+
+                    # ── AND THE NAMES ────────────────────────────────────
+                    # A REPRESENTATIVE POINT, NOT A CENTROID. A centroid can
+                    # fall outside its own polygon on a county shaped round a
+                    # river or a reservation, which puts the name inside the
+                    # neighbour. representative_point() is guaranteed to land
+                    # inside the shape it belongs to.
+                    #
+                    # The halo is the towns layer's, for the same reason: it
+                    # has to read over a terrain fill, a satellite tile and a
+                    # pale topo map alike. Upper case and letter-spaced so a
+                    # county never reads as a town.
+                    try:
+                        from shapely.geometry import shape as _shape
+                        _lab = 0
+                        for _cf in _fc.get("features") or []:
+                            _cn = (_cf.get("properties") or {}).get("county")
+                            if not _cn:
+                                continue
+                            try:
+                                _pt = _shape(
+                                    _cf["geometry"]).representative_point()
+                            except Exception:
+                                continue
+                            folium.Marker(
+                                [_pt.y, _pt.x],
+                                icon=folium.DivIcon(
+                                    icon_size=(0, 0), icon_anchor=(0, 0),
+                                    html=("<div style=\"font:600 10px "
+                                          "system-ui;letter-spacing:.08em;"
+                                          "text-transform:uppercase;"
+                                          "color:#334155;white-space:nowrap;"
+                                          "transform:translate(-50%,-50%);"
+                                          "text-shadow:0 0 3px #fff,"
+                                          "0 0 3px #fff,0 0 3px #fff,"
+                                          "0 0 3px #fff\">"
+                                          + str(_cn) + "</div>")),
+                            ).add_to(_cgrp)
+                            _lab += 1
+                        _say("[map] county labels: %d" % _lab)
+                    except Exception as _cle:
+                        # Not swallowed: labels missing silently reads as a
+                        # data problem rather than a missing dependency.
+                        _say("[map] county labels skipped: %s"
+                             % str(_cle)[:120])
+                    _cgrp.add_to(m)
 
         # Mode dispatch — set by the radio toggle above the map.
         # "h3"    = fast aggregated hex-density overview (federation views)
@@ -13782,6 +14325,10 @@ def run(engine=None):
         st.session_state["_seis_pref_seen"] = _seis_pref_mtime()
         st.session_state["_lease_pref_seen"] = _lease_pref_mtime()
 
+        # LABELLED FOR WHAT CAME BEFORE IT, like every mark here: this
+        # one closes the outlines and the clip, it does not open the H3
+        # block below.
+        _mark("build: outlines + clip")
         if _show_h3_layer:
             # ── H3 hex density mode (Session 3) ─────────────────────────
             # Reads from dataview_federation.v_well_density_r{N} aggregation
@@ -14162,11 +14709,14 @@ def run(engine=None):
         # here used to say "every geography-layer chip must appear in this
         # guard. A layer whose only trigger is missing here renders ONLY when
         # some other layer happens to be on -- which looks exactly like a
-        # broken layer." It was right, and the guard was already wrong:
-        # geo_refwells was never added, so ticking 🔵 Reference wells on its
-        # own drew nothing, while ticking it beside 🟦 Leases worked. That
-        # is the worst symptom available -- the layer looks intermittent
-        # rather than unwired.
+        # broken layer." It was right, and the guard was once wrong in
+        # exactly that way: a chip's flag was missing from it, so that layer
+        # drew only when some OTHER layer happened to be on -- which reads
+        # as intermittent rather than unwired, the worst symptom available.
+        # (That chip, Federated Wells, was removed in Sept 2026 along with
+        # Leases, Townships, Horizons and Well symbols; leases and townships
+        # keep their renderers because the lease second screen still sets
+        # those flags.)
         #
         # A list that must agree with another list eventually does not; this
         # file pays that debt in four places already. _geo_defs IS the set of
@@ -14280,7 +14830,7 @@ def run(engine=None):
         if (any(_k in active_db for _k, _lbl in _geo_defs)
                 or _lv_mode in ("leases", "townships", "both")):
             try:
-                from dataview.mapping.geography_layers import add_geography_layer, add_well_points
+                from dataview.mapping.geography_layers import add_geography_layer
                 # AN EMPTY LAYER LOOKS EXACTLY LIKE A BROKEN ONE. Both adders
                 # return a feature count and both were being discarded, so a
                 # chip for a table with no rows switched on, drew nothing, and
@@ -14346,7 +14896,8 @@ def run(engine=None):
                                     m, _lpath, _lurl,
                                     by=_by, show=True,
                                     legend=(_lgd.get(_by) if _lg_on else None),
-                                    clip=_clip_bounds_now(),
+                                    clip=(_clip_bounds_now()
+                                          or _layer_bounds),
                                     filt=dict(
                                         _lv2,
                                         # ONE QUERY ANSWERS BOTH the panel's
@@ -14424,14 +14975,6 @@ def run(engine=None):
                 # control doubles as the legend. Its own chip: the plain
                 # point layer still serves the 50,000-well reference set,
                 # where an SVG per well would be the H3 mistake again.
-                if "geo_wellsym" in active_db:
-                    from dataview.mapping.geography_layers import (
-                        add_well_symbols)
-                    add_well_symbols(m, engine, show=True)
-                if "geo_horizons" in active_db:
-                    from dataview.mapping.geography_layers import (
-                        add_horizon_contours)
-                    add_horizon_contours(m, engine, show=True)
                 if "geo_seismic" in active_db:
                     # ONE GROUP PER SURVEY, so the lines can be switched at all.
                     # These were bare PolyLines added straight to the map, so
@@ -14649,8 +15192,6 @@ def run(engine=None):
                             "lease count.")
                     except Exception as _texc:
                         _mapmsg.warning(f"Townships skipped: {_texc}")
-                if "geo_wellpts" in active_db:
-                    add_well_points(m, engine, show=True)
                 if "geo_refwells" in active_db:
                     # INDIVIDUAL reference wells, which the density layer
                     # cannot give: v_well_density_r* answers "where are wells"
@@ -14667,7 +15208,10 @@ def run(engine=None):
                         # oneshot pop has already run by now.
                         _rb = _layer_bounds
                         _rn, _rscope = add_reference_wells(
-                            m, engine, bounds=_rb, show=True)
+                            m, engine, bounds=_rb, show=True,
+                            by=st.session_state.get(
+                                "wm_refwell_by",
+                                REFWELL_BY_DEFAULT))
                         # SAY THE TWO FACTS SEPARATELY. This used to print
                         # "(capped sample, no bounds)" whenever the fetch
                         # SAMPLED -- which says nothing about whether bounds
@@ -14743,6 +15287,98 @@ def run(engine=None):
             _mapmsg.info(f"🗂 Loading {lay.get('layer_name','layer')}…")
             _add_shapefile_layer(m, engine, lay)
 
+        # ── THE CONTROL HAS TO FIT, AND THE CREDITS MUST NOT EAT IT ────────
+        # Reported: "I can't pick wetlands." Wetlands is the LAST entry in the
+        # layer control, and every layer added this week -- roads, towns, two
+        # NAIP renderings, the baked aerials -- pushed the list further down
+        # while its own attribution made the credit bar taller. Three lines of
+        # Esri, HERE, Garmin, OpenStreetMap, USFWS and USGS across the foot of
+        # the map covered the bottom entries, so the last layer could be seen
+        # and not clicked.
+        #
+        # THE CREDITS ARE CAPPED, NOT REMOVED. Attribution is a licence
+        # condition for every one of those services, so it stays and stays
+        # readable: one line, scrollable sideways, with the full text still in
+        # the DOM for anyone who reads the source or widens the map.
+        #
+        # The list itself scrolls at 55% of the map height and drops a point
+        # of font size, so however many layers get added it can always be
+        # reached. That is the fix that keeps working; shortening today's
+        # names would only buy back the room the next layer takes.
+        from branca.element import Template as _Tpl, MacroElement as _ME
+        _fit = _ME()
+        _fit._template = _Tpl(
+            "{% macro html(this, kwargs) %}<style>"
+            ".leaflet-control-layers-list{max-height:55vh;overflow-y:auto;"
+            "overflow-x:hidden;font-size:11px;line-height:1.35}"
+            ".leaflet-control-layers-list label{margin:1px 0}"
+            ".leaflet-control-attribution{max-height:1.35em;overflow-x:auto;"
+            "overflow-y:hidden;white-space:nowrap;max-width:72%;"
+            "font-size:9px;opacity:.75}"
+            ".dv-naip-on .dv-twp-poly{fill-opacity:0 !important}"
+            ".dv-naip-on .leaflet-dvleases-pane path{fill-opacity:0 !important}"
+            ".dv-naip-on .dv-lease-poly{fill-opacity:0 !important}"
+            "</style>{% endmacro %}")
+        m.get_root().add_child(_fit)
+
+        # ── IMAGERY TURNS THE POLYGONS INTO OUTLINES, CLOSE IN ─────────────
+        # When you have zoomed to a field and switched the aerial on, the
+        # photograph IS the subject: a 55% township fill or a lease block
+        # painted over it hides the pad, the two-track and the scar of the
+        # old location, which is what the metre resolution was turned on to
+        # show. So the fill goes to zero and the boundary stays.
+        #
+        # BOTH CONDITIONS, BECAUSE ONE OF THEM IS NOT ENOUGH. The first
+        # cut keyed on the aerial alone and emptied every polygon in
+        # Wyoming the moment "Teapot Wells - NAIP aerial" was ticked -- a
+        # baked image over one field, blanking a statewide choropleth of
+        # leased acreage the imagery does not even cover. Zoom is what
+        # says the imagery is what you are LOOKING at rather than
+        # something you merely enabled, so both have to hold.
+        #
+        # THE BASEMAP IS NOT IMAGERY FOR THIS PURPOSE, even when it is a
+        # photograph. Esri Satellite is the working backdrop and it is on
+        # all day; counting it meant the leases came up transparent the
+        # moment they were switched on, which is the opposite of the ask.
+        # An OVERLAY is a deliberate "show me the aerial here"; a basemap
+        # is just what the map sits on. Only the overlay counts.
+        _DIM_ZOOM = 11
+        #
+        # CSS, NOT setStyle, BECAUSE THE STYLE IS REWRITTEN CONSTANTLY. The
+        # township's own mouseout handler restores its base style every time
+        # the pointer leaves a square, so anything set with setStyle is undone
+        # the first time the cursor crosses one. A rule outranks an SVG
+        # presentation attribute, so the class wins and keeps winning.
+        #
+        # PYTHON NEVER LEARNS THAT AN OVERLAY WAS TICKED, or that the map was
+        # zoomed -- the browser owns both. So this reads the map's own
+        # overlayadd/overlayremove and zoomend, which are values the app set
+        # rather than a guess about the viewport.
+        _naip_dim = _ME()
+        _naip_dim._template = _Tpl(
+            "{% macro script(this, kwargs) %}"
+            "(function(){"
+            " var mp = {{ this._parent.get_name() }};"
+            " if (!mp || mp._dvNaipDim) { return; }"
+            " mp._dvNaipDim = true;"
+            " var on = 0;"
+            " var Z = " + str(_DIM_ZOOM) + ";"
+            " function img(n){ return /NAIP|aerial|imagery/i.test(n || ''); }"
+            " function sync(){"
+            " var el = mp.getContainer();"
+            " if (!el) { return; }"
+            " if (on > 0 && mp.getZoom() >= Z) {"
+            " L.DomUtil.addClass(el, 'dv-naip-on'); }"
+            " else { L.DomUtil.removeClass(el, 'dv-naip-on'); } }"
+            " mp.on('overlayadd', function(e){"
+            " if (img(e.name)) { on += 1; } sync(); });"
+            " mp.on('overlayremove', function(e){"
+            " if (img(e.name)) { on = Math.max(0, on - 1); } sync(); });"
+            " mp.on('zoomend', sync);"
+            "})();"
+            "{% endmacro %}")
+        m.add_child(_naip_dim)
+
         # COLLAPSED. Pinned open, the control grew with the map: eight layers
         # of ~40 characters covered a third of the canvas, and the layer whose
         # name explained itself ("50,000 shown, capped - zoom in to see the
@@ -14776,6 +15412,59 @@ def run(engine=None):
         # Off by default and only offered when the file exists, so a machine
         # without the TIGER build simply has one fewer overlay rather than a
         # broken one. Built by tools/build_road_geojson.py.
+        # ── EVERY ROAD, AS CONTEXT ─────────────────────────────────────────
+        # A transparent Esri reference tile layer: secondary and county
+        # roads, the street grid, labels, thinned by zoom. Off by default
+        # and offered in the layer control, because it is context rather
+        # than data -- the sixteen primary routes below are the ones the
+        # distance filter measured to, and conflating the two would make
+        # "within five miles of a highway" ambiguous.
+        try:
+            from dataview.mapping.geography_layers import add_roads_overlay
+            add_roads_overlay(m, show=False)
+        except Exception as _re2:
+            _say("[map] roads overlay unavailable: %s" % str(_re2)[:120])
+        # ── NAIP, BOTH RENDERINGS, BOTH OFF ────────────────────────────────
+        # One metre aerial and its infrared composite, from USGS. Off by
+        # default because it is a live WMS: the server renders every
+        # request, so it is a layer you switch on to look at a pad, not the
+        # background you pan the state around on. Esri Satellite remains the
+        # basemap for that.
+        try:
+            from dataview.mapping.geography_layers import add_naip_layer
+            add_naip_layer(m, show=False, infrared=False)
+            add_naip_layer(m, show=False, infrared=True)
+        except Exception as _ne2:
+            _say("[map] NAIP layers unavailable: %s" % str(_ne2)[:120])
+        # ── TOWNS, ON BY DEFAULT ───────────────────────────────────────────
+        # The lease panel filters on distance to a named place, and until
+        # now nothing drew the places -- so "within five miles of Casper"
+        # produced a set with no visible Casper to check it against. Worse
+        # with the terrain fill on, which paints over the basemap's own
+        # labels. Same argument as the highway layer: the thing a filter
+        # measures to has to be visible, or the answer is taken on trust.
+        try:
+            from dataview.mapping.geography_layers import add_places_layer
+            # "WY" LIKE THE TOWNSHIP LAYER DOES, not a state threaded from
+            # the header. wm_sc_state holds a display name ("Wyoming"), the
+            # table keys on a code, and dv_place_geom is Wyoming-only in
+            # this database anyway. One convention, changed in one place if
+            # a second state is ever loaded.
+            # OFFERED, NOT DRAWN. These three have no chip and were on by
+            # default, so a cold start already had layers on it before
+            # anything was selected -- 99 town labels piled on top of one
+            # another over Wyoming at continental zoom, which is the
+            # clearest possible statement that a layer is being drawn at
+            # a scale it cannot be read at.
+            #
+            # show=False still REGISTERS them in the layer control, so
+            # they cost one line of JavaScript and fetch nothing until
+            # ticked. Nothing is lost but the assumption that they should
+            # be there.
+            _np = add_places_layer(m, engine, state="WY", show=False)
+            _say("[map] places layer: %d town(s)/city(ies)" % _np)
+        except Exception as _pe2:
+            _say("[map] places layer unavailable: %s" % str(_pe2)[:120])
         try:
             from dataview.mapping.geography_layers import (
                 add_highway_layer, HIGHWAY_GEOJSON_NAME)
@@ -14788,7 +15477,7 @@ def run(engine=None):
                 # session rather than per render.
                 add_highway_layer(m, _hpath,
                                   "/app/static/" + HIGHWAY_GEOJSON_NAME,
-                                  show=True)
+                                  show=False)
             else:
                 _say("[map] highways layer skipped: %s not built "
                      "(tools/build_road_geojson.py --apply)" % _hpath)
@@ -14802,7 +15491,7 @@ def run(engine=None):
             # returns nothing and the layer name says so. It is a WMS, so
             # "on" means the browser asks for tiles it is already showing
             # ground for -- no query and no payload from this side.
-            add_wetlands_layer(m, show=True)
+            add_wetlands_layer(m, show=False)
         except Exception as _we:
             # Not swallowed: a missing overlay should say so once, not leave
             # the reader hunting for a switch that never appears.
@@ -14819,7 +15508,18 @@ def run(engine=None):
             position="topleft",
             draw_options={
                 "circle":       {
-                    "shapeOptions": {"color": "#1d4ed8", "weight": 2},
+                    # A DRAWN BOX IS A SCOPE, NOT A FEATURE. Leaflet.Draw
+                    # fills a shape at 20% by default, and over a county-
+                    # sized rectangle that is a blue wash across the whole
+                    # map -- it hid the aerial and the reference wells the
+                    # box had just been drawn to look at. The fill stays
+                    # but goes to almost nothing: opacity does not affect
+                    # hit-testing, so the shape is still a target for the
+                    # trash tool, which is the only thing that needs it.
+                    "shapeOptions": {"color": "#1d4ed8", "weight": 2,
+                                     "fill": True,
+                                     "fillColor": "#1d4ed8",
+                                     "fillOpacity": 0.04},
                     "metric":       False,
                     "showRadius":   True,        # show radius while drawing
                     # repeatMode left False: with it True, the Leaflet.Draw
@@ -14843,7 +15543,18 @@ def run(engine=None):
                     "feet":         False,       # use km, not feet
                 },
                 "rectangle":    {
-                    "shapeOptions": {"color": "#1d4ed8", "weight": 2},
+                    # A DRAWN BOX IS A SCOPE, NOT A FEATURE. Leaflet.Draw
+                    # fills a shape at 20% by default, and over a county-
+                    # sized rectangle that is a blue wash across the whole
+                    # map -- it hid the aerial and the reference wells the
+                    # box had just been drawn to look at. The fill stays
+                    # but goes to almost nothing: opacity does not affect
+                    # hit-testing, so the shape is still a target for the
+                    # trash tool, which is the only thing that needs it.
+                    "shapeOptions": {"color": "#1d4ed8", "weight": 2,
+                                     "fill": True,
+                                     "fillColor": "#1d4ed8",
+                                     "fillOpacity": 0.04},
                     "repeatMode":   False,
                     # showArea True draws the area in the corner while
                     # dragging — useful feedback for sizing the rectangle.
@@ -14856,7 +15567,18 @@ def run(engine=None):
                 # whichever tool made it, and repeatMode False for the same
                 # reason the circle has it -- see that comment.
                 "polygon":      {
-                    "shapeOptions": {"color": "#1d4ed8", "weight": 2},
+                    # A DRAWN BOX IS A SCOPE, NOT A FEATURE. Leaflet.Draw
+                    # fills a shape at 20% by default, and over a county-
+                    # sized rectangle that is a blue wash across the whole
+                    # map -- it hid the aerial and the reference wells the
+                    # box had just been drawn to look at. The fill stays
+                    # but goes to almost nothing: opacity does not affect
+                    # hit-testing, so the shape is still a target for the
+                    # trash tool, which is the only thing that needs it.
+                    "shapeOptions": {"color": "#1d4ed8", "weight": 2,
+                                     "fill": True,
+                                     "fillColor": "#1d4ed8",
+                                     "fillOpacity": 0.04},
                     "repeatMode":   False,
                     "showArea":     True,
                     "metric":       False,
@@ -15957,6 +16679,20 @@ def run(engine=None):
         # draws is the layout the last toggle asked for.
         _rvb.toggle(
             "▦ Lease strip", key="wm_lease_strip")
+        # OFF BY DEFAULT, AGAIN (1 Sept 2026). It was switched on for a few
+        # hours on the reasonable argument that options get set several at a
+        # time and each one bought a full rebuild. What that missed is how
+        # many controls are not "options" at all but direct requests to
+        # draw: going to a saved place, Apply to map, and the wells and H3
+        # toggles each looked broken -- the control moved and the map did
+        # not -- and each was found the hard way, one at a time, by the
+        # person using it. Three in a day from one default.
+        #
+        # Those three now force a draw and that is worth keeping, because it
+        # makes holding CORRECT for anyone who switches it on deliberately.
+        # But correct-when-enabled is a different bar from safe-as-a-default,
+        # and a setting whose failure mode is "nothing happens, silently"
+        # should be chosen, not inherited.
         _rvh.toggle(
             "⏸ Hold for Map", key="wm_hold_map")
         # THE ONE CONTROL THAT MAKES CLICKING FREE. See the _ret block above
@@ -16095,9 +16831,15 @@ def run(engine=None):
                 # tools/assign_synthetic_lease_owners.py) and lease_status
                 # has one distinct value, because the loader keeps only
                 # Authorized.
+                # ELEVATION SITS WITH THE OTHER QUANTITIES. It reads off
+                # dv_land_tract_geom, which every tract has stamped (24,178
+                # of 24,178), so unlike owner or status it is real data on
+                # every polygon -- and it answers the question the elevation
+                # FILTER can only answer one band at a time.
                 st.selectbox(
                     "🟦 Lease colour",
-                    ["producing", "vintage", "size", "owner", "status"],
+                    ["producing", "vintage", "size", "elevation",
+                     "owner", "status"],
                     key="wm_lease_color_by")
             with _md3:
                 # SHOW ONLY WHAT IS IN THE BOX. Selecting cells outlines them
@@ -16151,16 +16893,24 @@ def run(engine=None):
         # Apply button is a page that looks broken on arrival.
         _drawn_sig = st.session_state.get("_map_drawn_sig")
         _opts_changed = _drawn_sig is not None and _drawn_sig != _opt_sig
-        # DEFAULT OFF, AND THE READ MUST MATCH THE TOGGLE. Holding meant an
-        # option change drew nothing until Apply, which is right when a
-        # redraw costs 10s and wrong now that leases are a cached file and
-        # the density is filtered -- the map is quick enough that the extra
-        # click costs more than the redraw it saves.
+        # DEFAULT ON, AND THE READ MUST MATCH THE TOGGLE. This was off for a
+        # while, on the argument that leases became a cached file and the
+        # density is filtered, so a redraw was cheap enough that the extra
+        # click cost more than it saved. In practice options get set several
+        # at a time, and each one bought a full rebuild of a state nobody
+        # asked to see -- so holding is the better default and Apply draws
+        # once, at the end.
         #
-        # A read defaulting True against a toggle defaulting False is the
-        # density-fallback defect again: the control says one thing and the
-        # gate does another. Both are False now, and the header logs it.
-        if st.session_state.get("wm_hold_map", False) and _opts_changed:
+        # THE DEFAULT HERE AND THE TOGGLE'S `value` MUST AGREE. A read
+        # defaulting one way against a toggle defaulting the other is the
+        # density-fallback defect: the control says one thing and the gate
+        # does another. Both are False again -- the toggle above no longer
+        # passes `value`, so an unset key means off in both places.
+        # ONE-SHOT: popped whether or not it is used, so a place applied while
+        # holding cannot leave a flag behind that frees the NEXT change too.
+        _place_go = bool(st.session_state.pop("_draw_now", False))
+        if (st.session_state.get("wm_hold_map", False) and _opts_changed
+                and not _place_go):
             _skip_folium = True
             st.warning(
                 "⏸ **Map held** — options changed. Finish selecting, then "

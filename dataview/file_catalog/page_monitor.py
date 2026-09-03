@@ -524,7 +524,7 @@ def _run_promote(engine, apply: bool):
         with contextlib.redirect_stdout(buf):
             pc.run_promote(cur, None, apply, log=lambda m: print(m))
             # Backfill dv_well NULLs (incl. surface lat/long) from
-            # well_master_gold — the same enrichment pipeline_run does, so
+            # well_master_public_v2 — the same enrichment pipeline_run does, so
             # promoted wells get coordinates and can plot on the map. Unscoped
             # sweep (fills all NULLs); fine for the Monitor's batch sizes.
             if apply:

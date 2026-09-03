@@ -21,7 +21,7 @@ SERVER      = r"localhost\SQLEXPRESS"
 DATABASE    = "DataView_Demo"
 WORKERS     = 6
 REPORT_ROOT = r"C:\Bulk\reports"
-REF         = "WELL_REF.well_ref.well_master_gold"   # enrich/triage reference master
+REF         = "WELL_REF.well_ref.well_master_public_v2"   # enrich/triage reference master
 
 def _flag(name, default=None):
     if name in sys.argv:

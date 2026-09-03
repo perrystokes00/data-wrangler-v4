@@ -5,3 +5,7 @@
 # that file is ignored above. Committed, it would travel to a checkout where
 # the geojson does not exist and claim it was current.
 *.geojson.sig
+# Terrain rasters, rebuilt by tools/build_terrain_overlay.py --dem.
+# Tens of megabytes each and reproducible from USGS 3DEP, so they are
+# generated, never committed.
+*.png

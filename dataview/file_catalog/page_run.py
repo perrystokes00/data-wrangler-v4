@@ -12,7 +12,7 @@ import streamlit as st
 SERVER      = r"localhost\SQLEXPRESS"
 DATABASE    = "DataView_Demo"
 REPORT_ROOT = r"C:\Bulk\reports"
-REF         = "WELL_REF.well_ref.well_master_gold"   # enrich/triage reference master
+REF         = "WELL_REF.well_ref.well_master_public_v2"   # enrich/triage reference master
 CONSOLE_LOG = os.path.join(REPORT_ROOT, "_run_console.log")
 DEFAULT_ROOT = (r"C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai"
                 r"\data_wrangler\training\test_crawl")

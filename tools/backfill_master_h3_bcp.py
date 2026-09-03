@@ -47,7 +47,7 @@ import tempfile
 import time
 
 RESOLUTIONS = (4, 5, 6, 7)
-TABLE = "well_ref.well_master_gold"
+TABLE = "well_ref.well_master_public_v2"
 STAGE = "well_ref.h3_stage"          # a REAL table, not #temp: bcp connects on
                                      # its own session and cannot see a #temp
                                      # created by ours.
@@ -62,10 +62,19 @@ def _bcp(args: list[str], server: str, database: str, label: str) -> None:
     cmd = ["bcp", *args, "-c", "-t|", "-C", "65001", "-T",
            f"-S{server}", f"-d{database}"]
     r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
+    out = (r.stdout or "") + (r.stderr or "")
+    # BCP EXITS 0 ON A FAILED COPY. Measured 3 Sep: the filegroup filled at
+    # 2.2M of 2.9M rows, bcp printed "BCP copy in failed" and a NativeError,
+    # and still returned 0 -- so an exit-code check called a half-written
+    # table a success and the run reported completion. The message is the only
+    # honest signal, so it is read as well.
+    failed = any(s in out for s in ("BCP copy in failed",
+                                    "BCP copy out failed",
+                                    "NativeError = "))
+    if r.returncode != 0 or failed:
         raise RuntimeError(
             f"bcp {label} failed (exit {r.returncode}) · server {server} · "
-            f"database {database} · {(r.stdout or '') + (r.stderr or '') or '(no output)'}")
+            f"database {database} · {out or '(no output)'}")
 
 
 def _cells_and_hash(lat: float, lon: float):
@@ -77,16 +86,23 @@ def _cells_and_hash(lat: float, lon: float):
 
 
 def main() -> int:
+    global TABLE
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--server", default=r"localhost\SQLEXPRESS")
     ap.add_argument("--database", default="WELL_REF")
     ap.add_argument("--state", default=None)
+    ap.add_argument("--table", default=TABLE,
+                    help="table to backfill (default %(default)s); the public "
+                         "master built from disk is "
+                         "well_ref.well_master_public_v2")
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--keep-files", action="store_true",
                     help="leave the CSVs on disk for inspection")
     a = ap.parse_args()
+
+    TABLE = a.table
 
     try:
         import h3                                    # noqa: F401

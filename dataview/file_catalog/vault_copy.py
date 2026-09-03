@@ -63,7 +63,7 @@ except ImportError:
 DEFAULT_SERVER = r"PERRY\SQLEXPRESS"
 DEFAULT_DB     = "DataView_Demo"
 DEFAULT_DRIVER = "ODBC Driver 17 for SQL Server"
-DEFAULT_REF    = "WELL_REF.well_ref.well_master_gold"
+DEFAULT_REF    = "WELL_REF.well_ref.well_master_public_v2"
 DEFAULT_VAULT  = r"C:\Bulk\Vault"
 ZERO_UWI = "00000000000000"
 

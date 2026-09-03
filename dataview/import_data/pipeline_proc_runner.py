@@ -96,7 +96,7 @@ def run(cfg: dict) -> dict:
         single_pass=bool(cfg.get("single_pass", False)),
         stall_timeout=int(cfg.get("stall_timeout", 180)),
         should_abort=_abort_checker(cfg.get("stop_file")),
-        ref=cfg.get("ref", "WELL_REF.well_ref.well_master_gold"),
+        ref=cfg.get("ref", "WELL_REF.well_ref.well_master_public_v2"),
         report_root=cfg.get("report_root"),
         log=lambda m: print(m, flush=True),
     )

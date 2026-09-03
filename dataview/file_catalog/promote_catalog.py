@@ -478,7 +478,7 @@ def _fill_cat_coords_from_gold(cur, cat, lat_col, lon_col, uwi_filter, params):
     """
     filled = 0
     notes = []
-    gold = "WELL_REF.well_ref.well_master_gold"
+    gold = "WELL_REF.well_ref.well_master_public_v2"
     unset = (f"(m.[{lat_col}] IS NULL OR m.[{lon_col}] IS NULL "
              f"OR (m.[{lat_col}] = 0 AND m.[{lon_col}] = 0))")
 
@@ -2082,9 +2082,9 @@ def run_promote(cur, uwi=None, apply=False, log=print):
 
 
 def enrich_from_gold(cur, gold_db="WELL_REF", gold_schema="well_ref",
-                     gold_table="well_master_gold", uwi=None, uwis=None,
+                     gold_table="well_master_public_v2", uwi=None, uwis=None,
                      log=print):
-    """Post-promote enrichment: fill NULL dv_well columns from well_master_gold.
+    """Post-promote enrichment: fill NULL dv_well columns from well_master_public_v2.
 
     Set-based UPDATE keyed on g.uwi14 = dv_well.uwi. COALESCE means the document's
     own value always wins; gold only fills gaps. The well_name guard treats a
@@ -2279,7 +2279,7 @@ def main() -> int:
     ap.add_argument("--no-enrich", action="store_true",
                     help="skip the post-promote gold enrichment backfill")
     ap.add_argument("--gold-db", default="WELL_REF",
-                    help="database holding well_master_gold (default WELL_REF)")
+                    help="database holding well_master_public_v2 (default WELL_REF)")
     a = ap.parse_args()
 
     con = connect(a.server, a.database)

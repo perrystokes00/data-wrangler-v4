@@ -27,7 +27,7 @@ def main():
         do_promote=True, promote_apply=True,
         parse_mode="process", single_pass=False,
         do_vault=False, do_report=True,
-        ref="WELL_REF.well_ref.well_master_gold", log=print)
+        ref="WELL_REF.well_ref.well_master_public_v2", log=print)
     print("\nDONE.")
 if __name__ == "__main__":
     import multiprocessing as _mp; _mp.freeze_support(); main()

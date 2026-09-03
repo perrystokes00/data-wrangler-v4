@@ -115,7 +115,7 @@ def _build_indexes(con):
     gold_by_name = {}
     try:
         for u, nn in con.execute(_t(
-                "SELECT uwi14, NAME_NORM FROM WELL_REF.well_ref.well_master_gold "
+                "SELECT uwi14, NAME_NORM FROM WELL_REF.well_ref.well_master_public_v2 "
                 "WHERE NAME_NORM IS NOT NULL")).fetchall():
             if nn and nn not in gold_by_name:
                 gold_by_name[name_norm(nn)] = u

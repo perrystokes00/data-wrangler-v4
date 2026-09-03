@@ -50,6 +50,30 @@ REM   never the installed one. app_v4.py also inserts its own root at sys.path
 REM   position 0, so a stray launcher cannot re-create the problem.
 REM ===========================================================================
 
+REM ===========================================================================
+REM RUN FROM THE REPO, WHEREVER IT WAS LAUNCHED FROM
+REM   Every path in here already resolves through %~dp0, so the script FINDS
+REM   its app, its venv and its logs from any directory. What it did not do is
+REM   change the working directory, and the foreground launch below inherits
+REM   whatever the caller happened to be in. That matters: Streamlit discovers
+REM   .streamlit\config.toml relative to the CWD, and anything the app opens by
+REM   a relative path resolves there too -- so running this from another folder
+REM   started a server that ignored the project's own config and wrote where it
+REM   was standing. The background launch already pinned -WorkingDirectory, so
+REM   the two paths behaved DIFFERENTLY, which is the worst version of this.
+REM
+REM   %~dp0 is the folder holding this script, so it is the repo root by
+REM   construction: today
+REM   C:\Users\perry\OneDrive\Documents\PPDM\claude_use_ai\data_wrangler\data_wrangler_v4
+REM   Derived rather than written out, so moving or renaming the checkout does
+REM   not leave a launcher pointing at a path that no longer exists -- the
+REM   failure this file already carries a long comment about.
+REM
+REM   /d switches drive as well as directory; without it a launch from another
+REM   volume silently stays put.
+REM ===========================================================================
+cd /d "%~dp0"
+
 set "APP=app_v4.py"
 set "PORT=8501"
 set "PIDFILE=%~dp0.dev_pid"

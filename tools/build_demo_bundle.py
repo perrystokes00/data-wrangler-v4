@@ -25,7 +25,7 @@ demo data changes.
 WHAT THE BUNDLE MUST CARRY, verified against the code rather than assumed —
 WELL_REF holds five tables and only two of them are reachable:
 
-  well_master_gold     4.03M rows  2,438 MB  every dataview_federation view that
+  well_master_public_v2     4.03M rows  2,438 MB  every dataview_federation view that
                                              crosses databases reads this and
                                              nothing else; enrich/triage default
                                              to it  -> TRIMMED AND CARRIED
@@ -38,7 +38,7 @@ WELL_REF holds five tables and only two of them are reachable:
                                              run_pipeline's signature default,
                                              which every real caller overrides
                                              -> NOT CARRIED
-  well_master_gold_bak 3.89M rows    913 MB  zero references in the repo
+  well_master_public_v2_bak 3.89M rows    913 MB  zero references in the repo
                                              -> NOT CARRIED
   WELL_MASTER_TEST         5 rows    0.1 MB  -> NOT CARRIED
 
@@ -56,7 +56,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 SRC_DB = "WELL_REF"
-SRC_TBL = "well_ref.well_master_gold"
+SRC_TBL = "well_ref.well_master_public_v2"
 MINI_TBL = "well_ref.WELL_MASTER_MINI"
 DST_DB = "WELL_REF_DEMO"
 DEMO_DB = "DataView_Demo"
@@ -67,20 +67,20 @@ DEFAULT_STATES = ("15", "30", "35", "42")
 # zoom; latlon backs the bbox queries. Skipping them makes the demo feel slow
 # in exactly the places the product is supposed to feel fast.
 INDEXES = [
-    ("PK_well_master_gold", "CREATE UNIQUE CLUSTERED INDEX PK_well_master_gold "
-                            "ON well_ref.well_master_gold(uwi14)"),
-    ("IX_WM_UWI14",   "CREATE INDEX IX_WM_UWI14   ON well_ref.well_master_gold(uwi14)"),
+    ("PK_well_master_public_v2", "CREATE UNIQUE CLUSTERED INDEX PK_well_master_public_v2 "
+                            "ON well_ref.well_master_public_v2(uwi14)"),
+    ("IX_WM_UWI14",   "CREATE INDEX IX_WM_UWI14   ON well_ref.well_master_public_v2(uwi14)"),
     # r4 and r7 are deliberately absent: their _cover versions below are
     # supersets for every read the map makes, so plain copies only cost build
     # time, 209 MB each and write cost on every h3_refresh. Dropped from the
     # live master 20 Aug after confirming the density timings did not move.
     # r5/r6 stay — they carry INCLUDE (province_state), which the _cover
     # indexes do not, so something may still use them to filter by state.
-    ("IX_wmg_h3_r5",  "CREATE INDEX IX_wmg_h3_r5  ON well_ref.well_master_gold(h3_r5)"),
-    ("IX_wmg_h3_r6",  "CREATE INDEX IX_wmg_h3_r6  ON well_ref.well_master_gold(h3_r6)"),
-    ("IX_wmg_latlon", "CREATE INDEX IX_wmg_latlon ON well_ref.well_master_gold"
+    ("IX_wmg_h3_r5",  "CREATE INDEX IX_wmg_h3_r5  ON well_ref.well_master_public_v2(h3_r5)"),
+    ("IX_wmg_h3_r6",  "CREATE INDEX IX_wmg_h3_r6  ON well_ref.well_master_public_v2(h3_r6)"),
+    ("IX_wmg_latlon", "CREATE INDEX IX_wmg_latlon ON well_ref.well_master_public_v2"
                       "(surface_latitude, surface_longitude)"),
-    ("IX_WM_NAME_NORM", "CREATE INDEX IX_WM_NAME_NORM ON well_ref.well_master_gold(name_norm)"),
+    ("IX_WM_NAME_NORM", "CREATE INDEX IX_WM_NAME_NORM ON well_ref.well_master_public_v2(name_norm)"),
 ]
 
 # The map's density layer is the slowest thing in the product and it did not have
@@ -103,7 +103,7 @@ INDEXES = [
 # rows the aggregation would only discard.
 COVER_INDEXES = [
     (f"IX_wmg_h3_r{r}_cover",
-     f"CREATE INDEX IX_wmg_h3_r{r}_cover ON well_ref.well_master_gold(h3_r{r}) "
+     f"CREATE INDEX IX_wmg_h3_r{r}_cover ON well_ref.well_master_public_v2(h3_r{r}) "
      f"INCLUDE (uwi14, surface_latitude, surface_longitude) "
      f"WHERE surface_latitude IS NOT NULL")
     for r in (4, 5, 6, 7)
@@ -195,7 +195,7 @@ def main() -> int:
 
         print("  copying rows…", end="", flush=True)
         cur.execute(f"""
-            SELECT * INTO {DST_DB}.well_ref.well_master_gold
+            SELECT * INTO {DST_DB}.well_ref.well_master_public_v2
               FROM {SRC_DB}.{SRC_TBL}
              WHERE LEFT(uwi14,2) IN ({inlist})""")
         print(f" {cur.rowcount:,}")

@@ -525,7 +525,7 @@ def summary(conn):
         say(f"  {tier or '(untiered)':<12} {c}")
 
 
-DEFAULT_REF = "WELL_REF.well_ref.well_master_gold"
+DEFAULT_REF = "WELL_REF.well_ref.well_master_public_v2"
 
 
 def run_all(conn, ref=DEFAULT_REF, dry=False, log=say):
@@ -585,7 +585,7 @@ def main():
     ap.add_argument("--server", default=r"PERRY\SQLEXPRESS")
     ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--driver", default="ODBC Driver 17 for SQL Server")
-    ap.add_argument("--ref", default="WELL_REF.well_ref.well_master_gold")
+    ap.add_argument("--ref", default="WELL_REF.well_ref.well_master_public_v2")
     ap.add_argument("--dry-run", action="store_true",
                     help="report counts without writing")
     a = ap.parse_args()

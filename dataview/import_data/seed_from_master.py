@@ -8,7 +8,7 @@ no location, no depth, existing only to satisfy a constraint.
 
 This module is the case that refusal does not cover. It does not conjure a well
 from the orphan key; it copies a DESCRIBED well out of
-WELL_REF.well_ref.well_master_gold. Different act, different source, so it gets
+WELL_REF.well_ref.well_master_public_v2. Different act, different source, so it gets
 its own name rather than loosening `can_add`.
 
 BOTH CALLERS COME HERE. tools/seed_wells_from_master.py and the Phase 4 grid
@@ -26,7 +26,7 @@ WHAT IT WILL NOT DO
   * overwrite. NOT EXISTS-guarded: whichever load owns a well keeps it, the
     same first-one-in-wins rule promote follows.
 """
-MASTER = "WELL_REF.well_ref.well_master_gold"
+MASTER = "WELL_REF.well_ref.well_master_public_v2"
 
 # ── what gets copied: master expression -> dv_well column ──────────────────
 # ONE PLACE, and it is keyed by the DV_WELL NAME. The previous list was keyed

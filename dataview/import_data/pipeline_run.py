@@ -2016,7 +2016,7 @@ def _stage_promote(engine, apply, log):
         _p0 = _pt.monotonic()
         pc.run_promote(cur, None, apply, log=lambda m: log("  " + str(m)))
         _p1 = _pt.monotonic()
-        # Backfill dv_well NULLs from well_master_gold — same enrichment the
+        # Backfill dv_well NULLs from well_master_public_v2 — same enrichment the
         # standalone `promote_catalog --apply` runs, but SCOPED to the UWIs we
         # just promoted (the unscoped sweep over all dv_well × gold was the bulk
         # of promote's time on small runs). Same transaction as the promote.
@@ -2219,7 +2219,7 @@ def run_pipeline(engine, root, exts=None, *, workers=8, schema="file_catalog",
                  # signature was the one place still naming the 8.8M-row
                  # predecessor — so a direct run_pipeline() call enriched
                  # against a different table than the button did.
-                 ref="WELL_REF.well_ref.well_master_gold", report_root=None,
+                 ref="WELL_REF.well_ref.well_master_public_v2", report_root=None,
                  do_report=True, log=print):
     t0 = time.monotonic()
     s = {
@@ -2878,7 +2878,7 @@ def main():
                          "queue: process the whole pending inventory, wherever "
                          "it lives — the old behaviour, where only the scan was "
                          "ever scoped to the folder you gave it.")
-    ap.add_argument("--ref", default="WELL_REF.well_ref.well_master_gold")
+    ap.add_argument("--ref", default="WELL_REF.well_ref.well_master_public_v2")
     ap.add_argument("--no-enrich", action="store_true",
                     help="skip the enrich (UWI resolve / attr fill) stage")
     ap.add_argument("--no-capture", action="store_true",

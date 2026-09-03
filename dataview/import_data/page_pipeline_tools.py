@@ -14,7 +14,7 @@ import streamlit as st
 from dataview.import_data import pipeline_run as pr
 
 SCHEMA      = "file_catalog"
-DEFAULT_REF = "WELL_REF.well_ref.well_master_gold"
+DEFAULT_REF = "WELL_REF.well_ref.well_master_public_v2"
 
 # timing/marker lines worth surfacing above the full log
 TAGS = ("[vault-fetch]", "[vault-phase]", "[vault-wait]",

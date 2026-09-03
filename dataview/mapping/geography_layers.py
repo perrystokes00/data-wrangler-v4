@@ -25,6 +25,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 from __future__ import annotations
 
+import os
 import folium
 from sqlalchemy import text
 
@@ -211,7 +212,8 @@ def add_geography_layer(m, engine, key: str, show: bool = True,
 
 def points_layer(m, points, name, *, color="#222", fill="#555",
                  radius=3, show=True, opacity=0.9,
-                 popup_fields=None, popup_aliases=None, extra=None):
+                 popup_fields=None, popup_aliases=None,
+                 extra=None, colour_by=None, colours=None):
     """N points as ONE GeoJson layer. Returns the number drawn.
 
     ONE LAYER, NOT N MARKERS. A CircleMarker per point makes folium serialise
@@ -263,6 +265,15 @@ def points_layer(m, points, name, *, color="#222", fill="#555",
         marker=folium.CircleMarker(radius=radius, color=color, weight=2,
                                    fill=True, fill_color=fill,
                                    fill_opacity=opacity),
+        # ONE STYLE PER FEATURE, ONLY WHEN ASKED. folium folds identical
+        # style dicts into a style map, so N points with six colours cost
+        # six entries and not N -- checked before this was written, on the
+        # assumption that a style_function per point would bloat the
+        # document the way a CircleMarker per point does. It does not.
+        style_function=((lambda f: {
+            "color": colours.get(f["properties"].get(colour_by), color),
+            "fillColor": colours.get(f["properties"].get(colour_by), fill),
+        }) if (colour_by and colours) else None),
         tooltip=folium.GeoJsonTooltip(fields=["nm"], labels=False),
         popup=(folium.GeoJsonPopup(fields=list(popup_fields),
                                    aliases=list(popup_aliases or popup_fields),
@@ -336,7 +347,179 @@ def add_well_points(m, engine, show: bool = True, limit: int = 50000) -> int:
 
 import folium as _f
 
-REFERENCE_MASTER = "WELL_REF.well_ref.well_master_gold"
+
+# ── WHAT A REFERENCE WELL CAN BE COLOURED BY ──────────────────────────────
+# CHOSEN FROM WHAT WYOMING ACTUALLY HOLDS, not from what the schema offers.
+# Measured 2 Sep over the whole master and over two Wyoming boxes, because
+# the two disagree sharply and only the second is on screen:
+#
+#                   whole master        Teapot/NPR-3      Natrona County
+#   std_well_type   55.8% usable            0.0%              0.0%
+#   std_well_status 55.8% usable            0.0%              0.0%
+#   spud_date       35.0%                  78.9%             61.5%
+#   total_depth     49.9%                  95.4%             96.5%
+#   operator_name   51.9%                 100.0% (43)        99.9% (973)
+#   field_name      28.8%                 100.0% (7)         99.9% (126)
+#
+# TYPE AND STATUS ARE KEPT AND THEY ARE EMPTY HERE. They are the natural way
+# to colour a well set and they carry data in other states, so removing them
+# would be wrong; drawing Wyoming one flat grey and saying nothing would be
+# worse. The layer counts how many points actually got a value and says so,
+# which is the difference between "no data" and "the colouring is broken".
+#
+# 93.7% WAS THE WRONG NUMBER. COUNT(col) counts non-NULL, and 1,526,990 rows
+# carry the literal string 'UNKNOWN' -- so the column reads as filled while
+# saying nothing. Anything that means "not known" is folded into one bucket
+# with one grey.
+_REF_UNKNOWN = "#9ca3af"
+_REF_NOT_KNOWN = ("", "UNKNOWN", "UNK", "NONE", "N/A", "NA", "(NONE)")
+
+_REF_BY = {
+    "spud":     ("spud_date",           "Reference wells · spud decade"),
+    "depth":    ("total_depth",         "Reference wells · total depth"),
+    "type":     ("std_well_type",       "Reference wells · well type"),
+    "status":   ("std_well_status",     "Reference wells · well status"),
+    "operator": ("operator_name",       "Reference wells · operator"),
+    "field":    ("field_name",          "Reference wells · field"),
+}
+
+# ORDERED OPTIONS TAKE A RAMP, the rest take hues -- the same rule the lease
+# layer follows, and the same ramps, so blue still reads as time and warm as
+# extent across both layers. A rainbow over an ordered thing destroys the one
+# structure it has.
+def _ref_ramp(by):
+    """The ramp for an ordered option, or None for an identity one.
+
+    LOOKED UP INSIDE A FUNCTION because the ramps are defined further
+    down this file than this block is. As a module-level dict it raised
+    NameError at import -- which takes the whole map down, not just the
+    colouring.
+    """
+    return {"spud": _VINTAGE_RAMP, "depth": _SIZE_RAMP}.get(by)
+
+
+def _ref_band(by, value):
+    """The bucket label for one value, or None when it is not known.
+
+    NONE MEANS NOT KNOWN AND IS NEVER A COLOUR IN THE RAMP. A missing spud
+    date drawn in the palest step of a time ramp says "the oldest wells are
+    here", which is a confident wrong answer; it gets the reserved grey.
+    """
+    if value is None:
+        return None
+    if by == "spud":
+        y = getattr(value, "year", None)
+        if y is None:
+            try:
+                y = int(str(value)[:4])
+            except (TypeError, ValueError):
+                return None
+        if y < 1950:
+            return "1. before 1950"
+        if y < 1970:
+            return "2. 1950s-60s"
+        if y < 1980:
+            return "3. 1970s"
+        if y < 1990:
+            return "4. 1980s"
+        if y < 2010:
+            return "5. 1990s-2000s"
+        return "6. 2010 and later"
+    if by == "depth":
+        try:
+            d = float(value)
+        except (TypeError, ValueError):
+            return None
+        if d <= 0:
+            return None
+        if d < 2000:
+            return "1. under 2,000 ft"
+        if d < 4000:
+            return "2. 2,000-4,000 ft"
+        if d < 6000:
+            return "3. 4,000-6,000 ft"
+        if d < 8000:
+            return "4. 6,000-8,000 ft"
+        if d < 12000:
+            return "5. 8,000-12,000 ft"
+        return "6. 12,000 ft and deeper"
+    s = str(value).strip()
+    if s.upper() in _REF_NOT_KNOWN:
+        return None
+    return s
+
+
+# HOW MANY IDENTITY COLOURS A READER CAN ACTUALLY USE. Colour by operator
+# over Natrona County finds 973 of them: 973 legend swatches, 973 entries in
+# the colour map inlined into the page, and no reader able to tell any two
+# apart. The top few named and the rest in one bucket is the honest form --
+# and it is the same call the lease layer makes about owners.
+_REF_IDENTITY_MAX = 12
+_REF_OTHER = "#64748b"
+
+
+def _ref_colours(by, bands):
+    """{band: colour} for the bands actually present. Grey is not in it."""
+    ramp = _ref_ramp(by)
+    if ramp:
+        # THE RAMP IS INDEXED BY THE BAND'S OWN NUMBER, not by its position
+        # in what happened to be drawn. A field holding only 1980s and 2010s
+        # wells must not paint them as the two ENDS of the ramp -- the colour
+        # has to mean the same decade on every view, or two screenshots of
+        # the same map cannot be compared.
+        out = {}
+        for band in sorted({b for b in bands if b}):
+            try:
+                k = int(band.split(".")[0]) - 1
+            except (TypeError, ValueError):
+                k = 0
+            out[band] = ramp[min(k * (len(ramp) - 1) // 5, len(ramp) - 1)]
+        return out
+    # IDENTITY: THE COMMONEST FEW, BY COUNT, and everything else together.
+    import collections as _c
+    counts = _c.Counter(b for b in bands if b)
+    top = [nm for nm, _n in counts.most_common(_REF_IDENTITY_MAX)]
+    out = lease_colour_map(sorted(top))
+    for nm in counts:
+        if nm not in out:
+            out[nm] = _REF_OTHER
+    return out
+
+# ── THE 4M-ROW MASTER, AS POINTS ──────────────────────────────────────
+# Restored 2 Sep. Removed in the dead-code strip because the chip that
+# reached it had been deleted; wanted back because the density hexes
+# answer "where are wells" and never "which well is this". Measured
+# before restoring, against 4,031,052 rows: a bounded fetch is 0.03s over
+# Teapot (1,681 wells) and 0.13s over Natrona County (12,879), so the
+# layer is affordable wherever a box or a place has set bounds.
+
+# WHICH MASTER THE MAP READS. THERE IS NOW ONLY ONE (3 Sep).
+#
+# well_master_gold was DROPPED. It was loaded by hand over months and its keys
+# were wrong in ways a row count could never show: all 809 Washington wells
+# were keyed into California's number space (WA writes its state code 046, so
+# its API is eleven digits and the first ten shift every digit), and 37,318
+# Kansas wells into Georgia's. Michigan was missing entirely -- its 92,551
+# wells were absent while 5,465 MISSISSIPPI wells sat under Michigan's label.
+#
+# well_master_public_v2 replaces it: 3,140,361 wells across 19 states, built
+# from each agency's own file by tools/build_public_master.py, every state
+# reconciled against its source before it counted, zero duplicate keys, and
+# every key carrying the API state code of the state that issued it.
+#
+# IT IS SMALLER, AND THAT IS EXPECTED. Eight agencies whose terms do not yet
+# permit a derived aggregate are not in it -- Illinois, Oklahoma, Ohio,
+# Wyoming, Kentucky, Montana, Nebraska, Alaska. Letters are out to all eight;
+# each reply is one dv_source_licence update and a rebuild from files already
+# on disk. dataview.dv_source_licence decides what is in, and
+# build/source_manifest.csv is the evidence for each state.
+#
+# DW_REF_MASTER still overrides this, but nothing needs it now: the density
+# views (v_well_density_r4..r7, v_well_master_arm) were repointed at the same
+# table, so the points and the hexes agree by default rather than by
+# remembering to set a variable.
+REFERENCE_MASTER = os.environ.get(
+    "DW_REF_MASTER", "WELL_REF.well_ref.well_master_public_v2")
 
 # What a reference-well popup answers. Declared once so the two queries below
 # cannot drift apart, and ordered to match the tuple unpack at the call site --
@@ -353,9 +536,270 @@ _REF_COLS_LIGHT = "well_name, surface_latitude, surface_longitude"
 # question being asked and the popup is the answer.
 POPUP_MAX = 20000
 
+# AND A CEILING ON THE BOUNDED PATH, which "the box is the only limit" left
+# without one. That was right for every box a person draws and wrong for the
+# one the app draws itself: the USA place sets bounds to the lower 48, which
+# is a perfectly valid box holding ~3.9M wells, so the uncapped path fetched
+# all of them with eleven columns each and wrote half a gigabyte of GeoJSON.
+# Twice. And not one of those wells would have been drawn -- that extent is
+# zoom 4, below REFWELL_MIN_ZOOM.
+#
+# 300,000 CLEARS A STATE AND STOPS A CONTINENT. Wyoming's box is 210,337
+# wells, 58 MB of file, ~10s -- measured, and it works. The lower 48 is an
+# order of magnitude past that. Above the ceiling the layer does what it
+# already does when it cannot draw everything: a spread sample that says so
+# in its own name, rather than a fetch nobody can use.
+BOUNDED_MAX = 300000
+
+
+
+
+def _add_refwell_legend(m, colours, title, known, total):
+    """Swatches for the bands the layer JUST assigned, plus the shortfall.
+
+    IT TAKES THE COLOURS RATHER THAN RECOMPUTING THEM, for the reason the
+    lease legend does: a legend that derives its own swatches is a second
+    implementation of the colour rule, and the two drift the first time one
+    changes. A legend that disagrees with the map is worse than none, because
+    it is believed.
+
+    AND IT SAYS HOW MANY POINTS ARE UNCOLOURED. Colour by well type over
+    Wyoming paints every one of 1,681 Teapot wells the same grey, because the
+    master holds no type for any of them. Without the count that reads as a
+    broken layer; with it, it reads as what it is -- a column this data does
+    not fill. "n of m coloured" is the whole difference.
+    """
+    import folium as _f
+    # Band labels are DATA -- operator and field names come
+    # from the master, so they are escaped, not trusted.
+    from html import escape as _html_escape
+    if not colours and not total:
+        return
+    # ONE ROW PER COLOUR, NOT PER VALUE. Colouring by operator maps 973
+    # names onto twelve hues plus one "other", and a legend that listed
+    # every name would be longer than the map is tall.
+    named = sorted((b, c) for b, c in colours.items()
+                   if c != _REF_OTHER)
+    n_other = sum(1 for c in colours.values() if c == _REF_OTHER)
+    rows = "".join(
+        "<div style='white-space:nowrap'><i style='background:%s;"
+        "width:10px;height:10px;display:inline-block;border-radius:50%%;"
+        "margin-right:6px;border:1px solid #33415580'></i>%s</div>"
+        % (c, _html_escape(b.split(". ", 1)[-1]))
+        for b, c in named)
+    if n_other:
+        rows += ("<div style='white-space:nowrap'><i style='background:"
+                 "%s;width:10px;height:10px;display:inline-block;"
+                 "border-radius:50%%;margin-right:6px;"
+                 "border:1px solid #33415580'></i>%s other</div>"
+                 % (_REF_OTHER, "{:,}".format(n_other)))
+    miss = total - known
+    if miss > 0:
+        rows += ("<div style='white-space:nowrap'><i style='background:%s;"
+                 "width:10px;height:10px;display:inline-block;"
+                 "border-radius:50%%;margin-right:6px;"
+                 "border:1px solid #33415580'></i>not known</div>"
+                 % _REF_UNKNOWN)
+    foot = ("<div style='margin-top:4px;opacity:.7'>%s of %s coloured</div>"
+            % ("{:,}".format(known), "{:,}".format(total)))
+    html = (
+        "<details id='wm-refwell-legend' style='position:absolute;z-index:9999;"
+        "bottom:64px;left:10px;background:#ffffffee;border:1px solid #cbd5e1;"
+        "border-radius:6px;padding:5px 8px;font:500 11px system-ui;"
+        "color:#0f172a;max-height:40vh;overflow:auto'>"
+        "<summary style='cursor:pointer;font-weight:600'>%s</summary>%s%s"
+        "</details>"
+        "<script>(function(){var d=document.getElementById("
+        "'wm-refwell-legend'); if(!d){return;} "
+        "if(sessionStorage.getItem('dv_refleg_open')==='1'){"
+        "d.setAttribute('open','');} "
+        "d.addEventListener('toggle',function(){"
+        "sessionStorage.setItem('dv_refleg_open', d.open?'1':'0');});})();"
+        "</script>" % (_html_escape(title), rows, foot))
+    m.get_root().html.add_child(_f.Element(html))
+
+
+
+REFWELLS_GEOJSON_PREFIX = "dv_refwells_"
+
+# HOW MANY OF THESE FILES TO KEEP. Unlike the towns, a reference-well file is
+# not one artifact: it is one per (box, colouring), so browsing a few fields
+# writes a few files. Keeping the last handful means going back to a box you
+# just looked at costs nothing, while static/ cannot grow without bound.
+REFWELLS_KEEP = 8
+
+# BELOW THIS THE DOTS ARE NOISE, NOT DATA -- but the floor has to clear
+# the zoom people actually work at. Set to 13 first, which was wrong by
+# four levels: choosing a county fits the map to its extent, and Natrona
+# across a ~980px map is zoom 9, so the layer drew all 10,452 wells and
+# painted none of them. A whole state is 6-7 and a field is 12-13.
+#
+# 8 IS PERRY'S NUMBER, and it is a deliberate trade: a state view now
+# paints too, where 210,337 dots are a wash rather than an answer. The
+# H3 density layer is what answers "where are wells" at that scale. The
+# floor exists to stop the layer being drawn at a zoom where it cannot
+# be read; where exactly that line falls is a judgement, so it is one
+# constant and not a rule spread through the drawing code.
+REFWELL_MIN_ZOOM = 8
+
+
+# STYLE, TOOLTIP AND POPUP ALL IN THE BROWSER, because the geometry is served
+# by URL and folium can only run a Python style_function over data it EMBEDS.
+# Same constraint the lease layer meets the same way -- see _LEASE_ON_EACH.
+#
+# THE POPUP LABEL IS A SENTINEL, NOT DECORATION. page_well_map identifies a
+# loaded well by digging a 14-digit UWI out of the popup TEXT, and the
+# master's headers carry uwi14 too -- so without a label to tell them apart a
+# reference header is sent to the scout builder for a well that may not be in
+# dv_well at all. FEDWELL_POPUP_LABEL is what the handler checks, so it has to
+# survive into this template.
+_REFWELL_ON_EACH = """
+function(feature, layer) {
+    var C = __COLOURS__;
+    var UNK = "__UNKNOWN__";
+    var p = feature.properties || {};
+    var c = C[p._cb] || UNK;
+    layer.setStyle({color: c, fillColor: c, fillOpacity: 0.75, weight: 1,
+                    className: 'dv-refwell'});
+    layer.bindTooltip(p.nm || '', {sticky: true});
+    if (!__DETAIL__) { return; }
+    var rows = [["UWI", p.uwi], ["Operator", p.op],
+                ["County", p.cty], ["State", p.st], ["Type", p.ty],
+                ["Status", p.sta], ["TD", p.td], ["Spud", p.spud],
+                ["__BYLABEL__", p._cb]];
+    // THE SENTINEL ROW IS NEVER SKIPPED. Every other row drops out when
+    // the master leaves it NULL, and 105 of the 14,091 wells in one box
+    // have no well_name -- so the label row vanished along with the name,
+    // and those clicks were read as dv_well clicks and sent to the scout
+    // builder for a header that is not in dv_well. The label is what
+    // page_well_map looks for; it cannot depend on a column being filled.
+    var h = '<table style="font-size:11px;border-collapse:collapse">'
+          + '<tr><td style="color:#64748b;padding-right:8px">__LABEL__'
+          + '</td><td>' + (p.nm || '(unnamed)') + '</td></tr>';
+    for (var i = 0; i < rows.length; i++) {
+        if (rows[i][1] === undefined || rows[i][1] === null
+                || rows[i][1] === '') { continue; }
+        h += '<tr><td style="color:#64748b;padding-right:8px">' + rows[i][0]
+           + '</td><td>' + rows[i][1] + '</td></tr>';
+    }
+    layer.bindPopup(h + '</table>', {maxWidth: 320});
+}
+"""
+
+
+def _refwell_zoom_gate(m):
+    """Hand the map from the density hexes to the reference points at Z.
+
+    ONE THRESHOLD, BOTH DIRECTIONS. Below Z the hexes answer "where are
+    wells" over four million rows and the points are a smear; above it
+    the points answer "which well is this" and a 370 km hex is a sheet
+    of colour over the wells it was pointing at. Driving both from one
+    number means there is never a zoom showing both or neither.
+
+    IT ONLY INSTALLS WHEN THE REFERENCE LAYER DRAWS, which is what makes
+    hiding the hexes safe: with no points to hand over to, there is
+    nothing to hand over, and the hexes keep the map to themselves.
+
+    A CLASS ON THE CONTAINER, NOT setStyle, for the reason the NAIP dimming
+    uses one: the layer restyles itself on every hover, so anything written
+    with setStyle is undone the first time the pointer crosses a dot. A rule
+    outranks an SVG presentation attribute and keeps outranking it.
+
+    PYTHON NEVER LEARNS THE ZOOM -- the browser owns it -- so the gate is a
+    zoomend listener reading a value the map itself set, not a guess made
+    here about what the viewport is showing.
+    """
+    if getattr(m, "_dv_refwell_gate", False):
+        return
+    try:
+        m._dv_refwell_gate = True
+    except Exception:
+        pass
+    from branca.element import Template as _Tpl, MacroElement as _ME
+    _css = _ME()
+    _css._template = _Tpl(
+        "{% macro html(this, kwargs) %}<style>"
+        ".dv-refwell-hide .dv-refwell{display:none}"
+        ".dv-hex-hide .dv-hex{display:none}"
+        "</style>{% endmacro %}")
+    m.get_root().add_child(_css)
+    _gate = _ME()
+    _gate._template = _Tpl(
+        "{% macro script(this, kwargs) %}"
+        "(function(){"
+        " var mp = {{ this._parent.get_name() }};"
+        " if (!mp || mp._dvRefZoom) { return; }"
+        " mp._dvRefZoom = true;"
+        " var Z = " + str(REFWELL_MIN_ZOOM) + ";"
+        " function sync(){"
+        " var el = mp.getContainer();"
+        " if (!el) { return; }"
+        " if (mp.getZoom() < Z) {"
+        " L.DomUtil.addClass(el, 'dv-refwell-hide');"
+        " L.DomUtil.removeClass(el, 'dv-hex-hide'); }"
+        " else {"
+        " L.DomUtil.removeClass(el, 'dv-refwell-hide');"
+        " L.DomUtil.addClass(el, 'dv-hex-hide'); } }"
+        " mp.on('zoomend', sync);"
+        " sync();"
+        "})();"
+        "{% endmacro %}")
+    m.add_child(_gate)
+
+
+
+def ensure_refwells_geojson(feats, key, static_dir=None):
+    """(path, url) for one reference-well set, written once per (box, colour).
+
+    THE FILENAME IS THE FRESHNESS RULE. The key is a digest of the bounds, the
+    colouring and the row count, so a file that exists is by construction the
+    file for that request -- there is no sidecar to disagree with, and no
+    stamp that can outlive what it describes.
+
+    WHY SERVE IT AT ALL. Measured 2 Sep: a box round Wyoming holds 210,337
+    wells and inlines to a 72.8 MB document, which streamlit-folium injects
+    TWICE. Served as a file, the document carries a URL and the browser
+    fetches the geometry once. Same fix that took the towns from 2,756 KB to
+    75 KB, for the same reason.
+    """
+    import json as _json
+    import os as _os
+    if static_dir is None:
+        static_dir = _os.path.join(_os.path.dirname(_os.path.dirname(
+            _os.path.dirname(_os.path.abspath(__file__)))), "static")
+    name = "%s%s.geojson" % (REFWELLS_GEOJSON_PREFIX, key)
+    path = _os.path.join(static_dir, name)
+    url = "/app/static/" + name
+    if _os.path.exists(path) and _os.path.getsize(path) > 0:
+        return path, url
+    try:
+        _os.makedirs(static_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as _fh:
+            _json.dump({"type": "FeatureCollection", "features": feats}, _fh)
+    except Exception as exc:
+        print("[geography_layers] refwells geojson not written: %s"
+              % str(exc)[:120])
+        return None, None
+    # OLDEST FIRST, AND NEVER THE ONE JUST WRITTEN. A cleanup that can delete
+    # the file this render is about to serve turns a tidy-up into a blank map.
+    try:
+        olds = sorted(
+            (_os.path.join(static_dir, f) for f in _os.listdir(static_dir)
+             if f.startswith(REFWELLS_GEOJSON_PREFIX)
+             and f.endswith(".geojson")),
+            key=_os.path.getmtime)
+        for old in olds[:-REFWELLS_KEEP]:
+            if _os.path.abspath(old) != _os.path.abspath(path):
+                _os.remove(old)
+    except Exception as exc:
+        print("[geography_layers] refwells cleanup skipped: %s"
+              % str(exc)[:120])
+    return path, url
+
+
 
 def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
-                        show: bool = True):
+                        show: bool = True, by: str = "spud"):
     """Individual reference wells as ONE GeoJson layer. (drawn, in_scope).
 
     THE DENSITY VIEW IS NOT A SUBSTITUTE, and this is not the layer that was
@@ -378,20 +822,51 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
     # IX_wmg_latlon. The NULL guards are kept ONLY for the unbounded case,
     # where there is no BETWEEN to imply them.
     params = {}
+    # ── A BOX THAT DID NOT PARSE IS NOT A BOX ────────────────────────────
+    # THIS BRANCH DECIDED TWO THINGS AND ONLY LOOKED AT ONE. Everything
+    # downstream keys on "bounds" being truthy: the uncapped fetch, the
+    # detail columns, the popup. The unpack sat inside a try whose except
+    # fell back to "has coordinates" -- so a bounds object that was present
+    # but malformed produced the UNBOUNDED filter on the BOUNDED path, and
+    # asked for all 4,031,052 wells with eleven columns each.
+    #
+    # It ran. Measured 2 Sep: 3,064,871 features and 805 MB of GeoJSON on
+    # disk and still climbing, full of Florida wells, while the log said
+    # "drew 10452" from the render before it. The cap and the sample exist
+    # precisely to stop that, and this path had stepped around both.
+    #
+    # So the parse happens FIRST and its RESULT is the gate. A box that does
+    # not parse is treated as no box at all -- capped, sampled, honest --
+    # rather than as a box covering the earth.
+    _bx = None
     if bounds:
         try:
             (s, w), (n, e) = bounds
-            where = ["surface_latitude BETWEEN :s AND :n",
-                     "surface_longitude BETWEEN :w AND :e"]
-            params = {"s": float(s), "n": float(n),
-                      "w": float(w), "e": float(e)}
-        except Exception:
-            where = ["surface_latitude IS NOT NULL",
-                     "surface_longitude IS NOT NULL"]
+            s, w, n, e = float(s), float(w), float(n), float(e)
+            if (s == s and w == w and n == n and e == e   # not NaN
+                    and -90 <= s < n <= 90 and -180 <= w < e <= 180):
+                _bx = (s, w, n, e)
+            else:
+                print("[geography_layers] reference wells: bounds out of "
+                      "range %r -- treating as unbounded" % (bounds,))
+        except Exception as exc:
+            print("[geography_layers] reference wells: bounds did not parse "
+                  "(%s) -- treating as unbounded" % str(exc)[:80])
+    bounds = _bx and ((_bx[0], _bx[1]), (_bx[2], _bx[3]))
+    if _bx:
+        where = ["surface_latitude BETWEEN :s AND :n",
+                 "surface_longitude BETWEEN :w AND :e"]
+        params = {"s": _bx[0], "n": _bx[2], "w": _bx[1], "e": _bx[3]}
     else:
         where = ["surface_latitude IS NOT NULL",
                  "surface_longitude IS NOT NULL"]
     clause = " AND ".join(where)
+    # THE COLOUR COLUMN RIDES ALONG ON WHICHEVER QUERY RUNS, so the
+    # sampled path is coloured too. One more column on a scan that is
+    # already happening, not a second query.
+    _cb_col, _cb_title = _REF_BY.get(by, _REF_BY["spud"])
+    _light = _REF_COLS_LIGHT + ", " + _cb_col + " AS _cb"
+    _full = _REF_COLS + ", " + _cb_col + " AS _cb"
     # ROWS FIRST, AND COUNT ONLY IF IT TELLS US SOMETHING. Under the cap the
     # fetch IS the count -- asking the server twice is free information at a
     # real price: COUNT(*) over a 2M-row bbox measured 5.90s, longer than
@@ -418,111 +893,276 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
     # PAGES, and pages are clustered by uwi14, so it clumps.
     lim = int(limit)
     sampled = False
+    detail = False
+    # ── A BOX IS THE LIMIT. NOTHING ELSE IS. ──────────────────────────────
+    # "The number of wells to post for reference wells should only be limited
+    # by the bounding box." So a bounded fetch has no TOP, no sample and no
+    # popup threshold: it returns every well inside the box, with the detail
+    # columns, and every one of them is clickable.
+    #
+    # THE CAP AND THE SAMPLE EXIST FOR THE UNBOUNDED CASE, which is a
+    # different question. With no box the scope is 4,031,052 wells across the
+    # continent, a set no browser can draw and no reader can click; there the
+    # spread sample stands in for "too many to draw" and says so in its own
+    # layer name. Drawing a box is what turns the layer from an impression
+    # into an answer, and that is exactly when the limits get out of the way.
+    #
+    # WHAT A BIG BOX COSTS, measured 2 Sep: 1,681 wells over Teapot is 0.15s
+    # and 0.5 MB of document; 12,879 over Natrona County is 0.61s and 3.6 MB,
+    # and streamlit-folium injects that twice. A box drawn round several
+    # counties will be slow -- deliberately, because it is what was asked for
+    # and a silent truncation reads as completeness.
     try:
         with engine.connect() as con:
-            # limit+1 tells us "capped" without a COUNT, which measured 5.90s
-            # over a 2M-row bbox for a number that only ever reads "lots".
-            rows = con.execute(text(
-                f"SELECT TOP {lim + 1} {_REF_COLS_LIGHT} "
-                f"FROM {REFERENCE_MASTER} WHERE {clause}"),
-                params).fetchall()
-            if len(rows) > lim:
-                est = con.execute(text(
-                    "SELECT SUM(p.rows) FROM WELL_REF.sys.partitions p "
-                    "JOIN WELL_REF.sys.objects o ON o.object_id = p.object_id "
-                    "WHERE o.name = 'well_master_gold' AND p.index_id IN (0,1)"
-                )).scalar() or 0
-                # k FROM THE SCOPE, NOT THE MASTER -- and the first sample
-                # is what measures the scope. Deriving k from the master's
-                # 3.9M rows thins every view by the same 79x, so a bbox
-                # holding ~200k wells drew 2,613 of them: correct in shape,
-                # 19x sparser than the cap allows, and indistinguishable to
-                # the eye from "there are hardly any wells here".
-                #
-                # Counting the scope directly is the expensive thing this
-                # code already avoids (5.90s over a 2M-row bbox). But a
-                # 1-in-k sample IS an estimator: n * k approximates the
-                # population, so one cheap sample tells us what k should have
-                # been, and we re-ask only if the answer differs.
-                k = max(2, int(est // max(lim, 1)) + 1)
-                sampled = True
+            if bounds:
+                # PROBE FIRST, WITH THE LIGHT COLUMNS. One row past the
+                # ceiling is all we need to know, and asking for it in
+                # three columns rather than twelve is what makes the
+                # check affordable on a box that turns out to be huge.
                 rows = con.execute(text(
-                    f"SELECT TOP {lim} {_REF_COLS_LIGHT} "
-                    f"FROM {REFERENCE_MASTER} "
-                    f"WHERE {clause} AND ABS(CHECKSUM(uwi14)) % {k} = 0"),
+                    f"SELECT TOP {BOUNDED_MAX + 1} {_light} "
+                    f"FROM {REFERENCE_MASTER} WHERE {clause}"),
                     params).fetchall()
-                if rows:
-                    scope_est = len(rows) * k
-                    k2 = max(2, int(scope_est // max(lim, 1)) + 1)
-                    # Only worth a second pass if it changes the picture.
-                    if k2 < k // 2:
-                        q2 = (f"SELECT TOP {lim} {_REF_COLS_LIGHT} "
-                              f"FROM {REFERENCE_MASTER} WHERE {clause} "
-                              f"AND ABS(CHECKSUM(uwi14)) % {k2} = 0")
-                        rows = con.execute(text(q2), params).fetchall()
+                if len(rows) > BOUNDED_MAX:
+                    # TOO BIG TO BE A BOX. Fall through to the sampled
+                    # path, which caps, spreads and says "sample" in the
+                    # layer name.
+                    print("[geography_layers] reference wells: box holds "
+                          "more than %s wells -- sampling instead"
+                          % "{:,}".format(BOUNDED_MAX))
+                    bounds = None
+                else:
+                    rows = con.execute(text(
+                        f"SELECT {_full} FROM {REFERENCE_MASTER} "
+                        f"WHERE {clause}"), params).fetchall()
+                    detail = bool(rows)
+            if not bounds:
+                # limit+1 tells us "capped" without a COUNT, which measured
+                # 5.90s over a 2M-row bbox for a number that only ever reads
+                # "lots".
+                rows = con.execute(text(
+                    f"SELECT TOP {lim + 1} {_light} "
+                    f"FROM {REFERENCE_MASTER} WHERE {clause}"),
+                    params).fetchall()
+                if len(rows) > lim:
+                    # NAME THE TABLE WE ACTUALLY READ. This was hard-coded to
+                    # 'well_master_gold'; when that table was dropped the
+                    # count came back 0 and k collapsed to 2, thinning every
+                    # view differently with nothing on screen to say why.
+                    est = con.execute(text(
+                        "SELECT SUM(p.rows) FROM WELL_REF.sys.partitions p "
+                        "JOIN WELL_REF.sys.objects o "
+                        "ON o.object_id = p.object_id "
+                        "WHERE o.name = :t AND p.index_id IN (0,1)"),
+                        {"t": REFERENCE_MASTER.split(".")[-1]}).scalar() or 0
+                    # k FROM THE SCOPE, NOT THE MASTER -- and the first sample
+                    # is what measures the scope. Deriving k from the master's
+                    # 3.9M rows thins every view by the same 79x, so a bbox
+                    # holding ~200k wells drew 2,613 of them: correct in
+                    # shape, 19x sparser than the cap allows, and
+                    # indistinguishable to the eye from "hardly any wells".
+                    k = max(2, int(est // max(lim, 1)) + 1)
+                    sampled = True
+                    rows = con.execute(text(
+                        f"SELECT TOP {lim} {_light} "
+                        f"FROM {REFERENCE_MASTER} "
+                        f"WHERE {clause} AND ABS(CHECKSUM(uwi14)) % {k} = 0"),
+                        params).fetchall()
+                    if rows:
+                        scope_est = len(rows) * k
+                        k2 = max(2, int(scope_est // max(lim, 1)) + 1)
+                        # Only worth a second pass if it changes the picture.
+                        if k2 < k // 2:
+                            q2 = (f"SELECT TOP {lim} {_light} "
+                                  f"FROM {REFERENCE_MASTER} WHERE {clause} "
+                                  f"AND ABS(CHECKSUM(uwi14)) % {k2} = 0")
+                            rows = con.execute(text(q2), params).fetchall()
+                elif rows:
+                    # Under the cap even unbounded: it can be clicked, so it
+                    # gets the detail columns and the popup.
+                    rows = con.execute(text(
+                        f"SELECT {_full} FROM {REFERENCE_MASTER} "
+                        f"WHERE {clause}"), params).fetchall()
+                    detail = bool(rows)
     except Exception as exc:
         print(f"[geography_layers] reference wells query failed: {exc}")
         return 0, 0
     if not rows:
         return 0, 0
 
-    # A SECOND QUERY, ON PURPOSE. The probe fetches three columns so the
-    # common "too many to popup" case never pays for eleven; only when the
-    # set is small enough to be clicked does it go back for the detail. That
-    # re-read is bounded by POPUP_MAX and measured in tenths of a second,
-    # against the ~10s the wide sample scan costs.
-    detail = False
-    if not sampled and len(rows) <= POPUP_MAX:
-        try:
-            with engine.connect() as con:
-                rows = con.execute(text(
-                    f"SELECT TOP {lim} {_REF_COLS} "
-                    f"FROM {REFERENCE_MASTER} WHERE {clause}"),
-                    params).fetchall()
-            detail = True
-        except Exception as exc:
-            print(f"[geography_layers] reference detail query failed: {exc}")
 
     in_scope = None if sampled else len(rows)
-    label = (f"🔵 Federated wells ({len(rows):,}"
-             + (" sample)" if sampled else ")"))
-    # The popup is what makes a reference well answerable rather than merely
-    # visible -- "which well is this" is the whole reason to draw points at all
-    # instead of a density hex. Every field is one the master states; a column
-    # it leaves NULL shows blank rather than a guess.
-    _f = ["uwi", "operator", "county", "state", "type", "status", "td", "spud"]
-    if detail:
-        n_drawn = points_layer(
-            m, ((la, lo, nm, uwi, op, cty, prov, ty, stat, td, spud)
-                for nm, la, lo, uwi, op, cty, prov, ty, stat, td, spud in rows),
-            # BIG ENOUGH TO HIT. radius=2 is a 4px target and the popup was
-            # the whole point of this path -- "make the tooltip easier to
-            # select for a popup". A CircleMarker radius is already in SCREEN
-            # pixels, so it is fixed at every zoom; it was simply too small.
-            # 5 gives a 10px target, which is the usual minimum for a pointer.
-            name=label, color="#1d4ed8", fill="#60a5fa", radius=5, show=show,
-            opacity=0.7, extra=_f, popup_fields=["nm"] + _f,
-            # "Reference well", NOT "Well", and it is load-bearing rather
-            # than cosmetic. The map click handler identifies a loaded well by
-            # digging a 14-digit UWI out of the popup TEXT -- and uwi14 is
-            # exactly what these carry, so a reference-well click was being
-            # read as a dv_well click and sent to the scout builder for a well
-            # that may not be in dv_well at all. The label is the sentinel the
-            # handler checks, so the popup says what it is to the reader AND
-            # to the code.
-            popup_aliases=[FEDWELL_POPUP_LABEL, "UWI", "Operator", "County",
-                           "State", "Type", "Status", "TD", "Spud"])
+    # THE COLOUR COLUMN IS ALWAYS LAST, whichever query ran, so one index
+    # serves both row shapes and neither has to be unpacked by name.
+    bands = [_ref_band(by, r[-1]) for r in rows]
+    colours = _ref_colours(by, bands)
+    known = sum(1 for _b in bands if _b)
+    label = ("\u26ab Reference wells (%s%s)"
+             % ("{:,}".format(len(rows)), " sample" if sampled else ""))
+
+    # ── THE POINTS GO IN A FILE, NOT IN THE DOCUMENT ──────────────────────
+    # A bounded set is now uncapped, so it can be large: 210,337 wells over
+    # Wyoming inlined to 72.8 MB, injected twice by streamlit-folium. Served
+    # by URL the document carries a link and the browser fetches the geometry
+    # once and caches it -- the towns fix, applied to the layer that needed it
+    # more.
+    feats = []
+    for _i, r in enumerate(rows):
+        try:
+            la, lo = float(r[1]), float(r[2])
+        except (TypeError, ValueError):
+            continue
+        props = {"nm": "" if r[0] is None else str(r[0]),
+                 "_cb": bands[_i] or "not known"}
+        if detail:
+            for _k, _v in zip(("uwi", "op", "cty", "st", "ty", "sta", "td",
+                               "spud"), r[3:11]):
+                if _v is not None and str(_v) != "":
+                    props[_k] = str(_v)
+        feats.append({"type": "Feature", "properties": props,
+                      "geometry": {"type": "Point",
+                                   "coordinates": [round(lo, 5),
+                                                   round(la, 5)]}})
+    if not feats:
+        return 0, in_scope
+
+    import hashlib as _hl
+    import json as _js
+    _key = _hl.sha1(repr((
+        None if not bounds else [round(float(x), 5)
+                                 for x in (bounds[0][0], bounds[0][1],
+                                           bounds[1][0], bounds[1][1])],
+        by, detail, len(feats))).encode("utf-8")).hexdigest()[:16]
+    _path, _url = ensure_refwells_geojson(feats, _key)
+    _oneach = (_REFWELL_ON_EACH
+               .replace("__COLOURS__", _js.dumps(colours))
+               .replace("__UNKNOWN__", _REF_UNKNOWN)
+               .replace("__DETAIL__", "true" if detail else "false")
+               .replace("__LABEL__", FEDWELL_POPUP_LABEL)
+               .replace("__BYLABEL__",
+                        _cb_title.split("\u00b7")[-1].strip().title()))
+    if "__" in _oneach.replace("__proto__", ""):
+        # CAUGHT HERE, NOT IN THE BROWSER. An unfilled __TOKEN__ is
+        # valid-looking JavaScript right up until it runs -- the same trap
+        # lease_on_each guards, which shipped a literal __FILT__ and died on
+        # the first township click.
+        _left = [t for t in _oneach.split("__")[1::2]]
+        print("[geography_layers] refwell template placeholder(s) unfilled: %s"
+              % ", ".join(sorted(set(_left)))[:120])
+    if _path:
+        # SMALLER WHEN SAMPLED: no popup to hit, and 48,000 dots at radius 5
+        # is a smear, not a map.
+        _gj = _f.GeoJson(
+            _path, embed=False, name=label, show=show,
+            marker=_f.CircleMarker(radius=3 if detail else 1.5, weight=1,
+                                   fill=True, fill_opacity=0.75),
+            on_each_feature=_f.JsCode(_oneach))
+        # The link folium emits must be the BROWSER's, not ours.
+        _gj.embed_link = _url
+        _gj.add_to(m)
+        _refwell_zoom_gate(m)
+        n_drawn = len(feats)
     else:
-        # SMALLER ON THE SAMPLED PATH, deliberately. This one has no popup to
-        # hit -- it is the three-column probe -- and 48,000 dots at radius 5
-        # is a smear, not a map. The path that can be clicked is the one that
-        # is worth making clickable.
-        n_drawn = points_layer(m, ((la, lo, nm) for nm, la, lo in rows),
-                               name=label, color="#1d4ed8", fill="#60a5fa",
-                               radius=2.5, show=show, opacity=0.7)
-    # in_scope is None when capped: "we do not know, and finding out costs
-    # more than the answer is worth". Never 0, which would read as "none here".
+        # EMBEDDED WHEN THE FILE CANNOT BE WRITTEN. A read-only static/ should
+        # cost payload, not the layer.
+        _fl = ["uwi", "operator", "county", "state", "type", "status", "td",
+               "spud", "_cb"]
+        n_drawn = points_layer(
+            m, ((r[1], r[2], r[0], r[3], r[4], r[5], r[6], r[7], r[8], r[9],
+                 r[10], bands[_i] or "not known")
+                for _i, r in enumerate(rows)) if detail else
+               ((r[1], r[2], r[0], bands[_i] or "not known")
+                for _i, r in enumerate(rows)),
+            name=label, color="#1d4ed8", fill="#60a5fa",
+            radius=5 if detail else 2.5, show=show, opacity=0.7,
+            extra=_fl if detail else ["_cb"],
+            popup_fields=(["nm"] + _fl) if detail else None,
+            popup_aliases=([FEDWELL_POPUP_LABEL, "UWI", "Operator", "County",
+                            "State", "Type", "Status", "TD", "Spud",
+                            _cb_title.split("\u00b7")[-1].strip().title()]
+                           if detail else None),
+            colour_by="_cb", colours=colours)
+
+    _add_refwell_legend(m, colours, _cb_title, known, len(rows))
+
     return n_drawn, in_scope
+
+
+# A 1x1 transparent PNG. Stands in while folium builds an overlay whose real
+# image is served by URL -- see add_image_layer for why the URL cannot be
+# passed to the constructor.
+_BLANK_PNG = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAf"
+              "FcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
+
+
+def add_image_layer(m, layer: dict, say=None) -> int:
+    """Lay a registered IMAGE layer on the bounds stored with it.
+
+    HERE RATHER THAN IN page_well_map SO EVERY MAP GETS IT. A hypsometric
+    fill is one picture, and the lease screen draws onto the same folium map
+    today -- but if it ever gets its own, the alternative is a second copy of
+    this branch and two renderers that must agree about what an image layer
+    is. This file's header already records what that costs: the paste-me
+    snippet that drifted from its caller and silently blanked a whole pill.
+
+    The bbox columns are the registry's own, so an image layer needs no new
+    table and appears in the same Show grid as everything else.
+
+    Returns 1 if it drew, 0 if it could not -- the same "degrade to nothing"
+    contract as the other layers here, and no streamlit import.
+    """
+    import os
+
+    _note = say or (lambda _m: None)
+    png = (layer or {}).get("file_path") or ""
+    name = (layer or {}).get("layer_name") or "Image"
+    if not png or not os.path.exists(png):
+        _note("[map] %s: image missing at %s" % (name, png))
+        return 0
+    try:
+        bounds = [[float(layer["bbox_min_lat"]), float(layer["bbox_min_lon"])],
+                  [float(layer["bbox_max_lat"]), float(layer["bbox_max_lon"])]]
+    except (TypeError, ValueError, KeyError):
+        _note("[map] %s: no usable bounds on the layer row" % name)
+        return 0
+    try:
+        opacity = float(layer.get("style_opacity") or 0.75)
+    except (TypeError, ValueError):
+        opacity = 0.75
+    # A URL WHEN THE FILE IS SERVED, A PATH ONLY WHEN IT IS NOT. folium
+    # base64-embeds a local path into the map HTML, which is fine for the
+    # 0.7 MB Teapot fill and ruinous for a statewide DEM -- tens of
+    # megabytes into every render, the exact cost the lease geojson was
+    # moved out of the payload to avoid. Streamlit serves static/ at
+    # /app/static/, and the browser then caches the image across renders.
+    src = png
+    _parts = os.path.normpath(png).split(os.sep)
+    if "static" in _parts:
+        src = "/app/static/" + "/".join(_parts[_parts.index("static") + 1:])
+
+    from folium.raster_layers import ImageOverlay
+    # BELOW EVERYTHING ELSE. This is ground: wells, seismic, leases and the
+    # contours it came from all have to sit on top of it, and folium adds in
+    # call order, so the overlay asks for a low z-index rather than relying
+    # on being added first.
+    _ov = ImageOverlay(image=(png if src == png else _BLANK_PNG),
+                       bounds=bounds, opacity=opacity,
+                       name=name, overlay=True, control=True, zindex=1)
+    if src != png:
+        # SET THE URL AFTER CONSTRUCTION, because folium's image_to_url only
+        # treats a string as a URL when urlparse finds a SCHEME -- so
+        # "/app/static/x.png" is read as a file path, and the render died
+        # with FileNotFoundError on a file that exists, under a name the
+        # browser (not Python) is meant to resolve. An absolute
+        # http://localhost:8501/... would satisfy folium and then break the
+        # moment the app is reached from anywhere else, so the relative URL
+        # is the correct one and this is how it gets past the check. The
+        # placeholder above is a 1x1 transparent pixel, never fetched.
+        _ov.url = src
+    _ov.add_to(m)
+    _note("[map] %s: image overlay on %s (%s)"
+          % (name, bounds, "served" if src != png else "embedded"))
+    return 1
 
 
 def add_all_geography_layers(m, engine) -> int:
@@ -579,65 +1219,6 @@ def _linestring_coords(wkt):
     return out
 
 
-def add_horizon_contours(m, engine, show=False):
-    """Time-structure contours, one toggleable group per horizon.
-
-    ONE GeoJson PER HORIZON, not one per contour. folium serialises each
-    object it is given separately, which is what made 14,727 hexagons take 28
-    seconds before the H3 layer was rewritten the same way. There are only 62
-    contours here, but the pattern is the one that survives someone loading a
-    real interpretation with thousands.
-
-    Returns the number of horizons drawn.
-    """
-    rows = _qry_horizon_contours(engine)
-    if not rows:
-        return 0
-
-    by_h = {}
-    for r in rows:
-        by_h.setdefault(r["horizon_id"], []).append(r)
-
-    drawn = 0
-    for hid in sorted(by_h, key=lambda k: by_h[k][0]["seq"]):
-        group = by_h[hid]
-        colour = group[0]["colour"]
-        feats = []
-        for r in group:
-            coords = _linestring_coords(r["wkt"])
-            if len(coords) < 2:
-                continue
-            feats.append({
-                "type": "Feature",
-                "geometry": {"type": "LineString", "coordinates": coords},
-                "properties": {"hz": r["name"],
-                               # Pre-formatted: a GeoJsonTooltip prints the
-                               # property as-is, and "289.99999999" is what a
-                               # raw contour level looks like.
-                               "t": f"{r['value']:,.0f} ms"},
-            })
-        if not feats:
-            continue
-        fg = folium.FeatureGroup(
-            name=f"〰️ {group[0]['name']} ({len(feats)})", show=show)
-        folium.GeoJson(
-            {"type": "FeatureCollection", "features": feats},
-            style_function=lambda _f, _c=colour: {
-                "color": _c, "weight": 1.6, "opacity": 0.9, "fillOpacity": 0},
-            tooltip=folium.GeoJsonTooltip(fields=["hz", "t"],
-                                          aliases=["Horizon", "TWT"],
-                                          sticky=True),
-        ).add_to(fg)
-        fg.add_to(m)
-        drawn += 1
-    return drawn
-
-
-_BY_TITLE = {"owner": "Lease owner", "producing": "Lease · producing",
-             "status": "Lease status", "vintage": "Lease · effective decade",
-             "size": "Lease · size"}
-
-
 def _add_lease_legend(m, entries, by):
     """A floating legend built from the colours the layer JUST assigned.
 
@@ -671,7 +1252,7 @@ def _add_lease_legend(m, entries, by):
         rows.append("<div style='font-size:10px;color:#64748b;margin-top:3px'>"
                     "+%d more not listed</div>" % extra)
     html = (
-        "<details id='wm-lease-legend' open style='position:fixed;"
+        "<details id='wm-lease-legend' style='position:fixed;"
         "bottom:22px;left:12px;z-index:9999;"
         "background:rgba(255,255,255,0.94);padding:6px 11px 8px;"
         "border-radius:6px;box-shadow:0 1px 5px rgba(0,0,0,0.35);"
@@ -683,8 +1264,8 @@ def _add_lease_legend(m, entries, by):
         "<script>(function(){"
         "var d=document.getElementById('wm-lease-legend');"
         "if(!d){return;}"
-        "try{if(sessionStorage.getItem('dv_lease_legend_open')==='0')"
-        "{d.removeAttribute('open');}}catch(e){}"
+        "try{if(sessionStorage.getItem('dv_lease_legend_open')==='1')"
+        "{d.setAttribute('open','');}}catch(e){}"
         "d.addEventListener('toggle',function(){"
         "try{sessionStorage.setItem('dv_lease_legend_open',d.open?'1':'0');}"
         "catch(e){}});"
@@ -750,121 +1331,6 @@ def _classify_well(status, wtype):
             continue
         return label, colour, svg
     return _SYM_FALLBACK
-
-
-def add_well_symbols(m, engine, show=True, limit=4000, uwi_like=None):
-    """Wells drawn with industry symbols, one toggleable group per kind.
-
-    ONE GROUP PER SYMBOL, so the layer control doubles as the legend -- there
-    is nowhere else on a folium map to put one, and a symbol set nobody can
-    decode is decoration.
-
-    Returns the number of wells drawn.
-    """
-    have = _table_columns(engine, "dv_well")
-    if not have:
-        return 0
-    _c = lambda n: n if n in have else "NULL"          # noqa: E731
-    where = "surface_latitude IS NOT NULL AND surface_longitude IS NOT NULL"
-    params = {}
-    if uwi_like:
-        where += " AND uwi LIKE :u"
-        params["u"] = uwi_like
-    try:
-        with engine.connect() as con:
-            rows = con.execute(text(f"""
-                SELECT TOP {int(limit)}
-                       {_c('well_name')} AS nm, uwi,
-                       surface_latitude AS la, surface_longitude AS lo,
-                       {_c('well_status')} AS st, {_c('well_type')} AS ty,
-                       {_c('well_profile_type')} AS pr,
-                       {_c('bottom_hole_latitude')}  AS bla,
-                       {_c('bottom_hole_longitude')} AS blo
-                  FROM dataview.dv_well
-                 WHERE {where}
-            """), params).fetchall()
-    except Exception as exc:
-        print(f"[geography_layers] well symbol query failed: {exc}")
-        return 0
-    if not rows:
-        return 0
-
-    groups = {}
-    for r in rows:
-        label, colour, svg = _classify_well(r.st, r.ty)
-        groups.setdefault((label, colour, svg), []).append(r)
-
-    drawn = 0
-    for (label, colour, svg), rs in sorted(groups.items(),
-                                           key=lambda kv: -len(kv[1])):
-        fg = folium.FeatureGroup(name=f"{label} ({len(rs):,})", show=show)
-        body = svg.replace("{c}", colour)
-        html = (f'<svg width="18" height="18" viewBox="0 0 18 18">{body}</svg>')
-        for r in rs:
-            _pr = (r.pr or "").strip().upper()
-            folium.Marker(
-                location=[float(r.la), float(r.lo)],
-                icon=folium.DivIcon(
-                    icon_size=(18, 18), icon_anchor=(9, 9), html=html),
-                tooltip=folium.Tooltip(
-                    f"<b>{r.nm or r.uwi}</b><br>{label}"
-                    + (f"<br>{_pr.title()}" if _pr else "")),
-            ).add_to(fg)
-            # A DEVIATED WELL IS TWO PLACES. Drawing only the surface hole puts
-            # the well where the rig stood, not where it produces -- and for a
-            # horizontal that is most of a mile out. The stick is the honest
-            # minimum until the full survey path is drawn.
-            if _pr in ("DIRECTIONAL", "HORIZONTAL") and r.bla and r.blo:
-                folium.PolyLine(
-                    [[float(r.la), float(r.lo)], [float(r.bla), float(r.blo)]],
-                    color=colour, weight=1.4, opacity=0.75, dash_array="4,3",
-                ).add_to(fg)
-                folium.CircleMarker(
-                    [float(r.bla), float(r.blo)], radius=2.6, color=colour,
-                    weight=1.2, fill=True, fill_color=colour, fill_opacity=0.9,
-                    tooltip=f"{r.nm or r.uwi} — bottom hole",
-                ).add_to(fg)
-            drawn += 1
-        fg.add_to(m)
-    return drawn
-
-
-# ── Leases, coloured by who owns them ────────────────────────────────────────
-# A LEASE MAP'S WHOLE JOB IS TO SHOW WHO HOLDS WHAT. One colour for every tract
-# answers "where is there acreage" and nothing else; the question anyone
-# actually brings to it is whose acreage, and where two owners abut.
-#
-# The colours live HERE rather than in the database because they are a display
-# choice, not a fact about the lease -- a second map with a different palette
-# must not require an UPDATE. Owners not in the table get a stable colour from
-# their own name, so an operator nobody anticipated still draws consistently
-# rather than falling into a shared "other" bucket.
-# VALIDATED, NOT CHOSEN BY EYE. The previous set failed on its own terms:
-# #27ae60 (Bighorn) against #16a085 (Powder River) measured deltaE 7.5 in
-# NORMAL vision -- below the floor of 15, i.e. hard to tell apart with full
-# colour vision, never mind deuteranopia. Two owners the map could not
-# distinguish is a wrong answer dressed as a legend.
-#
-# These six are Okabe-Ito, the standard CVD-safe categorical basis. Checked:
-# lightness band PASS, chroma floor PASS, normal-vision worst adjacent pair
-# deltaE 16.4 PASS. The deutan warning at 7.6 is legal only with secondary
-# encoding, and there are two -- the legend labels every group, and each
-# owner is its own named FeatureGroup in the layer control.
-#
-# Grey stays for "unleased", deliberately OUTSIDE the categorical set: it is
-# the absence of an owner, the same role the neutral plays in the vintage
-# ramp, and it is meant to recede.
-LEASE_OWNER_COLOURS = {
-    "sweetwater resources llc":           "#0072B2",   # blue
-    "powder river royalty partners":      "#E69F00",   # orange
-    "bighorn basin energy co":            "#009E73",   # green
-    "casper ridge petroleum":             "#CC79A7",   # pink
-    "salt creek minerals trust":          "#D55E00",   # vermillion
-    "naval petroleum reserve operations": "#56B4E9",   # sky
-    "unleased federal acreage":           "#7f8c8d",   # neutral, on purpose
-}
-_FALLBACK_COLOURS = ["#d35400", "#2c3e50", "#c2185b", "#00838f", "#5d4037",
-                     "#455a64", "#6a1b9a", "#00695c"]
 
 
 def _d(v):
@@ -933,6 +1399,7 @@ LEASE_COLOUR_BY = {
     "status":    ("lease_status",  "Unknown status"),
     "vintage":   ("effective_date", "Unknown vintage"),
     "size":      ("area_km2",       "Unknown size"),
+    "elevation": ("elevation_ft",   "Unknown elevation"),
 }
 
 # VINTAGE IS SEQUENTIAL, SO IT GETS A RAMP AND NOT THE HASH. lease_colour()
@@ -958,9 +1425,66 @@ _SIZE_RAMP = [
     "#fde6c8", "#f8c98c", "#ee9f4f", "#d97528", "#b2530f", "#7d3708",
 ]
 
+# Elevation is sequential and gets the TERRAIN family, so a lease reads
+# against the hypsometric fill under it rather than fighting it: green low
+# through olive and tan to brown high.
+#
+# DARK IS HIGHER, which is the opposite of the terrain overlay, where the
+# summit is pale. Not an oversight: the overlay is an opaque surface where
+# pale peaks are the convention, and these are FILLS at 0.32 over a light
+# basemap, where the pale end of any ramp simply disappears -- the same
+# reason the vintage ramp starts mid-light. Legibility wins over matching a
+# convention that cannot be seen.
+_ELEV_RAMP = [
+    "#3f6b34", "#6f8f45", "#a3974f", "#bb8a4a", "#9c6b3f", "#78482b",
+]
+
+# Round thousands, because that is how elevation is spoken about here, and
+# the Wyoming lease set sits almost entirely between 4,000 and 8,000 ft:
+# 5.1% below 4,000, then 37.5 / 22.6 / 21.1 / 12.4% across the four
+# thousand-foot bands, and 1.4% above 8,000. Quantiles would split the
+# 4,000s into boundaries nobody could name.
+_ELEV_SQL = ("CASE WHEN {c} IS NULL THEN NULL"
+             " WHEN {c} <  4000 THEN '1. under 4,000 ft'"
+             " WHEN {c} <  5000 THEN '2. 4,000-5,000 ft'"
+             " WHEN {c} <  6000 THEN '3. 5,000-6,000 ft'"
+             " WHEN {c} <  7000 THEN '4. 6,000-7,000 ft'"
+             " WHEN {c} <  8000 THEN '5. 7,000-8,000 ft'"
+             " ELSE '6. 8,000 ft and above' END")
+
 # Which options are ORDERED. A hue picked by CRC is right for identity and
-# wrong for a quantity, so these two take a ramp and everything else does not.
-_SEQUENTIAL = {"vintage": _VINTAGE_RAMP, "size": _SIZE_RAMP}
+# wrong for a quantity, so these take a ramp and everything else does not.
+_SEQUENTIAL = {"vintage": _VINTAGE_RAMP, "size": _SIZE_RAMP,
+               "elevation": _ELEV_RAMP}
+
+# ── RESTORED 1 Sept 2026 ──────────────────────────────────────────────────
+# These three were deleted by accident. Stripping the unused layer functions
+# removed everything from each `def` to the next one, and module constants
+# living BETWEEN two functions went with them -- so the lease legend and the
+# owner colours lost their definitions while the file still parsed, still
+# kept its line endings, and still imported. The NameError only fires when a
+# lease legend is actually drawn.
+#
+# The check that would have caught it is the one this codebase already
+# names: verify by CONTENT, not by size or syntax. Compare the set of
+# module-level names before and after, and anything that disappears has to
+# be either intended or referenced by nothing.
+_BY_TITLE = {"owner": "Lease owner", "producing": "Lease · producing",
+             "status": "Lease status", "vintage": "Lease · effective decade",
+             "size": "Lease · size", "elevation": "Lease · elevation"}
+
+LEASE_OWNER_COLOURS = {
+    "sweetwater resources llc":           "#0072B2",   # blue
+    "powder river royalty partners":      "#E69F00",   # orange
+    "bighorn basin energy co":            "#009E73",   # green
+    "casper ridge petroleum":             "#CC79A7",   # pink
+    "salt creek minerals trust":          "#D55E00",   # vermillion
+    "naval petroleum reserve operations": "#56B4E9",   # sky
+    "unleased federal acreage":           "#7f8c8d",   # neutral, on purpose
+}
+
+_FALLBACK_COLOURS = ["#d35400", "#2c3e50", "#c2185b", "#00838f", "#5d4037",
+                     "#455a64", "#6a1b9a", "#00695c"]
 
 # Acreage bands, ordered by a numeric prefix so the legend and the ramp agree.
 # Fixed land bands rather than quantiles: 40 / 160 / 320 / 640 are the survey
@@ -985,15 +1509,43 @@ def add_lease_layer(m, engine, show=True, limit=25000, by="owner",
     have = _table_columns(engine, "dv_land_tract")
     if not have or "geog" not in have:
         return 0
-    _c = lambda n: n if n in have else "NULL"          # noqa: E731
+    # QUALIFIED WITH THE ALIAS, because colouring by elevation joins a second
+    # table. Bare column names are fine against one table and ambiguous the
+    # moment there are two -- dv_land_tract_geom carries county and source of
+    # its own -- and that failure would be a SQL error inside the try/except
+    # below, which returns 0 and reads as "the lease layer is broken".
+    _c = lambda n: ("t." + n) if n in have else "NULL"  # noqa: E731
     _col, _unknown = LEASE_COLOUR_BY.get(by) or LEASE_COLOUR_BY["owner"]
     # Fall back rather than fail when the column is not there: a map that
     # draws in one colour beats a layer that returns 0 and reads as broken.
+    # ELEVATION IS ON THE OTHER TABLE. dv_land_tract does not carry it;
+    # dv_land_tract_geom does, stamped by tools/stamp_elevation.py, and the
+    # lease FILTERS already read it through this same join. Checked at
+    # runtime like every other optional column here, so a database where
+    # that tool has never run falls back to owner instead of failing.
+    _elev_join = ""
+    if by == "elevation":
+        try:
+            with engine.connect() as _con0:
+                _has_elev = _con0.execute(text(
+                    "SELECT CASE WHEN OBJECT_ID('dataview.dv_land_tract_geom')"
+                    " IS NOT NULL AND COL_LENGTH('dataview.dv_land_tract_geom',"
+                    " 'elevation_ft') IS NOT NULL THEN 1 ELSE 0 END")).scalar()
+        except Exception:
+            _has_elev = 0
+        if _has_elev:
+            _elev_join = ("LEFT JOIN dataview.dv_land_tract_geom tg "
+                          "ON tg.tract_id = t.land_tract_id")
+        else:
+            by = "owner"
+
     if by == "vintage" and "effective_date" in have:
         _own_sql = ("CASE WHEN effective_date IS NULL THEN NULL ELSE "
                     "CAST((YEAR(effective_date)/10)*10 AS varchar(4)) + 's' END")
     elif by == "size" and "area_km2" in have:
         _own_sql = _SIZE_SQL
+    elif by == "elevation" and _elev_join:
+        _own_sql = _ELEV_SQL.format(c="tg.elevation_ft")
     else:
         _own_sql = _c(_col)
         if by in _SEQUENTIAL:
@@ -1014,10 +1566,11 @@ def add_lease_layer(m, engine, show=True, limit=25000, by="owner",
                        {_c('province_state')} AS st,
                        {_c('source')}         AS src,
                        {_c('quality_note')}   AS qly,
-                       geog.STAsText()        AS wkt
-                  FROM dataview.dv_land_tract
-                 WHERE geog IS NOT NULL
-                   AND ISNULL(active_ind, 'Y') = 'Y'
+                       t.geog.STAsText()      AS wkt
+                  FROM dataview.dv_land_tract t
+                       {_elev_join}
+                 WHERE t.geog IS NOT NULL
+                   AND ISNULL(t.active_ind, 'Y') = 'Y'
             """)).fetchall()
     except Exception as exc:
         print(f"[geography_layers] lease query failed: {exc}")
@@ -1648,7 +2201,8 @@ function(feature, layer) {
     // the honest picture of a lease block anyway. Fill stays at 0.38: the
     // fill is carrying identity on its own, so it can be a little stronger.
     var base = {color: c, weight: 1.0, opacity: 0.9,
-                fillColor: c, fillOpacity: 0.38};
+                fillColor: c, fillOpacity: 0.38,
+                className: 'dv-lease-poly'};
     // AND ON THE FEATURE, not only the layer. folium emits its own
     // setStyle(f => f.properties.style) AFTER addData, so a style set only
     // on the layer here is overwritten with undefined a moment later --
@@ -2015,14 +2569,30 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                 // just the grid line round them. FRAMED is set by the layer
                 // when it draws few enough townships to mean "we are close".
                 var framed = (typeof DV_TWP_FRAMED !== 'undefined') && DV_TWP_FRAMED;
+                // QUIETER WHEN THERE ARE THOUSANDS OF THEM. At 0.55 fill
+                // and a 0.85 grid the statewide layer read as the subject
+                // of the map rather than its backdrop: it buried the
+                // basemap, the terrain and the wells under 2,888 filled
+                // squares. The choropleth still has to WORK -- leased
+                // acreage across the state is the reason this view exists
+                // -- so the fill is softened rather than removed, and the
+                // grid lines are thinned and lightened.
+                //
+                // HOVER IS WHERE THE STRENGTH GOES. A township you are
+                // pointing at can be emphatic; 2,888 of them cannot. So the
+                // resting state drops and the mouseover keeps its old
+                // weight, which also makes the layer feel more responsive
+                // than it did when everything was already loud.
                 var base = framed
                     ? {color: '#7a3a0d', weight: 1.6, opacity: 0.95,
-                       fillColor: c, fillOpacity: 0.06}
-                    : {color: '#8a7a63', weight: 0.7, opacity: 0.85,
-                       fillColor: c, fillOpacity: p.n ? 0.55 : 0.10};
+                       fillColor: c, fillOpacity: 0.06,
+                       className: 'dv-twp-poly'}
+                    : {color: '#3f3a33', weight: 0.6, opacity: 0.8,
+                       fillColor: c, fillOpacity: p.n ? 0.55 : 0.10,
+                       className: 'dv-twp-poly'};
                 layer.setStyle(base);
                 layer.on('mouseover', function(){
-                    layer.setStyle({weight: 2, fillOpacity: 0.72}); });
+                    layer.setStyle({weight: 2, fillOpacity: 0.62}); });
                 layer.on('mouseout', function(){ layer.setStyle(base); });
                 layer.bindTooltip('<b>' + p.lab + '</b><br>' +
                     (p.n ? p.n + ' lease(s)<br>' +
@@ -2125,20 +2695,35 @@ def add_township_layer(m, engine, show=True, state="WY", bounds=None,
                             mp.__dv_twp_ctl = null;
                         }
                         if (!label) { return; }
+                        // BOTTOM LEFT, NOT TOP RIGHT. The top right corner
+                        // already stacks move, fullscreen, 3D, 2D, the
+                        // wells toggle and the layer control, so a
+                        // two-line amber box there pushed into the map and
+                        // sat over the very township that had just been
+                        // exploded. Bottom left holds only the zoom badge,
+                        // and Leaflet stacks controls in that corner
+                        // rather than overlapping them.
+                        //
+                        // Narrower too: the label moved onto one line and
+                        // the wording lost a word it did not need. It still
+                        // says which township is showing, because "why can
+                        // I only see one" is the question it exists to
+                        // answer.
                         var K = L.Control.extend({
-                            options: {position: 'topright'},
+                            options: {position: 'bottomleft'},
                             onAdd: function () {
                                 var d = L.DomUtil.create('div', '');
                                 d.style.cssText =
-                                    'background:#1c1917;border:1px solid ' +
-                                    '#f59e0b;border-radius:6px;padding:5px 9px;' +
-                                    'font:600 11px system-ui;color:#f59e0b;' +
-                                    'cursor:pointer;box-shadow:0 1px 4px ' +
+                                    'background:rgba(28,25,23,.92);border:1px ' +
+                                    'solid #f59e0b;border-radius:6px;' +
+                                    'padding:4px 8px;font:600 11px system-ui;' +
+                                    'color:#f59e0b;cursor:pointer;' +
+                                    'white-space:nowrap;box-shadow:0 1px 4px ' +
                                     'rgba(0,0,0,.4)';
-                                d.innerHTML = '&#8617; show all townships' +
-                                    '<div style="font:400 10px system-ui;' +
-                                    'color:#a8a29e">showing ' + label +
-                                    ' only</div>';
+                                d.innerHTML = '&#8617; all townships' +
+                                    '<span style="font:400 10px system-ui;' +
+                                    'color:#a8a29e;padding-left:6px">' +
+                                    label + ' only</span>';
                                 L.DomEvent.disableClickPropagation(d);
                                 L.DomEvent.on(d, 'click', function (ev) {
                                     L.DomEvent.preventDefault(ev);
@@ -2569,24 +3154,359 @@ def add_wetlands_layer(m, show=False):
 HIGHWAY_GEOJSON_NAME = "dv_highways.geojson"
 
 
+# ── PLACES ARE REFERENCE DATA, SO THEY ARE FETCHED ONCE PER PROCESS ───────
+# Measured 2 Sep from dev.out.log: add_places_layer cost 0.841s on EVERY
+# render -- 76 of them -- re-reading and re-parsing the same 205 municipal
+# polygons to draw the same towns again. Nothing about them changes between
+# renders; nothing about them changes between months.
+#
+# THE FETCH IS THE COST, NOT THE DRAWING. Split three ways on this machine:
+#   SQL (geography -> WKT)  0.93s
+#   shapely parse           0.12s
+#   folium objects          0.004s
+# So the cache holds the PARSED FEATURES and the label positions, and every
+# render still builds its own folium objects. That division is not a
+# preference: a folium layer belongs to the map it was added to, so a cached
+# FeatureGroup handed to the next render would be attached to two maps and
+# drawn on one, which is the kind of bug that reads as "the towns vanished".
+#
+# KEYED BY STATE and held for the life of the process, because TIGER
+# municipal boundaries are a reference table. clear_places_cache() is for the
+# case where dv_place_geom is reloaded while the app is running.
+_PLACES_CACHE = {}
+
+
+def clear_places_cache():
+    """Forget the cached municipal geometry. Call after reloading places."""
+    _PLACES_CACHE.clear()
+
+
+def _places_data(engine, state):
+    """(features, labels) for one state, parsed once. ([], []) on failure.
+
+    A FAILURE IS NOT CACHED. Caching an empty result would turn one bad
+    connection into a session with no towns and no way back short of a
+    restart.
+    """
+    _hit = _PLACES_CACHE.get(str(state))
+    if _hit is not None:
+        return _hit
+    try:
+        from shapely import wkt as _wkt
+        from shapely.geometry import mapping as _mapping
+    except Exception as exc:
+        print("[geography_layers] places layer needs shapely: %s" % exc)
+        return [], []
+    try:
+        with engine.connect() as con:
+            rows = con.execute(text("""
+                SELECT place_name, place_type, geog.STAsText() AS wkt,
+                       geog.EnvelopeCenter().Lat  AS clat,
+                       geog.EnvelopeCenter().Long AS clon
+                  FROM dataview.dv_place_geom
+                 WHERE province_state = :st AND geog IS NOT NULL
+            """), {"st": state}).fetchall()
+    except Exception as exc:
+        print("[geography_layers] places query failed: %s" % exc)
+        return [], []
+    feats, labels = [], []
+    for r in rows:
+        try:
+            geom = _mapping(_wkt.loads(r.wkt))
+        except Exception:
+            continue
+        feats.append({"type": "Feature", "geometry": geom,
+                      "properties": {"nm": r.place_name,
+                                     "ty": r.place_type}})
+        if r.clat is not None:
+            labels.append((float(r.clat), float(r.clon),
+                           r.place_name, r.place_type))
+    if feats:
+        _PLACES_CACHE[str(state)] = (feats, labels)
+        print("[geography_layers] places cached: %d feature(s), %d label(s)"
+              % (len(feats), len(labels)))
+    return feats, labels
+
+
+
+PLACES_GEOJSON_NAME = "dv_places_%s.geojson"
+
+# STYLED AND LABELLED IN THE BROWSER, which is not a preference. The file is
+# served by URL, and folium can only run a Python style_function over data it
+# EMBEDS -- so the moment the geometry left the document, style_function and
+# GeoJsonTooltip stopped being options. add_lease_layer learned this first;
+# this is the same template shape for the same reason.
+_PLACES_ON_EACH = """
+function(feature, layer) {
+    layer.setStyle({color: '#334155', weight: 1.2, opacity: 0.9,
+                    fillColor: '#94a3b8', fillOpacity: 0.35});
+    var p = feature.properties || {};
+    layer.bindTooltip('<b>' + (p.nm || '') + '</b><br>' + (p.ty || ''),
+                      {sticky: true});
+}
+"""
+
+
+def ensure_places_geojson(engine, state="WY", static_dir=None):
+    """(path, url, n) for the state's places file, written if it is stale.
+
+    THE CACHE ABOVE FIXED THE FETCH AND NOT THE PAYLOAD, which is the half
+    that actually hurt. Measured 2 Sep: a folium map with no places renders
+    to 3.2 KB and the same map with them to 2,756 KB -- 205 municipal
+    polygons pasted into the document on EVERY render, 848 times the rest of
+    the map, and st_folium ships that to the browser twice because the block
+    is injected twice. Served as a file the browser fetches once and caches,
+    the document carries a URL instead.
+
+    THE SIGNATURE IS THE ROW COUNT AND A FORMAT NUMBER. dv_place_geom has no
+    change stamp -- place_id, place_name, province_state, place_type, geog,
+    source and nothing else -- so an edit that leaves the count alone will
+    not be noticed. That is acceptable for TIGER municipal boundaries and it
+    is why _FMT exists: bump it whenever what goes INTO the file changes, or
+    the new content will never be written and the change will look applied.
+    """
+    import json as _json
+    import os as _os
+    _FMT = 1
+    if static_dir is None:
+        static_dir = _os.path.join(_os.path.dirname(_os.path.dirname(
+            _os.path.dirname(_os.path.abspath(__file__)))), "static")
+    name = PLACES_GEOJSON_NAME % str(state).lower()
+    path = _os.path.join(static_dir, name)
+    url = "/app/static/" + name
+    feats, _labels = _places_data(engine, state)
+    if not feats:
+        return None, None, 0
+    sig = {"fmt": _FMT, "n": len(feats), "state": str(state)}
+    sigpath = path + ".sig"
+    try:
+        if _os.path.exists(path) and _os.path.exists(sigpath):
+            with open(sigpath, encoding="utf-8") as _sf:
+                if _json.load(_sf) == sig:
+                    return path, url, len(feats)
+    except Exception as exc:
+        # NOT swallowed: an unreadable sidecar rewrites, and says why.
+        print("[geography_layers] places sidecar unreadable, rewriting: %s"
+              % str(exc)[:120])
+    try:
+        _os.makedirs(static_dir, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as _fh:
+            _json.dump({"type": "FeatureCollection", "features": feats}, _fh)
+        # STAMPED ONLY AFTER THE WRITE SUCCEEDED, so a failed write cannot
+        # leave a stamp claiming a file it did not produce.
+        with open(sigpath, "w", encoding="utf-8") as _sf:
+            _json.dump(sig, _sf)
+        print("[geography_layers] places geojson written: %d feature(s), %.0f KB"
+              % (len(feats), _os.path.getsize(path) / 1024.0))
+    except Exception as exc:
+        print("[geography_layers] places geojson not written: %s"
+              % str(exc)[:120])
+        return None, None, 0
+    return path, url, len(feats)
+
+
+
+def add_places_layer(m, engine, state="WY", show=True,
+                     label_types=("city", "town")):
+    """Towns and cities from dv_place_geom. Returns the number drawn.
+
+    THE EVIDENCE FOR THE "NEAR A TOWN" FILTER, exactly as the highway layer
+    is for the distance-to-highway one. dv_tract_place_dist holds 325,390
+    measured pairs and the lease panel filters on them, but nothing drew the
+    places -- so "leases within five miles of Casper" returned a set nobody
+    could check by eye, and Casper itself was invisible under the terrain
+    overlay, which paints over the basemap's own labels.
+    #
+    THEY ARE POLYGONS, NOT PINS. TIGER gives municipal boundaries, so the
+    town is drawn at its real extent. That matters for a five-mile filter:
+    measured from the boundary, five miles from Casper is a different set
+    than five miles from a dot in the middle of it.
+
+    Labels are drawn for `label_types`: the nineteen cities and the eighty
+    incorporated towns. The 106 CDPs stay unlabelled and keep their hover
+    tooltip -- a census designated place is mostly a named road junction,
+    and putting all 205 on at once is a wall of text at state scale.
+    """
+    import folium as _f
+    feats, labels = _places_data(engine, state)
+    if not feats:
+        return 0
+    grp = _f.FeatureGroup(name="🏘 Towns and cities", show=show)
+    labelled = 0
+    for _la, _lo, _nm, _ty in labels:
+        if _ty not in label_types:
+            continue
+        # A LABEL WITH A HALO, because it has to read over a terrain
+        # fill, a satellite tile and a pale topo map alike.
+        #
+        # %% ON PURPOSE: the CSS translate is a percentage and this
+        # string is %-formatted, so a bare % is read as a format spec.
+        _f.Marker(
+            [_la, _lo],
+            icon=_f.DivIcon(icon_size=(0, 0), icon_anchor=(0, 0), html=(
+                "<div style=\"font:600 11px system-ui;color:#0f172a;"
+                "white-space:nowrap;transform:translate(-50%%,-50%%);"
+                "text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 3px #fff,"
+                "0 0 3px #fff\">%s</div>" % _nm)),
+        ).add_to(grp)
+        labelled += 1
+    if not feats:
+        return 0
+    # SERVED BY URL, NOT PASTED IN. The polygons are 2.7 MB of the map
+    # document; as a file the browser fetches them once and caches them
+    # across renders, and st_folium ships a URL instead -- twice, since
+    # it injects the whole block twice.
+    _path, _url, _n = ensure_places_geojson(engine, state)
+    if _path:
+        _gj = _f.GeoJson(_path, embed=False,
+                         on_each_feature=_f.JsCode(_PLACES_ON_EACH))
+        # The link folium emits must be the BROWSER's, not ours.
+        _gj.embed_link = _url
+        _gj.add_to(grp)
+    else:
+        # EMBEDDED WHEN THE FILE CANNOT BE WRITTEN. A read-only static/
+        # should cost payload, not the towns -- and the layer that is
+        # the evidence for the "near a town" filter has to draw.
+        _f.GeoJson(
+            {"type": "FeatureCollection", "features": feats},
+            style_function=lambda _x: {"color": "#334155", "weight": 1.2,
+                                       "opacity": 0.9,
+                                       "fillColor": "#94a3b8",
+                                       "fillOpacity": 0.35},
+            tooltip=_f.GeoJsonTooltip(fields=["nm", "ty"],
+                                      aliases=["Place", "Type"],
+                                      sticky=True),
+        ).add_to(grp)
+    grp.add_to(m)
+    print("[geography_layers] places: %d drawn, %d labelled"
+          % (len(feats), labelled))
+    return len(feats)
+
+
+NAIP_WMS = ("https://imagery.nationalmap.gov/arcgis/services/USGSNAIPPlus"
+            "/ImageServer/WMSServer")
+
+
+def add_naip_layer(m, show=False, infrared=False):
+    """USGS NAIP aerial photography as a WMS overlay. Returns the name.
+
+    ONE METRE AERIAL, WHICH THE BASEMAP IMAGERY IS NOT. Esri's World Imagery
+    is global and cached; NAIP is the USDA's US farm-season survey at about
+    a metre, and at that scale a well pad, its access two-track and the scar
+    of an old location are all separable. Public domain, no key.
+
+    IT IS A WMS, NOT A TILE CACHE, and that is why it is off by default: the
+    server renders each request. Measured over Teapot Dome, a 512px request
+    took 13.5s cold and 1.2s once the server had it -- fine as a layer you
+    switch on to look at something, wrong as the background you pan around
+    on. Esri Satellite stays the basemap for that.
+
+    INFRARED IS THE ONE WORTH KNOWING ABOUT. NAIP carries a near infrared
+    band, and the false colour composite puts vegetation in red and bare or
+    disturbed ground in pale cyan -- so pads, roads and old locations read
+    at a glance, and riparian ground separates from dry, which is the same
+    distinction the wetland filter makes numerically.
+    """
+    import folium as _f
+    _name = "🛰 NAIP infrared (1 m)" if infrared else "🛰 NAIP aerial (1 m)"
+    _f.raster_layers.WmsTileLayer(
+        url=NAIP_WMS,
+        layers=("USGSNAIPPlus:FalseColorComposite" if infrared
+                else "USGSNAIPPlus:NaturalColor"),
+        fmt="image/jpeg",
+        transparent=False,
+        version="1.3.0",
+        attr="USGS NAIP · public domain",
+        name=_name, overlay=True, control=True, show=show,
+        # ── FEWER, BIGGER REQUESTS, AND ONLY WHEN THE MAP SETTLES ────────
+        # THE TILES CANNOT BE CACHED, so every one is paid for every time.
+        # Measured 2 Sep: USGS answers "Cache-Control: private" with no
+        # ETag, Expires or Last-Modified, so the browser is forbidden from
+        # reusing a tile it fetched a second ago. That is why the layer
+        # never gets faster the longer you look at it, and why a Streamlit
+        # rerun re-fetches the whole screen.
+        #
+        # 512 IS SIX TIMES FASTER FOR THE SAME GROUND. Per-request overhead
+        # dominates this service: one 512px tile took 5.4s where the four
+        # 256px tiles covering the same area took 32.5s, 8.1s each. It also
+        # quarters the request count, which matters when none can be reused.
+        tile_size=512,
+        # AND NOT WHILE THE MAP IS MOVING. Every intermediate frame of a pan
+        # otherwise starts its own round of 14-second requests that are
+        # thrown away before they arrive.
+        update_when_idle=True,
+        update_when_zooming=False,
+        # The BAKE is the real answer for an area you return to -- see
+        # tools/build_terrain_overlay.py --naip. This only makes the live
+        # layer as cheap as a live layer can be.
+    ).add_to(m)
+    return _name
+
+
+def add_roads_overlay(m, show=False):
+    """Every road, as a transparent tile overlay. Returns the layer name.
+
+    NOT THE SAME THING AS THE HIGHWAY LAYER, and both are worth having.
+    dv_road_geom holds sixteen Wyoming primary routes because those are the
+    lines tools/stamp_cultural_distance.py MEASURED to -- they are evidence
+    for a filter, and a client can check "within five miles of a highway"
+    against them. This is context: secondary roads, county roads, the street
+    grid in Casper, drawn by Esri and thinned by zoom.
+    """
+    import folium as _f
+    _name = "🛣 Roads (all)"
+    # HALF STRENGTH, BECAUSE ITS LABELS CANNOT BE RESTYLED. Esri renders the
+    # road names INTO the tile image, rotated along the line and small, and
+    # at full strength they compete with -- and lose to -- the names this
+    # app draws itself. The geometry is what this layer is for: where the
+    # county roads and the street grid run. So the whole tile is dialled
+    # back to context, and the legible names come from the highway layer.
+    #
+    # If the names are wanted at this level of detail, the answer is not a
+    # different opacity: it is TIGER secondary roads loaded into
+    # dv_road_geom, where they can be labelled the same way the sixteen
+    # primary routes are.
+    _f.TileLayer(
+        tiles=("https://server.arcgisonline.com/ArcGIS/rest/services/"
+               "Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}"),
+        attr="Esri, HERE, Garmin, &copy; OpenStreetMap contributors",
+        name=_name, overlay=True, control=True, show=show, max_zoom=19,
+        opacity=0.55,
+    ).add_to(m)
+    return _name
+
+
 def add_highway_layer(m, path, url, show=False):
     """TIGER primary roads as a served overlay. Returns the layer name."""
     import folium as _f
     _name = "🛣 Highways (I- and US)"
     _gj = _f.GeoJson(
         path, embed=False, show=show, name=_name,
+        # HEAVIER, BECAUSE THESE ARE THE LINES THE FILTER MEASURED TO.
+        # A 1.8px amber thread over a 35% casing disappeared against the
+        # topo basemap and again over the terrain fill, which is the one
+        # place it matters: "within five miles of a highway" cannot be
+        # checked by eye if the highway cannot be seen. The casing carries
+        # most of the increase -- a dark outline is what makes a bright line
+        # legible over BOTH a pale basemap and a dark one, and widening only
+        # the amber would have made a fat stripe that still washed out.
+        #
+        # The two sites below must agree: style_function paints the feature
+        # and on_each_feature repaints it before adding the inner line, so a
+        # value changed in one place and not the other shows as a flicker on
+        # load.
         style_function=lambda _f_: {
             # A ROAD IS A LINE, NOT A REGION: no fill, and a casing so it
             # reads over both the pale topo basemap and the satellite one.
-            "color": "#1f2937", "weight": 4.0, "opacity": 0.35,
+            "color": "#111827", "weight": 4.0, "opacity": 0.40,
         },
         on_each_feature=_f.JsCode("""
             function(feature, layer) {
                 var p = feature.properties || {};
                 // The visible line, drawn over its own casing.
-                layer.setStyle({color: '#1f2937', weight: 4.0, opacity: 0.35});
+                layer.setStyle({color: '#111827', weight: 4.0, opacity: 0.40});
                 var inner = L.polyline(layer.getLatLngs(), {
-                    color: '#fbbf24', weight: 1.8, opacity: 0.95,
+                    color: '#fbbf24', weight: 2.0, opacity: 0.95,
                     interactive: false
                 });
                 layer.on('add', function () {
@@ -2596,10 +3516,49 @@ def add_highway_layer(m, path, url, show=False):
                     if (inner._map) { inner.remove(); }
                 });
                 if (p.nm) {
-                    layer.bindTooltip(p.nm, {sticky: true});
+                    // A NAME ON THE LINE, NOT ON HOVER. One label per ROUTE
+                    // at its longest segment was clean statewide and gave
+                    // nothing at field zoom: the labelled piece of I-25 is
+                    // a hundred miles from the lease you are looking at. So
+                    // every segment carries the name, and the map hides
+                    // them when zoomed out far enough for that to be a
+                    // wall of repeated text.
+                    layer.bindTooltip(p.nm, {
+                        permanent: true, direction: 'center',
+                        className: 'dv-hwy-label', opacity: 1
+                    });
+                    var mp2 = null;
+                    function hwyZoom() {
+                        if (!mp2) { return; }
+                        var on = mp2.getZoom() >= 8;
+                        var el = layer.getTooltip && layer.getTooltip();
+                        if (!el) { return; }
+                        var n = el.getElement && el.getElement();
+                        if (n) { n.style.display = on ? '' : 'none'; }
+                    }
+                    layer.on('add', function () {
+                        mp2 = layer._map;
+                        if (mp2) {
+                            mp2.on('zoomend', hwyZoom);
+                            setTimeout(hwyZoom, 0);
+                        }
+                    });
+                    layer.on('remove', function () {
+                        if (mp2) { mp2.off('zoomend', hwyZoom); }
+                    });
                 }
             }"""),
     )
     _gj.embed_link = url
     _gj.add_to(m)
+    # THE LABEL'S LOOK LIVES IN CSS, because a Leaflet tooltip is a div and
+    # styling it inline per feature would ship the same rules 84 times.
+    # pointer-events off so a road name never blocks a click on the road, or
+    # on the lease under it.
+    _f.Element(
+        "<style>.leaflet-tooltip.dv-hwy-label{background:rgba(255,255,255,.82);"
+        "border:none;box-shadow:none;color:#7c2d12;font:700 10px system-ui;"
+        "padding:0 3px;pointer-events:none;white-space:nowrap}"
+        ".leaflet-tooltip.dv-hwy-label:before{display:none}</style>"
+    ).add_to(m.get_root().header)
     return _name

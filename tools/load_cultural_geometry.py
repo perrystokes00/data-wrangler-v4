@@ -72,6 +72,11 @@ def main(argv=None):
     ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--places", default=PLACE_SHP)
     ap.add_argument("--roads", default=ROAD_SHP)
+    ap.add_argument("--secondary", action="store_true",
+                    help="also load S1200 state and county roads. They are "
+                         "recorded as road_class='secondary', so the "
+                         "distance stamp can still measure to primaries "
+                         "alone and dist_hwy_km keeps its meaning")
     ap.add_argument("--state", default="WY")
     ap.add_argument("--drop", action="store_true")
     ap.add_argument("--apply", action="store_true")
@@ -106,14 +111,27 @@ def main(argv=None):
 
     pl = gpd.read_file(a.places).to_crs("EPSG:4326")
     rd = gpd.read_file(a.roads)
-    rd = rd[rd["MTFCC"] == "S1100"].to_crs("EPSG:4326")
-    print("places %s   roads %s (S1100 primary)"
-          % (format(len(pl), ","), format(len(rd), ",")))
+    # ── WHICH CLASSES ─────────────────────────────────────────────────────
+    # S1100 is interstates and US routes; S1200 is state and county roads.
+    # The class is CARRIED into road_class rather than dropped, because
+    # dist_hwy_km was measured against the primaries alone: a road table
+    # that cannot tell the two apart would silently redefine what "nearest
+    # highway" means for every lease already stamped.
+    _want = ["S1100"] + (["S1200"] if a.secondary else [])
+    rd = rd[rd["MTFCC"].isin(_want)].copy()
+    rd["cls"] = rd["MTFCC"].map({"S1100": "primary", "S1200": "secondary"})
+    rd = rd.to_crs("EPSG:4326")
+    print("places %s   roads %s (%s)"
+          % (format(len(pl), ","), format(len(rd), ","), ", ".join(_want)))
 
     # Merge road SEGMENTS into ROUTES. TIGER splits I-80 into many features;
     # "within 5 miles of I-80" means the road, not one arbitrary piece of it.
     rd["nm"] = rd["FULLNAME"].astype(str)
-    routes = rd.dissolve(by="nm")
+    # A ROUTE'S CLASS SURVIVES THE MERGE. dissolve keeps one row's
+    # attributes and "one" is arbitrary, so primary is made to win where a
+    # name appears in both classes rather than leaving it to row order.
+    rd = rd.sort_values("cls")          # 'primary' sorts before 'secondary'
+    routes = rd.dissolve(by="nm", aggfunc={"cls": "first"})
     print("routes %s after merging segments by name" % format(len(routes), ","))
 
     if not a.apply:
@@ -177,10 +195,11 @@ def main(argv=None):
                 cx.execute(t("""
                     INSERT INTO dataview.dv_road_geom
                         (road_name, province_state, road_class, geog, source)
-                    VALUES (:n, :s, 'primary',
+                    VALUES (:n, :s, :c,
                             geography::STGeomFromText(:w, 4326).MakeValid(),
                             'TIGER2025')"""),
-                    {"n": str(nm), "s": a.state, "w": wkt})
+                    {"n": str(nm), "s": a.state, "w": wkt,
+                     "c": str(r.get("cls") or "primary")})
                 rok += 1
             except Exception as exc:
                 # NOT swallowed: a route that will not load is a route the

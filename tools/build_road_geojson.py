@@ -37,6 +37,14 @@ def main(argv=None):
     ap.add_argument("--roads", default=ROAD_SHP)
     ap.add_argument("--secondary", action="store_true",
                     help="include S1200 state highways as well")
+    ap.add_argument("--only-secondary", dest="only_secondary",
+                    action="store_true",
+                    help="write ONLY S1200 state and county roads, "
+                         "to their own file; keeps the highway "
+                         "layer as the evidence for dist_hwy_km")
+    ap.add_argument("--out", default=None,
+                    help="output file name under static/ "
+                         "(default %s)" % OUT_NAME)
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args(argv)
 
@@ -47,7 +55,17 @@ def main(argv=None):
 
     import geopandas as gpd
     rd = gpd.read_file(a.roads)
-    keep = ["S1100"] + (["S1200"] if a.secondary else [])
+    # --only-secondary WRITES A SEPARATE FILE, and that is the point of it.
+    # dv_highways.geojson IS the evidence for dist_hwy_km: the same 84
+    # primary features the stamp measured to. Folding 1,260 state and county
+    # roads into it would leave the map showing roads the filter never
+    # measured, under a layer named for the filter -- the reader would have
+    # no way to tell which lines the number came from. Two files, two
+    # layers, two meanings.
+    if a.only_secondary:
+        keep = ["S1200"]
+    else:
+        keep = ["S1100"] + (["S1200"] if a.secondary else [])
     rd = rd[rd["MTFCC"].isin(keep)].copy()
     # WGS84 for the browser; TIGER ships NAD83, which is close but not the
     # same, and "close" is how layers end up 30 m apart.
@@ -86,7 +104,7 @@ def main(argv=None):
 
     sdir = os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "static")
-    out = os.path.join(sdir, OUT_NAME)
+    out = os.path.join(sdir, a.out or OUT_NAME)
     body = json.dumps(fc, separators=(",", ":"))
     print("features %s   %.2f MB" % (format(len(feats), ","), len(body) / 1e6))
     print("target   %s" % out)

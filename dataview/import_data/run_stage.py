@@ -29,7 +29,7 @@ def main():
     SERVER     = r"localhost\SQLEXPRESS"
     DB         = "DataView_Demo"
     SCHEMA     = "file_catalog"
-    REF        = "WELL_REF.well_ref.well_master_gold"
+    REF        = "WELL_REF.well_ref.well_master_public_v2"
     VAULT_ROOT = r"C:\Bulk\Vault"
 
     stage = (sys.argv[1] if len(sys.argv) > 1 else "").lower()

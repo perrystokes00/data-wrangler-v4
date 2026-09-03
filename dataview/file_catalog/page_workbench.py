@@ -2682,9 +2682,9 @@ def _render_batch_report():
 # Reference well master used to resolve a UWI from a name/UWI guess.
 # Default is the production master; the pipeline UI can override it (e.g. point
 # at a mini master for a demo) via the "wb_ref_choice" session_state key.
-_WB_REF_DEFAULT = "WELL_REF.well_ref.well_master_gold"
+_WB_REF_DEFAULT = "WELL_REF.well_ref.well_master_public_v2"
 _WB_REF_OPTIONS = {
-    "WELL_REF.well_ref.well_master_gold":      "Full master (production)",
+    "WELL_REF.well_ref.well_master_public_v2":      "Full master (production)",
     "WELL_REF.well_ref.WELL_MASTER_MINI": "Mini master (demo / test)",
 }
 
@@ -2935,7 +2935,7 @@ def _wb_um_match(engine, inputs, _pi):
         elif uw:
             # THE FILE'S OWN UWI IS STILL AN ANSWER. The reference master
             # is one corpus, not the world -- a LAS whose header or name
-            # carries a good API is not wrong because well_master_gold has
+            # carries a good API is not wrong because well_master_public_v2 has
             # never heard of it. Reporting only "not found" left the guess
             # on screen, unusable, and Save wrote nothing, so files with a
             # perfectly good UWI could not be keyed at all.

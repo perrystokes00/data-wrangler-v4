@@ -16,7 +16,7 @@ from sqlalchemy import text, bindparam
 
 GFC = "file_catalog.GLOBAL_FILE_CATALOG"
 FWH = "file_catalog.FILE_WELL_HEADER"
-DEFAULT_REF = "WELL_REF.well_ref.well_master_gold"
+DEFAULT_REF = "WELL_REF.well_ref.well_master_public_v2"
 
 
 # ── data helpers ──────────────────────────────────────────────────────────────
