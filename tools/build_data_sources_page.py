@@ -29,8 +29,44 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 MANIFEST = "build/source_manifest.csv"
 OUT = "docs/data-sources.html"
-# The master's own row count, asserted so a silent double-count cannot ship.
-MASTER_ROWS = 4031052
+MASTER = "WELL_REF.well_ref.well_master_public_v2"
+
+# THE COUNTS COME FROM THE MASTER ITSELF, NOT FROM THE MANIFEST.
+# This used to assert the manifest's total against a hard-coded MASTER_ROWS =
+# 4031052. That guard caught a double-count once and then rotted: when the
+# master was rebuilt from the source files it held 3,140,361 wells, the
+# constant still said 4,031,052, the manifest still summed to 4,031,052 -- and
+# the check PASSED, printing "reconciles to the master" while writing a public
+# page describing a table that no longer existed. A number is only reconciled
+# if it is compared to the thing it claims to describe, so both sides are now
+# read live and the manifest supplies evidence (URLs, terms, dates) alone.
+
+
+def db(database="DataView_Demo"):
+    import urllib.parse
+    from sqlalchemy import create_engine
+    cs = ("DRIVER={ODBC Driver 17 for SQL Server};SERVER=localhost\\SQLEXPRESS;"
+          "DATABASE=%s;Trusted_Connection=yes;" % database)
+    return create_engine("mssql+pyodbc:///?odbc_connect="
+                         + urllib.parse.quote_plus(cs))
+
+
+def master_counts():
+    """(per-state well counts, total) straight from the published table."""
+    from sqlalchemy import text
+    with db("WELL_REF").connect() as c:
+        rows = {(r[0] or "").strip(): r[1] for r in c.execute(text(
+            "SELECT province_state, COUNT(*) FROM %s GROUP BY province_state"
+            % MASTER))}
+        total = c.execute(text("SELECT COUNT(*) FROM %s" % MASTER)).scalar()
+    return rows, total
+
+
+def licences():
+    from sqlalchemy import text
+    with db().connect() as c:
+        return {r[0]: r[1] for r in c.execute(text(
+            "SELECT province_state, licence_class FROM dataview.dv_source_licence"))}
 
 KS_CITATION = ("The source of this material is the Kansas Geological Survey "
                "website at http://www.kgs.ku.edu/. All Rights Reserved.")
@@ -57,41 +93,77 @@ ATTRIBUTIONS = [
 ]
 
 
+WHY_NOT = {
+    "UNVERIFIED": "held, not published &mdash; no terms of use found, so we asked",
+    "RESTRICTED": "held, not published &mdash; the agency restricts redistribution",
+    "AGGREGATOR": "held, not published &mdash; obtained via an aggregator, not the agency",
+}
+
+
 def load():
     rows = list(csv.DictReader(open(MANIFEST, encoding="utf-8")))
-    wells = lambda r: int(r["wells_in_master"] or 0)
+    counts, total = master_counts()
+    lic = licences()
     byagency = defaultdict(list)
     for r in rows:
         byagency[r["agency_from_filenames"]].append(r)
+
+    # A STATE BELONGS TO ONE AGENCY CARD. Indiana arrives under two folders
+    # (`Indiana` and `Indiana(Limited Data)`) whose agency names differ, so
+    # both cards claimed all 78,257 of its wells and the page overclaimed by
+    # exactly that. Deduplicating per state INSIDE a card was not enough --
+    # the collision is BETWEEN cards. Whichever card holds the most rows for a
+    # state carries its count; the other still lists the state, with none.
+    owner = {}
+    for name, rs in byagency.items():
+        for x in rs:
+            s = (x["state"] or "").strip()
+            if not s:
+                continue
+            n = int(x["wells_in_master"] or 0)
+            if s not in owner or n > owner[s][1]:
+                owner[s] = (name, n)
+
     out = []
     for name, rs in byagency.items():
-        # ONE COUNT PER STATE, not per directory -- see the module docstring.
-        per_state = {}
-        for x in rs:
-            per_state[x["state"]] = max(per_state.get(x["state"], 0), wells(x))
-        best = max(rs, key=wells)
+        # ONE COUNT PER STATE, not per directory -- Texas was downloaded twice
+        # (`Texas` and `New Texas`, both from the RRC), and summing the rows
+        # credited the RRC with 1,433,510 wells against 716,755 real ones.
+        states = sorted({(x["state"] or "").strip()
+                         for x in rs if (x["state"] or "").strip()})
+        published = {s: counts.get(s, 0) for s in states
+                     if counts.get(s) and owner.get(s, ("",))[0] == name}
+        held = [s for s in states if not counts.get(s)]
+        best = max(rs, key=lambda r: int(r["wells_in_master"] or 0))
+        why = ""
+        if held and not published:
+            classes = {lic.get(s) for s in held} - {None}
+            why = WHY_NOT.get(sorted(classes)[0] if classes else "",
+                              "held, not published")
         out.append({
             "name": name,
-            "wells": sum(per_state.values()),
+            "wells": sum(published.values()),
             "url": best["official_url"],
             "terms": best["terms_url"],
             "attr": best["attribution_required"],
             "restrict": best["restrictions"],
-            "states": ", ".join(sorted(s for s in per_state if s)),
+            "states": ", ".join(states),
+            "why_not": why,
             "vintage": max(x["newest_file"] for x in rs),
         })
     out.sort(key=lambda a: (-a["wells"], a["name"]))
-    return out
+    return out, total
 
 
 def main():
-    ag = load()
+    ag, master_total = load()
     total = sum(a["wells"] for a in ag)
-    if total != MASTER_ROWS:
+    if total != master_total:
         raise SystemExit(
-            "REFUSING TO WRITE: the page would claim %s wells but the master "
-            "holds %s. Fix the aggregation before publishing a number nobody "
-            "can reconcile." % (format(total, ","), format(MASTER_ROWS, ",")))
+            "REFUSING TO WRITE: the page would claim %s wells but %s holds %s. "
+            "Fix the aggregation before publishing a number nobody can "
+            "reconcile." % (format(total, ","), MASTER,
+                            format(master_total, ",")))
     E = html.escape
 
     def link(u, txt):
@@ -113,7 +185,7 @@ def main():
             '  </div>'
             % (E(a["states"] or "&mdash;"),
                (format(a["wells"], ",") + " wells") if a["wells"]
-               else "obtained, not loaded",
+               else (a["why_not"] or "obtained, not published"),
                E(a["name"]), E(a["restrict"]), flag,
                link(a["url"], "data source"),
                (" &middot; " + link(a["terms"], "terms")) if a["terms"] else ""))
@@ -195,9 +267,11 @@ TEMPLATE = """<!doctype html>
 <section class="wrap">
   <h2>Every source</h2>
   <p class="sub">
-    Ordered by how much of the reference set each contributes.
-    &ldquo;Obtained, not loaded&rdquo; means the data is held but is not in the
-    current build.
+    Ordered by how much of the published set each contributes. Where a card
+    says &ldquo;held, not published&rdquo;, we have the agency&rsquo;s data but
+    have not included it: either the agency restricts redistribution, or it
+    publishes no terms of use at all and we have written to ask rather than
+    assume. Those states are absent from the figures above.
   </p>
 %(cards)s
 </section>

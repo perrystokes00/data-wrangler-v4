@@ -3213,6 +3213,31 @@ def _h3_cell_boundary_geojson(h3_id: str) -> list[list[float]]:
     return coords
 
 
+def _bounds_of_h3_cells(cells) -> list | None:
+    """[[s, w], [n, e]] enclosing the given H3 cells, or None.
+
+    WHAT TURNS A SELECTED HEX INTO WELLS. The density layer answers "where
+    are wells" and can never answer "which wells are these" -- that needs the
+    points, and the points need a bounds. A clicked hex IS one: bounded,
+    already on screen, and asked for explicitly. Reading its own boundary is
+    also the only honest way to get it, because Python never learns the
+    viewport -- this is a value the app itself drew.
+
+    A HEX IS NOT A RECTANGLE, so its bounding box is larger than the cell and
+    the well set is a superset of what is under the colour. That is the right
+    error to make: showing a few neighbours is recoverable, hiding wells the
+    operator clicked on is not.
+    """
+    lats, lons = [], []
+    for cid in cells or ():
+        for lon, lat in _h3_cell_boundary_geojson(str(cid)):
+            lats.append(lat)
+            lons.append(lon)
+    if not lats:
+        return None
+    return [[min(lats), min(lons)], [max(lats), max(lons)]]
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _h3_cell_bbox(h3_id: str) -> tuple[float, float, float, float] | None:
     """
@@ -15192,7 +15217,14 @@ def run(engine=None):
                             "lease count.")
                     except Exception as _texc:
                         _mapmsg.warning(f"Townships skipped: {_texc}")
-                if "geo_refwells" in active_db:
+                # SELECTING A HEX IS ITSELF THE REQUEST FOR WELLS. The chip
+                # is how you ask for the layer over whatever you are looking
+                # at; clicking a hex is how you ask "which wells are THESE",
+                # and it arrived expecting an answer. Requiring the chip too
+                # made the gesture look broken: the hexes took the click,
+                # turned blue, and nothing else happened.
+                _hex_pick = list(st.session_state.get("selected_h3_cells") or [])
+                if "geo_refwells" in active_db or _hex_pick:
                     # INDIVIDUAL reference wells, which the density layer
                     # cannot give: v_well_density_r* answers "where are wells"
                     # for 3.9M rows, never "which wells are these".
@@ -15207,11 +15239,26 @@ def run(engine=None):
                         # _layer_bounds, not session state: the camera's
                         # oneshot pop has already run by now.
                         _rb = _layer_bounds
+                        # A SELECTED HEX SCOPES THIS LAYER AND ONLY THIS ONE.
+                        # Clicking a hex asks "which wells are these", so it
+                        # beats the drawn box HERE -- but townships and leases
+                        # keep reading _layer_bounds, because one place decides
+                        # scope and quietly re-pointing all three at a hex is
+                        # how those three layers came to disagree before.
+                        _explode = False
+                        _hexb = _bounds_of_h3_cells(_hex_pick)
+                        if _hexb:
+                            _rb, _explode = _hexb, True
+                            _say("[map] exploding %d selected hex(es) -> "
+                                 "%.4f,%.4f .. %.4f,%.4f"
+                                 % (len(_hex_pick), _hexb[0][0], _hexb[0][1],
+                                    _hexb[1][0], _hexb[1][1]))
                         _rn, _rscope = add_reference_wells(
                             m, engine, bounds=_rb, show=True,
                             by=st.session_state.get(
                                 "wm_refwell_by",
-                                REFWELL_BY_DEFAULT))
+                                REFWELL_BY_DEFAULT),
+                            explode=_explode)
                         # SAY THE TWO FACTS SEPARATELY. This used to print
                         # "(capped sample, no bounds)" whenever the fetch
                         # SAMPLED -- which says nothing about whether bounds

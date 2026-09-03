@@ -662,6 +662,15 @@ function(feature, layer) {
     layer.setStyle({color: c, fillColor: c, fillOpacity: 0.75, weight: 1,
                     className: 'dv-refwell'});
     layer.bindTooltip(p.nm || '', {sticky: true});
+    // A DOT SIZED FOR ONE ZOOM IS WRONG AT EVERY OTHER ZOOM. The radius is
+    // screen pixels, so a 1.5px dot chosen so 48,000 of them do not smear at
+    // zoom 8 is a speck at zoom 12 where you are looking at one field. The
+    // gate's zoomend handler grows these; remember the base it started from,
+    // because scaling a value that has already been scaled compounds.
+    if (layer._dvBaseR === undefined) {
+        layer._dvBaseR = (layer.options && layer.options.radius) || 3;
+    }
+    (window.__dvRefWells = window.__dvRefWells || []).push(layer);
     if (!__DETAIL__) { return; }
     var rows = [["UWI", p.uwi], ["Operator", p.op],
                 ["County", p.cty], ["State", p.st], ["Type", p.ty],
@@ -687,7 +696,7 @@ function(feature, layer) {
 """
 
 
-def _refwell_zoom_gate(m):
+def _refwell_zoom_gate(m, hide: bool = True):
     """Hand the map from the density hexes to the reference points at Z.
 
     ONE THRESHOLD, BOTH DIRECTIONS. Below Z the hexes answer "where are
@@ -734,12 +743,21 @@ def _refwell_zoom_gate(m):
         " function sync(){"
         " var el = mp.getContainer();"
         " if (!el) { return; }"
-        " if (mp.getZoom() < Z) {"
-        " L.DomUtil.addClass(el, 'dv-refwell-hide');"
-        " L.DomUtil.removeClass(el, 'dv-hex-hide'); }"
-        " else {"
-        " L.DomUtil.removeClass(el, 'dv-refwell-hide');"
-        " L.DomUtil.addClass(el, 'dv-hex-hide'); } }"
+        + (" if (mp.getZoom() < Z) {"
+           " L.DomUtil.addClass(el, 'dv-refwell-hide');"
+           " L.DomUtil.removeClass(el, 'dv-hex-hide'); }"
+           " else {"
+           " L.DomUtil.removeClass(el, 'dv-refwell-hide');"
+           " L.DomUtil.addClass(el, 'dv-hex-hide'); }" if hide else "")
+        + 
+        # GROW THE DOTS WITH THE ZOOM. Radius is in screen pixels, so a dot
+        # sized not to smear at the handover zoom is a speck four levels in.
+        # Scale from the layer's OWN base so the sampled 1.5px dots and the
+        # detailed 3px ones keep their relative weight.
+        " var f = Math.max(1, Math.min(3, 1 + (mp.getZoom() - Z) * 0.28));"
+        " var a = window.__dvRefWells || [];"
+        " for (var i = 0; i < a.length; i++) {"
+        "   try { a[i].setRadius((a[i]._dvBaseR || 3) * f); } catch (e) {} } }"
         " mp.on('zoomend', sync);"
         " sync();"
         "})();"
@@ -799,7 +817,8 @@ def ensure_refwells_geojson(feats, key, static_dir=None):
 
 
 def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
-                        show: bool = True, by: str = "spud"):
+                        show: bool = True, by: str = "spud",
+                        explode: bool = False):
     """Individual reference wells as ONE GeoJson layer. (drawn, in_scope).
 
     THE DENSITY VIEW IS NOT A SUBSTITUTE, and this is not the layer that was
@@ -1060,7 +1079,14 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
         # The link folium emits must be the BROWSER's, not ours.
         _gj.embed_link = _url
         _gj.add_to(m)
-        _refwell_zoom_gate(m)
+        # AN EXPLODED HEX IS ITS OWN SCOPE. The gate exists so a
+        # continental view does not smear four million dots, but a hex
+        # the operator clicked is a bounded, affordable set they asked
+        # for by name -- hiding it under a zoom rule would answer a
+        # question they did not ask.
+        # hide=False when exploded: the dots must still GROW with the
+        # zoom, they just must not be hidden by it.
+        _refwell_zoom_gate(m, hide=not explode)
         n_drawn = len(feats)
     else:
         # EMBEDDED WHEN THE FILE CANNOT BE WRITTEN. A read-only static/ should
