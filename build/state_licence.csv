@@ -1,0 +1,36 @@
+province_state,agency,licence_class,attribution,terms_url,checked_date,wells_at_check
+AK,AK Oil & Gas Conservation Commission (AOGCC),UNVERIFIED,"metadata found is Esri's CC-BY redistribution, not AOGCC - VERIFY",https://www.commerce.alaska.gov/web/aogcc/Data.aspx,2026-09-02,9910
+AL,Geological Survey of Alabama / State Oil and Gas Board,FREE_DISCLAIMER,not required,https://www.ogb.state.al.us/,2026-09-02,50
+AR,"AR Oil and Gas Commission (AOGC), via Arkansas GIS Office",UNVERIFIED,not stated -- the ASDI metadata says 'Refer to distribution liability in this document' and the document contains no such clause; AOGC's own site returns 403 to automated fetches,https://gis.arkansas.gov/product/arkansas-oil-and-gas-wells/,2026-09-03,33791
+AZ,AZ Oil & Gas Conservation Commission (AZOGCC),UNVERIFIED,not stated,https://azogcc.az.gov/,2026-09-02,1166
+CA,CA Geologic Energy Management Division (CalGEM),FREE_DISCLAIMER,YES - Creative Commons Attribution licence,https://www.conservation.ca.gov/calgem/Online_Data,2026-09-02,242237
+CO,"CO Oil & Gas Conservation Commission (COGCC, now ECMC)",FREE_EXPLICIT,not stated,https://ecmc.state.co.us/data.html,2026-09-02,101277
+FL,FL Dept of Environmental Protection,UNVERIFIED,not stated,https://floridadep.gov/water/mining-mitigation/content/oil-gas-program,2026-09-02,1323
+GO,BOEM (data.boem.gov),FREE_EXPLICIT,not stated,https://www.data.boem.gov/,2026-09-02,54663
+ID,ID Geological Survey,FREE_DISCLAIMER,not stated,https://ogcc.idaho.gov/data-explorer/,2026-09-02,212
+IL,IL State Geological Survey (ISGS),RESTRICTED,YES - ISGS must be credited in all cases,https://isgs.illinois.edu/terms-of-use/,2026-09-02,654033
+IN,IN Geological Survey / IN Geographic Information Office,FREE_DISCLAIMER,"REQUESTED, not required - cite the Indiana Geological Survey",https://www.indianamap.org/,2026-09-02,78257
+KS,KS Geological Survey,FREE_EXPLICIT,"YES - exact wording: ""The source of this material is the Kansas Geological Survey website at http://www.kgs.ku.edu/. All Rights Reserved.""",https://www.kgs.ku.edu/General/copyright.html,2026-09-02,514136
+KY,KY Geological Survey,RESTRICTED,YES - copyright notice and documentation must travel with the data,https://kygs.uky.edu/data/ogwells_info,2026-09-02,135930
+LA,LA (SONRIS / LTRC map server),FREE_DISCLAIMER,not stated,https://www.denr.louisiana.gov/page/sonris-guides,2026-09-02,208551
+MI,"MI Dept of Environment, Great Lakes & Energy (EGLE)",FREE_DISCLAIMER,not stated,https://www.michigan.gov/egle/maps-data/geowebface,2026-09-02,5465
+MO,MO Dept of Natural Resources,UNVERIFIED,not stated,https://dnr.mo.gov/land-geology/maps-data-research/geosciences-technical-resource-assessment-tool-geostrat,2026-09-02,10367
+MS,HIFLD (orig: Oak Ridge & Argonne National Laboratory),AGGREGATOR,VERIFY per layer,https://hifld-geoplatform.hub.arcgis.com/pages/hifld-terms-of-use,2026-09-02,10143
+MT,MT Board of Oil & Gas Conservation (BOGC),UNVERIFIED,"metadata found belongs to BLM's copy, not MT BOGC - VERIFY",https://bogwebfiles.dnrc.mt.gov/GISData/_Data%20Source%20and%20Disclaimer.pdf,2026-09-02,41943
+ND,"ND Industrial Commission, Oil & Gas Division",FREE_DISCLAIMER,not stated,https://gishubdata.nd.gov/group/oil-and-gas-division,2026-09-02,43527
+NE,NE Oil & Gas Conservation Commission,UNVERIFIED,not stated,https://dwee.nebraska.gov/about/public-records-searches,2026-09-02,22592
+NM,NM Oil Conservation Division (EMNRD),FREE_DISCLAIMER,not required,https://www.emnrd.nm.gov/ocd/ocd-data/,2026-09-02,140605
+NV,NV Div of Minerals,UNVERIFIED,not stated,https://minerals.nv.gov/,2026-09-02,740
+NY,NY State Dept of Environmental Conservation,FREE_DISCLAIMER,not stated,https://gisservices.dec.ny.gov/gis/maw/help/OilandGasMetadata.html,2026-09-02,46320
+OH,OH Dept of Natural Resources (ODNR),RESTRICTED,YES - must be referenced when used to compile OTHER datasets or maps for distribution or publication,https://ohiodnr.gov/well-locator,2026-09-02,239520
+OK,OK Corporation Commission (RBDMS),UNVERIFIED,not stated,https://oklahoma.gov/occ/divisions/oil-gas/gis-data-and-maps.html,2026-09-02,442003
+OR,OR Dept of Geology & Mineral Industries (DOGAMI),FREE_DISCLAIMER,not stated,https://www.oregon.gov/dogami/geology/pages/index.aspx,2026-09-02,613
+PA,PA Dept of Environmental Protection,FREE_DISCLAIMER,not stated,https://www.pa.gov/agencies/dep/data-and-tools/gis,2026-09-02,198726
+SD,SD Dept of Agriculture & Natural Resources,UNVERIFIED,not stated,https://danr.sd.gov/Conservation/OilGas/,2026-09-02,2136
+TN,TN Dept of Environment & Conservation,UNVERIFIED,not stated,https://tdeconline.tn.gov/arcgis/rest/services/Oil_and_Gas2/MapServer,2026-09-02,15649
+TX,TX Railroad Commission (RRC),FREE_DISCLAIMER,not stated,https://www.rrc.texas.gov/about-us/faqs/general-faq/digital-map-information-gis-data/,2026-09-02,716755
+UT,"UT Div of Oil, Gas & Mining (DOGM)",FREE_DISCLAIMER,not stated,https://opendata.utah.gov/Energy-Environment/DOGM-Oil-And-Gas-Wells-in-Utah/kn55-epv6,2026-09-02,40048
+VA,"VA Dept of Mines, Minerals and Energy",FREE_DISCLAIMER,"REQUESTED - ""Please cite Virginia Dept. of Mines, Minerals and Energy""",https://energy.virginia.gov/gas-oil/,2026-09-02,8415
+WA,WA Dept of Natural Resources,FREE_DISCLAIMER,YES - WGS publishes CITATION GUIDELINES; follow them,https://dnr.wa.gov/washington-geological-survey/publications-and-data/disclaimers-and-citation-guidelines,2026-09-02,809
+WV,WV Dept of Environmental Protection,FREE_DISCLAIMER,not stated,https://dep.wv.gov/oil-and-gas/databaseinfo/Pages/GIS-Data-Download-and-Information-Link.aspx,2026-09-02,118126
+WY,WY Oil & Gas Conservation Commission (WOGCC),UNVERIFIED,not stated,https://wogcc.wyo.gov/public-resources,2026-09-02,210203

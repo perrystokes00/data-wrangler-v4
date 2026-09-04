@@ -7,7 +7,7 @@ __pycache__/
 *.so
 .Python
 *.pkl
-build/
+build/*
 develop-eggs/
 dist/
 downloads/
@@ -191,3 +191,17 @@ mudlog_*.png
 
 # dev server output (start.bat log)
 logs/
+
+# ---------------------------------------------------------------------------
+# build/ is ignored above by the standard PYTHON PACKAGING rule, but this repo
+# also keeps LICENCE RESEARCH there -- forty agencies' published terms, read
+# one at a time, and the letters asking the ones that publish none. That is
+# evidence behind a public claim, not a build artifact, and it was invisible
+# to git because of where it happens to live. These three are tracked.
+!build/source_manifest.csv
+!build/state_licence.csv
+# build/Email/ is NOT tracked. The ten letters each end with a personal
+# email address and this repository is public, where address harvesters
+# find it and a later deletion does not help -- forks and caches keep it.
+# The letters live on disk; the licence EVIDENCE above is what belongs in
+# git, and it carries no personal data.
