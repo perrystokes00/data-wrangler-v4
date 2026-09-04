@@ -57,8 +57,21 @@ SKIP_DIRS = {"__pycache__", ".git", ".hg", ".svn", ".venv", "venv",
              ".idea", ".vscode", ".pytest_cache", ".ipynb_checkpoints"}
 
 # Non-python things a running app needs. Globs, relative to the root.
+#
+# .streamlit/config.toml BY NAME, NOT .streamlit/*.toml. The glob was correct
+# for what is in that folder today and wrong for what Streamlit puts there by
+# convention: secrets.toml is its standard credential store, so the day
+# anything writes one, the build ships the customer an ANTHROPIC_API_KEY.
+# Nothing had gone wrong yet -- this closes it while it is still cheap.
+#
+# config.toml itself must ship. enableStaticServing = true is load-bearing:
+# it serves /app/static/*.geojson, which the reference-well and lease layers
+# are drawn from, so without it those layers silently fail to load in the
+# browser where no Python error ever reaches us. The theme is the product's
+# identity. Neither is machine-specific, which is the test for shipping a
+# config at all.
 DEFAULT_INCLUDE = [
-    "assets/**", ".streamlit/*.toml", "well_icons/**",
+    "assets/**", ".streamlit/config.toml", "well_icons/**",
     "requirements*.txt", "pyproject.toml", "setup.py", "setup.cfg",
     "ORIENTATION.md", "README*.md", "LICENSE*",
 ]
