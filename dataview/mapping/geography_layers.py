@@ -670,7 +670,7 @@ function(feature, layer) {
     if (layer._dvBaseR === undefined) {
         layer._dvBaseR = (layer.options && layer.options.radius) || 3;
     }
-    (window.__dvRefWells = window.__dvRefWells || []).push(layer);
+    (window._dvRefWellLayers = window._dvRefWellLayers || []).push(layer);
     if (!__DETAIL__) { return; }
     var rows = [["UWI", p.uwi], ["Operator", p.op],
                 ["County", p.cty], ["State", p.st], ["Type", p.ty],
@@ -763,7 +763,7 @@ def _refwell_zoom_gate(m, hide: bool = True):
         # Scale from the layer's OWN base so the sampled 1.5px dots and the
         # detailed 3px ones keep their relative weight.
         " var f = Math.max(1, Math.min(3, 1 + (mp.getZoom() - Z) * 0.28));"
-        " var a = window.__dvRefWells || [];"
+        " var a = window._dvRefWellLayers || [];"
         " for (var i = 0; i < a.length; i++) {"
         "   try { a[i].setRadius((a[i]._dvBaseR || 3) * f); } catch (e) {} } }"
         " mp.on('zoomend', sync);"

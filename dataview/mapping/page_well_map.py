@@ -17359,6 +17359,25 @@ def run(engine=None):
                                         continue
                                     _store[_cc] = _us
                                     _added += 1
+                                # "EMPTY" MEANT EMPTY IN dv_well, AND THE HEXES
+                                # NO LONGER COME FROM dv_well. The density views
+                                # read the 3.1M-row reference master; the drill
+                                # above reads dataview.dv_well, which holds
+                                # 84,519 wells and almost none outside Wyoming.
+                                # So a box over the San Juan Basin covered seven
+                                # populated hexes and recorded NONE of them --
+                                # "0 of 7 cell(s) hold wells" -- and with an
+                                # empty selection the explode had nothing to
+                                # scope to and fell back to the continental
+                                # sample. A cell the density layer DREW holds
+                                # wells by definition; it just holds them in the
+                                # master. Record it so it can be selected and
+                                # exploded, with an empty uwi list because the
+                                # tray is still a dv_well thing.
+                                for _cc in _want:
+                                    if _cc not in _store:
+                                        _store[_cc] = []
+                                        _added += 1
                                 _say("[map] box: %d of %d cell(s) hold wells"
                                      % (_added, len(_picked)))
                                 if _added:
