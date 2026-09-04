@@ -96,12 +96,20 @@ On first launch, connect to your SQL Server instance from the sidebar and select
 
 ## Batch Loading
 
-The headless batch runner was retired: `tools/bulk_runner.py` imported
-`dataview.import_data.page_bulk`, which the v4 reorganisation deleted, and
-`run_job` exists nowhere in the tree. The import sat inside a function, so
-`--help` kept working and it only failed when a job actually ran — which is
-why it survived unnoticed. `run_batch.bat` had already gone; `run_watcher.bat`
-remains and points at the same missing module.
+The headless batch runner was retired, and with it the whole v3-era queue
+mechanism it anchored — four files, three of them already broken:
+
+- `tools/bulk_runner.py` imported `dataview.import_data.page_bulk`, which the
+  v4 reorganisation deleted, and called `run_job`, which exists nowhere in the
+  tree. The import sat inside a function, so `--help` kept working and it only
+  failed when a job actually ran — which is why it survived unnoticed.
+- `tools/seed_queue.py` wrote `tools/bulk_queue.json` for it to consume.
+  Nothing else ever read that file, so once the runner went it was a producer
+  feeding no one.
+- `run_watcher.bat` invoked the runner — but first `cd`'d to `claude_ppdm`, a
+  different repo, and named `PPDM39_DEMO_1` on `PERRY\SQLEXPRESS`. Neither is
+  this database or this server; it had been dead since long before the reorg.
+- `run_batch.bat` was already gone.
 
 Batch loading is done from the **Data Assistant** page in the app.
 

@@ -37,7 +37,7 @@ $Keep = @(
     "build_installer.ps1", "installer.iss",
     "start.bat", "start_cmd.bat", "run.ps1", "setup.ps1",
     "start_data_wrangler.bat", "stop_data_wrangler.bat",
-    "start_federation_map.bat", "run_watcher.bat",
+    "start_federation_map.bat",
     "requirements.txt", ".env", ".gitignore", ".dev_pid",
     "user_prefs.json",            # the map's saved places
     "README.md", "EULA.txt", "CLAUDE.md"

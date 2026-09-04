@@ -478,8 +478,21 @@ it's actually the correct default. **Open: make batched the default.**
   runner is deleted and README's Batch Loading section says so. The lesson it
   taught is worth keeping: the import was INSIDE a function, so `--help`
   succeeded and it died only when a job actually ran, which is why a
-  completely broken tool survived a reorg unnoticed. `run_watcher.bat` still
-  points at the same missing module and is the remaining loose end.
+  completely broken tool survived a reorg unnoticed.
+
+  **The rest of the v3 queue mechanism went with it (4 Sep).** Perry confirmed
+  the whole set was abandoned code carried into v4 from v3. `run_watcher.bat`
+  did not merely name the missing module — it `cd`'d to `claude_ppdm`, a
+  different repo, against `PPDM39_DEMO_1` on `PERRY\SQLEXPRESS`, so every one
+  of its three facts was wrong and it had been dead far longer than the reorg.
+  `tools/seed_queue.py` wrote `bulk_queue.json` that ONLY the runner read, so
+  deleting the runner silently orphaned it. **A producer with no consumer
+  raises nothing** — it writes its file, prints "Run the batch loader to
+  process", exits 0, and the work evaporates. That is the same shape as
+  `cat_*` being a drain: the honest test is whether anything downstream can
+  SEE the output, not whether the step succeeded. `tidy_root.ps1` also listed
+  the .bat in `$Keep`; a delete has to reach the registries that name the file
+  or the next tidy pass reports a phantom.
 - ~~Compound-key FKs are silently unchecked (`if len(ccols) != 1: continue`)~~
   **CLOSED 23 Aug — `promote_catalog._parent_fk_predicates` holds a child whose
   parent row is missing instead of letting the INSERT 547 and fail the whole
