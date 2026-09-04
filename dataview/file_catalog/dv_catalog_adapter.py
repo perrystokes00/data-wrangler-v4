@@ -11,8 +11,13 @@ from __future__ import annotations
 from pathlib import Path
 from sqlalchemy import text
 
-# ── Vault root — where files live ────────────────────────────────────
-VAULT_ROOT = r"C:\Bulk"
+# ── Vault root — where the CUSTOMER's files live ─────────────────────
+# WAS r"C:\Bulk", WHICH IS A LEVEL TOO HIGH. ensure_vault() below builds
+# raw/curated/enriched under this, and none of those exist at C:\Bulk while
+# C:\Bulk\Vault\curated does and holds files -- so the default was pointing
+# at the staging area, not the vault. Three other modules already said
+# C:\Bulk\Vault. Now one setting, and the customer can point it anywhere.
+from dataview.core.config import DW_VAULT as VAULT_ROOT  # noqa: E402
 
 # ── File type → (doc_type_group, doc_type) ───────────────────────────
 _EXT_MAP = {

@@ -16,6 +16,20 @@ from pathlib import Path
 
 # ── Optional module imports ───────────────────────────────────────────────────
 
+def _cfg_vault() -> str:
+    """The configured vault root, for a text_input's DEFAULT value only.
+
+    Degrades to the literal this file used to carry rather than taking the
+    page down if config cannot import -- it is a default the operator types
+    over, not a path anything writes to unattended.
+    """
+    try:
+        from dataview.core.config import DW_VAULT
+        return DW_VAULT
+    except Exception:
+        return r"C:\Bulk\Vault"
+
+
 def _try_import(mod):
     try:
         return __import__(mod, fromlist=[""])
@@ -1348,7 +1362,7 @@ def _tab_pipeline(engine, dialect):
         st.caption(r"Wells → <vault>\<COUNTRY>\<STATE>\<UWI14>\<WELL_NAME> · "
                    r"Seismic → <vault>\<COUNTRY>\<STATE>\<2D|3D>\<SURVEY>")
         v1, v2 = st.columns(2)
-        v_vault = v1.text_input("Vault root", value=r"C:\Bulk\Vault", key="pl_v_vault")
+        v_vault = v1.text_input("Vault root", value=_cfg_vault(), key="pl_v_vault")
         v_ctry  = v2.text_input("Default country", value="US", key="pl_v_ctry")
         v3, v4 = st.columns([1, 3])
         v_dry = v3.checkbox("Dry run", value=True, key="pl_v_dry")
@@ -1373,7 +1387,7 @@ def _tab_pipeline(engine, dialect):
         st.caption("Copies catalogued documents whose path contains the keyword "
                    "(as a whole word) into the vault, classified well/seismic/other.")
         d1, d2 = st.columns(2)
-        d_vault = d1.text_input("Vault root", value=r"C:\Bulk\Vault", key="pl_d_vault")
+        d_vault = d1.text_input("Vault root", value=_cfg_vault(), key="pl_d_vault")
         d_word  = d2.text_input("Keyword", value="final", key="pl_d_word")
         d3, d4 = st.columns([1, 3])
         d_dry = d3.checkbox("Dry run", value=True, key="pl_d_dry")

@@ -35,8 +35,10 @@ try:
 except ImportError as e:
     raise ImportError("pip install lasio") from e
 
-# Preferred BULK INSERT directory — matches staging.py
-_BULK_DIR = r"C:\Bulk"
+# The BULK INSERT staging directory is config.scratch_dir("bulk") now, not a
+# constant here -- resolved per call so DW_SCRATCH can redirect it without a
+# reimport. The old literal was r"C:\Bulk", which is also the VAULT root, so
+# throwaway CSVs and curated documents shared a directory.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -524,13 +526,15 @@ def _insert_snowflake(engine, table: str, df: pd.DataFrame) -> int:
 def _get_bulk_path(stem: str) -> str:
     """
     Return a writable CSV path for BULK INSERT.
-    Prefers C:\\Bulk\\ (SQL Server service account accessible),
-    falls back to system temp.
+    Prefers the configured scratch root (see config.scratch_dir), which the
+    SQL Server service account must be able to READ -- this file is handed to
+    BULK INSERT, so the server opens it, not us. Falls back to system temp,
+    which is what the probe below is for.
     """
     filename = f"las_cv_{stem}.csv"
     try:
-        os.makedirs(_BULK_DIR, exist_ok=True)
-        candidate = os.path.join(_BULK_DIR, filename)
+        from dataview.core.config import scratch_dir
+        candidate = os.path.join(scratch_dir("bulk"), filename)
         with open(candidate, "w") as _probe:
             pass
         os.unlink(candidate)

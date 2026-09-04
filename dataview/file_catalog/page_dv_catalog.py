@@ -33,7 +33,15 @@ try:
     _ADAPTER_OK  = True
 except Exception as _ae:
     _ADAPTER_OK  = False
-    VAULT_ROOT   = r"C:\Bulk"
+    # THE FALLBACK MUST AGREE WITH THE REAL ONE. It said r"C:\Bulk" while the
+    # adapter's own default was the same wrong level -- so when the adapter
+    # failed to import, the page silently pointed at a different vault than
+    # when it worked. Reading the setting keeps the two identical, and this
+    # branch degrades to "no adapter", not "another vault".
+    try:
+        from dataview.core.config import DW_VAULT as VAULT_ROOT
+    except Exception:
+        VAULT_ROOT = r"C:\Bulk\Vault"
     def get_doc_type(ext): return ("Other", "UNKNOWN")
     def ensure_vault(root=VAULT_ROOT): return {}
 

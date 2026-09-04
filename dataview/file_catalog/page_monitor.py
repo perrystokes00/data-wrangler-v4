@@ -22,6 +22,20 @@ import streamlit as st
 
 from dataview.file_catalog import work_queue as wq
 
+
+def _cfg_vault() -> str:
+    """The configured vault root, for a text_input's DEFAULT value only.
+
+    A page must not die because config cannot import, so this degrades to the
+    literal the file used to carry. It is a default the operator can type
+    over, never a path anything writes to blind.
+    """
+    try:
+        from dataview.core.config import DW_VAULT
+        return DW_VAULT
+    except Exception:
+        return r"C:\Bulk\Vault"
+
 # directory of this file = where worker_pool.py / parallel_crawl.py live
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -295,7 +309,7 @@ def run(engine=None, dialect: str = "mssql", embedded: bool = False):
         "Vault after processing", key="mon_vault_on",
         value=ss.get("mon_vault_on", False))
     vt2.text_input("Vault root", key="mon_vault_root",
-                   value=ss.get("mon_vault_root", r"C:\Bulk\Vault"),
+                   value=ss.get("mon_vault_root", _cfg_vault()),
                    label_visibility="collapsed", placeholder=r"C:\Bulk\Vault",
                    disabled=not mon_vault_on)
 

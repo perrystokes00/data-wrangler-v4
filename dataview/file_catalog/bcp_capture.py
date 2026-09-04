@@ -229,9 +229,12 @@ def _load_table(cur, table, rows, log, upsert_key=None):
     cur.execute("CREATE TABLE " + stg + " (" +
                 ", ".join(f"[{n}] nvarchar(max)" for n in names) + ")")
 
-    _bd = r"C:\bcp_tmp"
-    os.makedirs(_bd, exist_ok=True)
-    tmp = os.path.join(_bd, f"bcpcap_{table}.csv")
+    # SCRATCH ROOT, NOT C:\bcp_tmp. One resolved location so a distribution
+    # can redirect all of them at once -- see config.scratch_dir. The file is
+    # read by SQL SERVER on the next line, so the path must be reachable by
+    # the service account; DW_SCRATCH is the override when it is not.
+    from dataview.core.config import scratch_dir
+    tmp = os.path.join(scratch_dir("bulk"), f"bcpcap_{table}.csv")
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter="\t", lineterminator="\n")
         for r in rows:

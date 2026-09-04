@@ -629,9 +629,13 @@ def crawl_and_inventory(
                 "DUPLICATE_GROUP","CATALOG_STATUS","CATALOG_TABLE",
                 "ROOT_PATH","SCAN_DATE","ROW_CREATED_DATE","ROW_CHANGED_DATE"]
 
-        bulk_dir = r"C:\Bulk"
-        os.makedirs(bulk_dir, exist_ok=True)
-        csv_path = os.path.join(bulk_dir, f"inv_stage_{uuid.uuid4().hex[:8]}.csv")
+        # SCRATCH ROOT, NOT C:\Bulk -- one place for every staging file so a
+        # distribution can redirect them together. C:\Bulk is the VAULT root
+        # as well, and mixing a data store with throwaway CSVs is how the two
+        # come to share a lifetime.
+        from dataview.core.config import scratch_dir
+        csv_path = os.path.join(scratch_dir("bulk"),
+                                f"inv_stage_{uuid.uuid4().hex[:8]}.csv")
 
         # bulk_csv_writer carries NO escapechar — see path_identity for why
         # that is the whole fix. The escaped form doubled every separator in a

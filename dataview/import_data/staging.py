@@ -59,9 +59,11 @@ class StagingResult:
 
 _SAFE_RE = re.compile(r"[^a-zA-Z0-9_]")
 
-# Preferred bulk directory — SQL Server service account typically has access here.
-# Falls back to system temp if the directory can't be created or written.
-_BULK_DIR = r"C:\Bulk"
+# The staging directory is config.scratch_dir("bulk") now, resolved per call so
+# DW_SCRATCH can redirect it. It was r"C:\Bulk" -- which is also the VAULT root,
+# so throwaway staging CSVs shared a directory with curated documents, and a
+# distribution had six separate literals to find before it could move any of
+# them. Still falls back to system temp if the probe below fails.
 
 
 def _get_bulk_path(staging_name: str) -> str:
@@ -69,16 +71,21 @@ def _get_bulk_path(staging_name: str) -> str:
     Return a writable path for the BULK INSERT staging CSV.
 
     Priority:
-      1. C:\\Bulk\\ — preferred; SQL Server service account likely has access
-      2. System temp dir — always writable by the current process
-
-    Creates C:\\Bulk\\ on first use if it doesn't exist.
+      1. config.scratch_dir("bulk") — the one configurable root. The SQL
+         Server service account must be able to READ it, because BULK INSERT
+         opens the file server-side, not us. Checked 4 Sep rather than
+         assumed: NT Service\\MSSQL$SQLEXPRESS reads the LOCALAPPDATA default
+         here. DW_SCRATCH is the override where it cannot -- a hardened
+         service account, or a server on another host.
+      2. System temp dir — always writable by US, and not necessarily
+         readable by the SERVER, which is why it is the fallback and not the
+         default.
     """
     filename = f"stage_{staging_name}.csv"
-    # Try preferred bulk dir first
+    # Try the configured scratch root first
     try:
-        os.makedirs(_BULK_DIR, exist_ok=True)
-        candidate = os.path.join(_BULK_DIR, filename)
+        from dataview.core.config import scratch_dir
+        candidate = os.path.join(scratch_dir("bulk"), filename)
         # Quick write-access probe
         with open(candidate, "w") as _probe:
             pass

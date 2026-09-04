@@ -97,9 +97,11 @@ def enrich_county(engine, dbf_lookup, county_fips, dry_run=False):
     if not dbf_lookup:
         return stats
 
-    csv_dir = Path(r"C:\Bulk")
-    csv_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = str(csv_dir / f"dbf_{county_fips}.csv")
+    # SCRATCH ROOT, NOT C:\Bulk -- see config.scratch_dir. Read by SQL Server
+    # via BULK INSERT below, so DW_SCRATCH is the escape hatch when the
+    # service account cannot reach a user-profile path.
+    from dataview.core.config import scratch_dir
+    csv_path = str(Path(scratch_dir("bulk")) / f"dbf_{county_fips}.csv")
 
     # Write CSV — same pattern as shapefile loader
     with open(csv_path, "w", newline="", encoding="utf-8") as f:

@@ -41,7 +41,10 @@ from datetime import datetime
 DEFAULT_SERVER = r"PERRY\SQLEXPRESS"
 DEFAULT_DB     = "DataView_Demo"
 DEFAULT_DRIVER = "ODBC Driver 17 for SQL Server"
-DEFAULT_VAULT  = r"C:\Bulk\Vault"
+try:
+    from dataview.core.config import DW_VAULT as DEFAULT_VAULT
+except Exception:            # a tool must still run if config cannot import
+    DEFAULT_VAULT = r"C:\Bulk\Vault"
 DEFAULT_WORD   = "final"
 
 # Document-ish extensions copied by default (override with --types / --all-ext).

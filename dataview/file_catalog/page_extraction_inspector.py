@@ -27,6 +27,20 @@ from datetime import datetime
 import streamlit as st
 import pandas as pd
 
+
+def _cfg_reports() -> str:
+    """The configured reports folder, for a text_input's DEFAULT value only.
+
+    Reports are the CUSTOMER's output, not our scratch -- 1,801 of them live
+    in C:\\Bulk\\reports today and that stays the default. Configurable via
+    DW_REPORTS so a distribution can point it elsewhere; nothing is moved.
+    """
+    try:
+        from dataview.core.config import DW_REPORTS
+        return DW_REPORTS
+    except Exception:
+        return r"C:\Bulk\reports"
+
 # ── Canonical contract ──────────────────────────────────────────────────────
 # extract_core is the single source of truth for the extension universe AND the
 # dispatcher. We import the SETS from there and rebuild the ext→group map locally
@@ -225,7 +239,7 @@ def _file_picker() -> str:
 
     with st.expander("📁 Browse a folder"):
         d = st.text_input(
-            "Folder", value=st.session_state.get("ei_dir", r"C:\Bulk\reports"),
+            "Folder", value=st.session_state.get("ei_dir", _cfg_reports()),
             key="ei_dir", placeholder=r"C:\Bulk\reports",
         )
         if d and os.path.isdir(d):

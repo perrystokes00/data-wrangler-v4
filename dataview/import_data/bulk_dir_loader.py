@@ -478,7 +478,7 @@ class _Phases:
                 "unaccounted": round(max(0.0, tot - acct), 2)}
 
 
-def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\Bulk",
+def profile_directory_live(directory, engine, schema="dataview", bulk_dir=None,
                            recursive=False, force=False):
     """profile_directory using the JSON catalog when a path is set (fast), else live
     introspection. Adds filename-based matching for dv_r_* reference tables.
@@ -487,6 +487,12 @@ def profile_directory_live(directory, engine, schema="dataview", bulk_dir=r"C:\B
     whenever the EXTRACTOR changed rather than the data: the bytes are identical, so the gate
     would otherwise (correctly) skip them."""
     import json, tempfile
+    # bulk_dir defaulted to r"C:\Bulk" IN THE SIGNATURE, which a distribution
+    # cannot redirect -- see config.scratch_dir. None means "the configured
+    # root"; an explicit path still wins, so no caller changes behaviour.
+    if not bulk_dir:
+        from dataview.core.config import scratch_dir
+        bulk_dir = scratch_dir("bulk")
     _ph = _Phases()
     _t_start = time.perf_counter()
     cj = _catalog_json()
@@ -2672,11 +2678,19 @@ def run_bcp(server, database, tbl, safe_file):
 
 
 # ── orchestration ─────────────────────────────────────────────────────────────
-def stage_directory(engine, server, database, rows, bulk_dir=r"C:\Bulk", progress=None):
+def stage_directory(engine, server, database, rows, bulk_dir=None, progress=None):
     """rows: profile_directory rows [{file, path, table, cols, ...}]. Groups files by
     (target, fingerprint), creates one staging table per group, BCPs each file in.
-    Safe files are written to bulk_dir and KEPT (for inspection / manual re-run)."""
+    Safe files are written to bulk_dir and KEPT (for inspection / manual re-run).
+
+    bulk_dir=None means config.scratch_dir("bulk"). It was r"C:\\Bulk" in the
+    signature, where a distribution could not reach it -- and these files are
+    KEPT rather than deleted, so the location is one an operator has to be
+    able to find and clear."""
     ensure_schema(engine)
+    if not bulk_dir:
+        from dataview.core.config import scratch_dir
+        bulk_dir = scratch_dir("bulk")
     try:
         os.makedirs(bulk_dir, exist_ok=True)
     except OSError:
@@ -4938,7 +4952,13 @@ def run():
 
     catalog = st.text_input("FK catalog JSON (fast; blank = introspect live)",
                             value=ss.get("bdl_cat", r"dataview\schema_registry\dataview_fk_catalog.json"))
-    bulk_dir = clean_path(st.text_input("Bulk staging folder (safe files kept here)", value=ss.get("bdl_bulk", r"C:\Bulk")))
+    # DEFAULT FROM THE CONFIGURED ROOT, not a literal: a distribution that
+    # redirects DW_SCRATCH should see the box already pointing at the right
+    # place. The operator can still type anywhere -- this is only the default.
+    from dataview.core.config import scratch_dir as _scratch_root
+    bulk_dir = clean_path(st.text_input(
+        "Bulk staging folder (safe files kept here)",
+        value=ss.get("bdl_bulk", _scratch_root("bulk"))))
 
     # ── the loader's work folder ────────────────────────────────────────────────
     try:
