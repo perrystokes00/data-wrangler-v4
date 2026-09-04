@@ -147,6 +147,12 @@ consuming them. That's the fetch, not the query. The fix is bcp in both
 directions (queryout → CSV → compute → CSV → bcp in → one set-based UPDATE), or
 at minimum `cursor.arraysize`.
 
+**But that is now the THIRD thing to check, not the first.** Two cheaper
+causes wear the same symptom, and both have cost a session here: ODBC tracing
+(below) and a non-covering index (below that). Order the checks by what they
+cost to run — one `SELECT 1`, then two columns against eleven, and only then
+reach for bcp.
+
 **BEFORE BLAMING THE FETCH, CHECK ODBC TRACING.** 16 Aug the catalog file list
 was reproduced at 804s and the cause was not the query, the columns, or pyodbc:
 `HKCU\SOFTWARE\ODBC\ODBC.INI\ODBC\Trace` was **1**, so the Driver Manager was
@@ -189,6 +195,48 @@ Timings, 4M rows on Express: rebuild 43s, reorganize 250s.
 Also: **type mismatches between staging and target are a performance bug.**
 nvarchar staging against `char(14)` targets converted the indexed column on
 every comparison — 154s → 0.89s once cast to the target width (173×).
+
+**A SLOW FETCH IS USUALLY A MISSING COVERING INDEX, NOT A SLOW CLIENT — AND
+bcp CANNOT FIX ONE.** 4 Sep the map's `add_reference_wells` took 13–44s of
+every render. It reads exactly like the fetch problem this section opens with,
+and the instinct was bcp. Wrong: hold the rows constant and vary only the
+COLUMNS, over the same 71,152-well bbox in `well_master_public_v2`:
+
+| columns asked for | time |
+|---|---|
+| `surface_latitude, surface_longitude` | **0.91s** |
+| `+ uwi14` | **0.79s** |
+| `+ well_name` | 6.2s |
+| `+ operator_name` | 10.0s |
+| all 11 (`_REF_COLS`) | 16.0s |
+
+pyodbc moves 78,000 rows/sec when the index covers. `ix_wmp2_latlon` keyed
+`(surface_latitude, surface_longitude)` and INCLUDEd exactly one column,
+`uwi14` — so the first column past that turned the seek into 71,152 RID
+lookups into a **1,570 MB HEAP** (that table has no clustered index). bcp
+issues the same query and pays the same lookups; it would have optimised the
+half that was already fast. Adding the 8 popup columns as INCLUDE took the
+index 144 → 395 MB (68s to build) and the 11-column fetch **16.0s → 1.0s**.
+
+So the diagnostic is: **fetch two columns, then eleven.** If two are fast the
+client is fine and the index is the problem. That is one query and it
+distinguishes the three causes this section now knows — tracing, covering,
+transport — before any of them gets rewritten.
+
+**`json.dump(obj, fp)` IS THE SLOW ENCODER. `json.dumps(obj)` IS THE C ONE.**
+Same bytes, same file, 21× apart: `dump` calls `iterencode(_one_shot=False)`
+and that flag is precisely what selects the pure-Python encoder, while `dumps`
+goes through `encode()` with `_one_shot=True` and gets `c_make_encoder`.
+Measured on an 11 MB FeatureCollection (71,152 wells with popup properties):
+
+    json.dump(..., fh)     7.03s   3.45M _iterencode calls
+    fh.write(dumps(...))   0.33s
+
+`ensure_refwells_geojson` and the lease writer both had it. **It was invisible
+for as long as the query in front of it took 26 seconds** — the profiler only
+named it once the covering index landed, at which point it was 7 of the 9.6s
+in that function. Fixing the top of a profile promotes whatever was second;
+re-profile after every win rather than declaring the last one the answer.
 
 ---
 

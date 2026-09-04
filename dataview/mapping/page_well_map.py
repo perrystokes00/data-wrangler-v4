@@ -154,6 +154,27 @@ def _is_action_key(k):
             or s.startswith("FormSubmitter:"))
 
 
+# Above this many rows the starter-set download is CSV only. openpyxl builds
+# a cell object per value, so a six-figure sheet costs minutes and hundreds of
+# MB to write a file whose only advantage over the CSV beside it is that it
+# opens with a double click. Measured shape, not a guess at one: ANADARKO's
+# hexes hold 144,858 wells and PERMIAN's 429,623.
+_REFHDR_XLSX_MAX = 100000
+
+# ── WHERE THE HEXES HAND OVER TO INDIVIDUAL WELLS ───────────────────────
+# Perry's number. Once the hexes on screen represent this many wells or
+# fewer, the wells themselves are drawn on top: below it a hexagon is a box
+# round a handful of dots you could just look at, above it the dots are a
+# smear and the hexagon is the answer.
+#
+# COUNTED FROM THE HEXES ACTUALLY DRAWN, so the box, the state filter and
+# the basin outline are all already in it -- and it costs no query.
+#
+# Affordable at this size, measured 4 Sep in the browser with the shipped
+# marker template: 1,000 dots 141ms, 5,000 157ms, 20,000 409ms. The 4s a
+# render costs is the st_folium round trip, not the markers.
+H3_WELL_HANDOFF = 10000
+
 BCP_SERVER = r"localhost\SQLEXPRESS"
 BCP_DATABASE = "DataView"
 
@@ -1255,6 +1276,21 @@ def _clear_wells_state() -> None:
     # still displayed."
     st.session_state["wells_suppressed"] = True
     st.session_state["_wells_already_loaded"] = False
+    # ── AND THE CLIP TOGGLE, WHICH USED TO SURVIVE ITS OWN BOX ───────────
+    # `_clip_box` is popped above, but the checkbox that turned clipping ON
+    # was left set -- so a clear left the page saying it was clipping to a
+    # box that no longer existed. Three consecutive renders logged
+    # "clip ON but no box drawn -- nothing to clip to" after one clear,
+    # 4 Sep. Harmless to the picture, but it is a flag disagreeing with the
+    # state it describes, and the next box drawn silently inherited it.
+    #
+    # A REQUEST, NOT AN ASSIGNMENT. wm_clip_to_box is a widget's own key and
+    # this runs from a button handler, i.e. after that widget was built --
+    # assigning it here is the crash that surfaces on a LATER run, on
+    # whatever page draws next. The top of run() already consumes
+    # _clip_off_request before the checkbox is created, which is the one
+    # moment the assignment is legal; this is that door.
+    st.session_state["_clip_off_request"] = True
 
 
 MAP_SEIS_PREF = "map_seis"
@@ -2443,8 +2479,12 @@ def _qry_wells_bcp(_engine, _v: int = 1, limit: int = 10000,
 
     # Working dir for the CSV. Use Temp so Windows cleans it up automatically
     # if our script crashes.
-    work_dir = Path(os.environ.get("LOCALAPPDATA", "/tmp")) / "Temp" / "dw_wells_bcp"
-    work_dir.mkdir(parents=True, exist_ok=True)
+    # ONE SCRATCH ROOT WITH THE LOADERS. This resolved its own path --
+    # correctly, and it is where the pattern came from -- but a fourth
+    # separate literal is a fourth thing to find when a distribution has
+    # to redirect them. config.scratch_dir is that one place.
+    from dataview.core.config import scratch_dir as _scratch
+    work_dir = Path(_scratch("bcp"))
     csv_path = work_dir / "wells_main.csv"
 
     try:
@@ -2617,8 +2657,12 @@ def _qry_gom_wells_bcp(_engine, _v: int = 1) -> list[dict]:
           AND w.surface_longitude IS NOT NULL
     """
 
-    work_dir = Path(os.environ.get("LOCALAPPDATA", "/tmp")) / "Temp" / "dw_wells_bcp"
-    work_dir.mkdir(parents=True, exist_ok=True)
+    # ONE SCRATCH ROOT WITH THE LOADERS. This resolved its own path --
+    # correctly, and it is where the pattern came from -- but a fourth
+    # separate literal is a fourth thing to find when a distribution has
+    # to redirect them. config.scratch_dir is that one place.
+    from dataview.core.config import scratch_dir as _scratch
+    work_dir = Path(_scratch("bcp"))
     csv_path = work_dir / "wells_gom.csv"
 
     try:
@@ -2862,6 +2906,208 @@ def _qry_basins(_engine) -> pd.DataFrame:
             """), con)
     except Exception:
         return pd.DataFrame()
+
+
+# ── A BASIN AS A SCOPE, NOT JUST A PICTURE ───────────────────────────────
+# THE BASINS ON THE MAP ARE NOT dv_basin. That table holds 0 rows and always
+# has; _add_basins draws a Marker at each centroid and there are no centroids
+# to draw. What is actually on screen is a registered spatial layer -- "EIA
+# Sedimentary Basins (Lower 48)", 32 POLYGON features whose GeoJSON lives in
+# dv_spatial_layer.geometry_wkt. Real outlines, which is what makes this
+# possible at all. dv_basin is left alone: it is a different, empty thing, and
+# deleting it is not this change's business.
+#
+# WHY AN OUTLINE AND NOT A BOX. Measured 4 Sep on ANADARKO: its bounding box
+# holds 291,855 wells and only 18% of them are inside the basin. A box drawn
+# round a basin is 82% wrong while looking exactly like an answer -- the
+# "wrong is worse than missing" case, in the one place where the operator is
+# most likely to trust it.
+BASIN_POPUP_LABEL = "Basin"
+
+
+def _is_basin_layer(layer) -> bool:
+    """Is this registered layer a set of basin outlines?
+
+    BY SHAPE AND NAME, not by layer_id. Pinning to the EIA layer's id would
+    make a second basin source -- a state's own outlines, a licensed set --
+    invisible to every part of this feature, and the failure would be silent.
+    """
+    return (str(layer.get("layer_type") or "").upper() == "POLYGON"
+            and "basin" in str(layer.get("layer_name") or "").lower())
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _basin_shapes(_engine, _v: int = 1) -> dict:
+    """{basin name: GeoJSON geometry} across every basin polygon layer.
+
+    GEOMETRY DICTS, NOT SHAPELY. This is what @st.cache_data stores, and a
+    plain dict is the thing least likely to break when a library version
+    moves under it -- the shapely object is rebuilt in _basin_cells, which is
+    itself cached, so nothing is parsed twice in practice.
+    """
+    out = {}
+    try:
+        with _engine.connect() as con:
+            rows = con.execute(text("""
+                SELECT layer_id, layer_name, layer_type, geometry_wkt
+                FROM dataview.dv_spatial_layer
+                WHERE active_ind = 'Y' AND geometry_wkt IS NOT NULL
+            """)).fetchall()
+    except Exception as exc:
+        _say("[map] basin shapes unavailable: %s" % str(exc)[:120])
+        return out
+    for _lid, _lname, _ltype, _gj in rows:
+        if not _is_basin_layer({"layer_type": _ltype, "layer_name": _lname}):
+            continue
+        try:
+            _fc = json.loads(_gj)
+        except Exception:
+            continue
+        for _f in (_fc.get("features") or []):
+            _p = _f.get("properties") or {}
+            # NAME, however this source spells it. The EIA set uses "Name";
+            # a shapefile is as likely to use NAME or BASIN_NAME, and a
+            # basin with no name cannot be offered in a picker anyway.
+            _nm = None
+            for _k in ("Name", "NAME", "name", "BASIN_NAME", "basin_name"):
+                if _p.get(_k):
+                    _nm = str(_p[_k]).strip()
+                    break
+            if not _nm or not _f.get("geometry"):
+                continue
+            out[_nm] = _f["geometry"]
+    return out
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _basin_cells(_engine, name: str, res: int, _v: int = 1) -> frozenset:
+    """The H3 cells whose CENTRE falls inside this basin outline.
+
+    CENTRE-IN-POLYGON, which is the containment rule the box->cells path
+    already uses -- a hexagon straddling the edge is half outside the basin,
+    and counting it would draw cells visibly outside the outline. Same rule,
+    a different shape, so the two gestures agree about what "inside" means.
+
+    h3.geo_to_cells takes the geo-interface directly, so MultiPolygons (4 of
+    the 32; APPALACHIAN is 10 separate parts) and interior rings both come
+    free. Holes are honoured -- checked against a synthetic square-with-hole
+    at a resolution finer than the hole, because the real basins' holes are
+    smaller than an R5 cell and a naive test says "not honoured" either way.
+
+    Measured: all 32 basins at R4 is 1,636 cells in 0.13s.
+    """
+    _g = (_basin_shapes(_engine) or {}).get(name)
+    if not _g:
+        return frozenset()
+    try:
+        from shapely.geometry import shape as _shape
+        import h3 as _h3
+        return frozenset(_h3.geo_to_cells(_shape(_g), int(res)))
+    except Exception as exc:
+        # DEGRADE TO NOTHING, LOUDLY. An empty set means "no constraint", and
+        # the caller must not read that as "this basin holds no hexes".
+        _say("[map] basin '%s' -> cells failed at R%s: %s"
+             % (name, res, str(exc)[:100]))
+        return frozenset()
+
+
+BASIN_NONE = "— no basin —"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _basin_bounds(_engine, name: str, _v: int = 1):
+    """[[min_lat, min_lon], [max_lat, max_lon]] for one basin, or None.
+
+    THE SHAPE THE fit_bounds RECEIVER EXPECTS, so picking a basin can move
+    the camera through the machinery that already exists rather than a
+    second one beside it -- the area selector sets _drawn_bounds the same
+    way, and its comment is the one that documents the format.
+
+    shapely's bounds are (minx, miny, maxx, maxy) -- LON first, because x is
+    longitude. Everything on this map is (lat, lon). Getting that backwards
+    is silent: the fit still runs and lands in the Indian Ocean.
+    """
+    _g = (_basin_shapes(_engine) or {}).get(name)
+    if not _g:
+        return None
+    try:
+        from shapely.geometry import shape as _shape
+        _w, _s, _e, _n = _shape(_g).bounds
+        return [[float(_s), float(_w)], [float(_n), float(_e)]]
+    except Exception as exc:
+        _say("[map] basin '%s' bounds failed: %s" % (name, str(exc)[:100]))
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _basin_hex_counts(_engine, res: int, _v: int = 1) -> dict:
+    """{basin name: hexes it holds in the REFERENCE grid at this resolution}.
+
+    SO THE PICKER CAN SAY WHICH BASINS HAVE ANYTHING. Three separate "nothing
+    happened" reports came down to picking a basin the data cannot answer for,
+    and each time the app only said so after the fact -- once in the log, once
+    in a message under the map. The count belongs on the option itself, where
+    it is read BEFORE the choice rather than explaining it afterwards.
+
+    ARKOMA is the case that forced this: it spans eastern Oklahoma and western
+    Arkansas, and well_master_public_v2 holds neither state. 0 wells in its
+    bounding box, so 0 hexes, forever, no matter which control is touched.
+    Its neighbours are fine -- ANADARKO 61, PERMIAN 77, APPALACHIAN 167 --
+    which is exactly what makes an empty one read as a broken feature.
+
+    EVERY SOURCE UNIONED, NOT THE REFERENCE ONE. The first cut counted only
+    well_ref and it got POWDER RIVER exactly backwards: 0 hexes there, 11 in
+    the loaded wells, because Teapot is in the Powder River basin and Wyoming
+    is not one of the reference master's 19 states. The label would have read
+    "no wells loaded" over the one basin this database actually has data for.
+    The union is the honest answer to "is there anything here at all", and it
+    is what the source dispatch calls "Everything".
+
+        basin           Loaded   Reference   Everything
+        POWDER RIVER        11           0           11
+        ANADARKO             0          61           61
+        ARKOMA               0           0            0
+
+    It does not move when the area picker does, so the label means one thing.
+    """
+    try:
+        _df = _qry_h3_grid(_engine, resolution=int(res), schema_filter=None)
+    except Exception as exc:
+        _say("[map] basin hex counts unavailable: %s" % str(exc)[:120])
+        return {}
+    if _df is None or _df.empty:
+        return {}
+    # WELLS AS WELL AS HEXES, and from the same pass. The hex count answers
+    # "will this basin draw anything"; the WELL count is what the operator is
+    # actually choosing between, and it is the quantity the hex->well handoff
+    # keys on -- so showing one without the other invites the reader to guess
+    # the relationship. Two dicts from one loop rather than a second cached
+    # function beside this one.
+    _have = _df.set_index(_df["h3"].astype(str))["well_count"]
+    _hex, _wells = {}, {}
+    for _nm in (_basin_shapes(_engine) or {}):
+        _c = _basin_cells(_engine, _nm, int(res))
+        _in = _have.index.intersection(_c)
+        _hex[_nm] = len(_in)
+        _wells[_nm] = int(_have.loc[_in].sum()) if len(_in) else 0
+    return {"hex": _hex, "wells": _wells}
+
+
+def _basin_scope() -> str:
+    """The basin currently constraining the map, or "" for none.
+
+    READS THE WIDGET'S OWN KEY, deliberately, so there is exactly one place
+    the scope lives. A second mirror key would be one more pair that has to
+    agree, and this file already records what that costs -- _clip_box and
+    _drawn_bounds disagreeing is how "clear box" came to be greyed out.
+
+    The CLICK path cannot write this key directly (scar #6: assigning a
+    widget's own key after the widget exists raises on a later run, on
+    whatever page draws next), so it leaves _basin_pick_request and the top
+    of run() consumes it before the selectbox is built.
+    """
+    _v = str(st.session_state.get("wm_basin_scope") or "")
+    return "" if _v in ("", BASIN_NONE) else _v
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -3227,6 +3473,14 @@ def _qry_h3_grid(_engine, resolution: int = 5,
 def _h3_resolution_for_zoom(zoom: float | int | None) -> int:
     """
     Pick an H3 resolution based on the current Folium zoom level.
+
+    DEAD CODE, AND ITS SIZES ARE WRONG -- noted 4 Sep, left in place because
+    correcting a function nobody calls is not worth a diff. R4's edge is
+    ~22.6 km, not ~370 km; the figures below are out by about three
+    resolutions throughout. If this is ever wired up, re-derive the
+    thresholds from measured cell counts per scope rather than trusting
+    them, and feed it gl._implied_zoom(bounds) -- Python never learns the
+    map's real zoom.
 
     Hex sizes vs zoom:
        zoom 3-4:   R4 (~370 km hex edge — continent view)
@@ -4380,7 +4634,6 @@ def _add_h3_layer(
         )
         _gj.add_to(m)
     return n_rendered
-
 
 
 def _add_drill_results_to_tray(wells: list[dict], replace: bool = False) -> int:
@@ -6980,13 +7233,28 @@ def _add_shapefile_layer(m, engine, layer):
     # through to the registered style exactly as it did. The loader that
     # wants per-feature colour writes the properties; the registry keeps
     # holding the default for everything else.
+    # ── EVERY REGISTERED POLYGON IS BACKDROP TO A WELL ───────────────────
+    # The class the .dv-bgpoly rule keys on: the FILL stops taking clicks so
+    # it cannot swallow one meant for a dot, and the OUTLINE keeps them so
+    # the polygon is still selectable. Confirmed in use -- "boundary works" --
+    # and left there deliberately.
+    #
+    # ALL POLYGON LAYERS, not just basins. The plays (50 features), the EORI
+    # Wyoming fields (1,378) and the Teapot structure and fault sets are the
+    # same shape of problem: large filled polygons added at 15894, after the
+    # wells at 15815. Lines are untouched -- no fill, nothing to swallow.
+    _bg_poly = str(layer.get("layer_type") or "").upper() == "POLYGON"
+
     def _style(feat, c=color, w=weight, o=opacity,
-               fc=fill_color, fo=fill_opacity, d=dash):
+               fc=fill_color, fo=fill_opacity, d=dash,
+               cl=("dv-bgpoly" if _bg_poly else None)):
         _p = (feat or {}).get("properties") or {}
         s = {"color": _p.get("_c") or c, "weight": w, "opacity": o,
              "fillColor": _p.get("_fc") or fc, "fillOpacity": fo}
         if d:
             s["dashArray"] = d
+        if cl:
+            s["className"] = cl
         return s
 
     # ── pipelines look like pipelines ─────────────────────────────
@@ -7051,8 +7319,92 @@ def _add_shapefile_layer(m, engine, layer):
         valid  = [f for f in tt_fields if f in sample]
         if valid:
             kw["tooltip"] = folium.GeoJsonTooltip(fields=valid, sticky=True)
-            kw["popup"]   = folium.GeoJsonPopup(fields=valid, max_width=300)
-    folium.GeoJson(gj, **kw).add_to(m)
+            # ── A BASIN'S POPUP CARRIES A SENTINEL ──────────────────────
+            # So that clicking the outline can BE the scope gesture. The
+            # click handler has no idea which layer it hit -- st_folium
+            # hands back popup TEXT and nothing else -- so the label is the
+            # only thing that can say "this was a basin". Exactly how
+            # FEDWELL_POPUP_LABEL tells a master header from a dv_well.
+            #
+            # Name field first, because the handler reads the name from the
+            # value beside the sentinel. tt_fields already puts it first for
+            # the EIA layer; sorting it here means a differently-registered
+            # basin source cannot break the click by listing area first.
+            _alias = None
+            if _is_basin_layer(layer):
+                _nf = next((f for f in valid
+                            if f.lower() in ("name", "basin_name")), None)
+                if _nf:
+                    valid = [_nf] + [f for f in valid if f != _nf]
+                    _alias = [BASIN_POPUP_LABEL] + [
+                        f.replace("_", " ") for f in valid[1:]]
+            kw["popup"] = folium.GeoJsonPopup(
+                fields=valid, aliases=_alias, max_width=300)
+    # ── AN INVISIBLE FAT OUTLINE, SO THE THIN ONE CAN BE HIT ────────────
+    # With the fill switched off by .dv-bgpoly, a 2px line is all that is
+    # left to click a basin by, and at continental zoom that is not a
+    # target. The hit pass is stroke-only (fill False) at weight 16 with
+    # opacity 0: pointer-events:stroke hits the stroke REGION whether or
+    # not it is painted -- that is what separates it from visibleStroke --
+    # so an unpainted band is still a target while the drawn line stays 2px.
+    #
+    # TWO PASSES, ONE FeatureGroup -- the pipeline casing above does exactly
+    # this, and for the same reason: the layer control must toggle a basin
+    # once, and one dataset showing as two entries is the clutter that makes
+    # people stop using the control.
+    #
+    # The hit pass carries the tooltip and the sentinel popup; the visible
+    # pass carries neither, so a click resolves one way and there is no
+    # second popup waiting behind the first.
+    if _is_basin_layer(layer) and gj.get("features"):
+        _grp_b = folium.FeatureGroup(name=f"{icon_ch} {layer_name}",
+                                     show=True)
+        folium.GeoJson(gj, style_function=_style).add_to(_grp_b)
+        _hit_kw = {"style_function": (lambda _f: {
+            "color": "#000000", "weight": 16, "opacity": 0.0,
+            "fill": False, "className": "dv-bgpoly"})}
+        for _k in ("tooltip", "popup"):
+            if _k in kw:
+                _hit_kw[_k] = kw[_k]
+        folium.GeoJson(gj, **_hit_kw).add_to(_grp_b)
+        _grp_b.add_to(m)
+        _gj_layer = _grp_b
+    else:
+        _gj_layer = folium.GeoJson(gj, **kw)
+        _gj_layer.add_to(m)
+    # ── AND A BASIN GETS PUSHED TO THE BACK ──────────────────────────────
+    # A basin is a continental sheet of 30%-opaque fill laid over everything
+    # the map is actually about, so it is worth drawing UNDER the dots
+    # rather than washed over them. Clicks it can only help, never settle:
+    # a lower layer still takes a click where nothing is above it, which is
+    # exactly the behaviour wanted -- a dot is a dot, the empty fill between
+    # the dots is the basin. The wells picker is what makes that reliable
+    # when the dots are dense; see the note beside .dv-pick-wells.
+    #
+    # BASINS ONLY, DELIBERATELY. bringToBack sends a layer to the very
+    # bottom, so calling it on every polygon would re-stack them in reverse
+    # and quietly undo display_order -- which matters where they overlap:
+    # Tensleep Structure, Tensleep Faults and the two Wall Creek sets are
+    # drawn over each other on purpose. One continental backdrop can be sent
+    # to the bottom safely; a pile of Teapot polygons cannot.
+    #
+    # AND AGAIN ON overlayadd, because toggling a layer off and on in the
+    # layer control re-adds it -- at the top. Without this the paint order
+    # survives exactly until someone uses the control that layer is listed
+    # in. (The click fix needs none of this; it is CSS.)
+    if _is_basin_layer(layer):
+        from branca.element import Template as _BTpl, MacroElement as _BME
+        _back = _BME()
+        _back._template = _BTpl(
+            "{% macro script(this, kwargs) %}"
+            " try {"
+            "  " + _gj_layer.get_name() + ".bringToBack();"
+            "  " + m.get_name() + ".on('overlayadd', function(e) {"
+            "   if (e.layer === " + _gj_layer.get_name() + ") {"
+            "    " + _gj_layer.get_name() + ".bringToBack(); } });"
+            " } catch (e) {}"
+            "{% endmacro %}")
+        m.add_child(_back)
 
 
 # =============================================================================
@@ -10746,6 +11098,83 @@ def run(engine=None):
         st.session_state["wm_clip_to_box"] = True
     if st.session_state.pop("_clip_off_request", False):
         st.session_state["wm_clip_to_box"] = False
+    # ── AND THE BASIN PICK, FOR EXACTLY THE SAME REASON ───────────
+    # Clicking a basin outline on the map asks for the scope; the click is
+    # handled far below, long after the selectbox has been built, so it
+    # cannot assign wm_basin_scope itself. It leaves the name here and this
+    # is the one moment the assignment is legal. Same door as the clip.
+    _bpick = st.session_state.pop("_basin_pick_request", None)
+    if _bpick is not None:
+        st.session_state["wm_basin_scope"] = str(_bpick) or BASIN_NONE
+    # ── A BASIN SCOPES THE HEXES, SO IT TURNS THE HEXES ON ────────────
+    # It constrains ONE layer, and with that layer off it constrains
+    # nothing -- which is exactly how it was reported: "I selected Anadarko
+    # from the drop down, didn't do anything." The log agreed and was more
+    # specific than the control was: 46 renders, h3=False on every one. The
+    # picker was doing its job perfectly and had nothing to do it to.
+    #
+    # CEREMONY, NOT A DECISION. Switching a layer on draws no new
+    # conclusion, writes nothing, and is one click to undo -- so doing it
+    # for the operator is the automation this codebase allows, where
+    # seeding an entity parent is the kind it forbids. The alternative is a
+    # message telling them to go and flip a toggle they have just implied.
+    #
+    # ON THE TRANSITION ONLY. Forcing it every render would make H3
+    # impossible to switch OFF while a basin was selected -- the same shape
+    # as the bug that made "✗ Clear wells" look dead, where suppression was
+    # re-lifted on every render instead of on the edge.
+    #
+    # HERE, because h3_layer_on is a widget's own key and this is before the
+    # toggle is built. Same door as the clip and the basin pick above.
+    _bnow = str(st.session_state.get("wm_basin_scope") or "")
+    _bprev = st.session_state.get("_basin_scope_prev")
+    st.session_state["_basin_scope_prev"] = _bnow
+    if (_bnow and _bnow != BASIN_NONE and _bnow != _bprev
+            and not st.session_state.get("h3_layer_on")):
+        st.session_state["h3_layer_on"] = True
+        st.session_state["grid_visible"] = True
+        _say("[map] basin '%s' picked with H3 off -- turning the hexes on"
+             % _bnow)
+    # ── AND FRAME IT ────────────────────────────────────────────────
+    # Choosing a basin and being left looking at the whole continent makes
+    # the scope read as "nothing happened" all over again -- the hexes did
+    # change, somewhere off in Oklahoma, at a zoom where 61 of them are a
+    # smudge. Framing it is the difference between a filter and a place.
+    #
+    # THE MACHINERY ALREADY EXISTS: _drawn_bounds + _drawn_bounds_oneshot is
+    # how the area selector auto-zooms, and the receiver pops the one-shot
+    # after a single fit. That matters here for a reason beyond tidiness --
+    # _layer_bounds reads _drawn_bounds FIRST, so a persistent value would
+    # quietly re-scope the reference wells to the basin's BOUNDING BOX,
+    # which is 74% larger than ANADARKO's outline. One shot, then gone.
+    #
+    # ON THE TRANSITION ONLY, so panning away from a basin you are still
+    # scoped to does not yank the camera back on the next rerun.
+    if _bnow and _bnow != BASIN_NONE and _bnow != _bprev:
+        _bb = _basin_bounds(engine, _bnow) if engine is not None else None
+        if _bb:
+            st.session_state["_drawn_bounds"] = _bb
+            st.session_state["_drawn_bounds_oneshot"] = True
+            # The fit is skipped when the bounds equal the last fit, so a
+            # basin re-picked after panning away would not move the camera.
+            st.session_state.pop("_last_fit_sig", None)
+            _say("[map] basin '%s' framed -> %.4f,%.4f .. %.4f,%.4f"
+                 % (_bnow, _bb[0][0], _bb[0][1], _bb[1][0], _bb[1][1]))
+    # ── AND THE DENSITY SOURCE, WHEN THE BASIN IS EMPTY IN IT ─────────
+    # Set far below, once the filter has proved the basin holds nothing in
+    # the current source. It cannot assign h3_density_source itself -- that
+    # selectbox is long since built by then -- so it leaves the request here.
+    # Same door as the clip, the basin pick and the H3 toggle.
+    #
+    # A NEW BASIN CLEARS THE "ALREADY TRIED" MARK, so each basin gets its own
+    # one shot at correcting the source. Without this, picking an empty basin
+    # and then a second empty one would leave the second showing a blank map
+    # with the marker still set from the first.
+    if _bnow != _bprev:
+        st.session_state.pop("_basin_src_tried", None)
+    _srcreq = st.session_state.pop("_h3_src_request", None)
+    if _srcreq:
+        st.session_state["h3_density_source"] = str(_srcreq)
 
 
     # ── Phased progress indicator at the top of the page ───────────────
@@ -13593,6 +14022,82 @@ def run(engine=None):
             if _h3_on and not st.session_state.get("_h3_layer_prev", _h3_on):
                 st.session_state["grid_visible"] = True
             st.session_state["_h3_layer_prev"] = _h3_on
+            # ── SCOPE THE HEXES TO A BASIN OUTLINE ──────────────────────
+            # HERE, BESIDE THE H3 TOGGLE, because that is what it constrains.
+            # It went in "Map display" first, which is where the legend and
+            # the colour pickers live -- a control that changes WHAT IS DRAWN
+            # filed under how it looks. This file has that mistake on record
+            # twice already (click-to-centre, "✗ Clear wells").
+            #
+            # Only when there are outlines to offer: with no basin layer
+            # registered the picker is a dropdown with one dead entry.
+            _basin_opts = sorted(_basin_shapes(engine) or {})
+            if _basin_opts:
+                # ── THE COUNT GOES ON THE OPTION ────────────────────────
+                # An empty basin is indistinguishable from a broken control
+                # until you pick it, and this map has 32 basins of which
+                # several cannot answer at all -- the reference master holds
+                # 19 states and Oklahoma and Arkansas are not among them.
+                # Saying so here costs one cached lookup and removes the
+                # whole class of "I picked a basin and nothing happened".
+                #
+                # A FORMATTER, NOT A RELABELLED OPTION LIST. format_func
+                # leaves the stored value the plain basin name, so the click
+                # path, _basin_scope() and every _say() still deal in
+                # "ANADARKO" and not "ANADARKO · 61 hex". Rewriting the
+                # options would have made the click path's name matching fail
+                # silently.
+                _bcounts = _basin_hex_counts(
+                    engine, int(st.session_state.get("h3_resolution", 4)))
+
+                def _basin_label(_n, _c=_bcounts.get("hex", {})):
+                    if _n == BASIN_NONE:
+                        return _n
+                    _k = _c.get(_n)
+                    if _k is None:
+                        return _n
+                    return "%s · %s" % (_n, ("%d hex" % _k) if _k
+                                        else "no wells loaded")
+
+                st.selectbox(
+                    "🏔 Basin scope", [BASIN_NONE] + _basin_opts,
+                    key="wm_basin_scope",
+                    format_func=_basin_label,
+                    on_change=_draw,
+                    help="Draw only the hexes whose centre falls inside this "
+                         "basin outline. Clicking a basin on the map sets it "
+                         "too; come back here to clear it. Picking a basin "
+                         "switches the hexes on, since that is what it "
+                         "constrains. Counts are hexes across every source "
+                         "at the current resolution — “no wells loaded” "
+                         "means no source has anything in that basin, which "
+                         "is a states-not-loaded problem, not a setting.")
+                # ── THE WELL COUNT, UNDER THE BOX THAT CHOSE IT ─────────
+                # The hex count is on the option; the WELL count is what the
+                # choice is really about, and it is the number the hex->well
+                # handoff turns on. It goes HERE rather than under the map
+                # because it is read while choosing -- _mapmsg flushes below
+                # the map, which is the wrong end of the page for a control.
+                #
+                # Across every source, matching the option labels, so the two
+                # numbers beside each other cannot disagree about what they
+                # are counting.
+                _bsel = _basin_scope()
+                if _bsel:
+                    _bw = (_bcounts.get("wells", {}) or {}).get(_bsel, 0)
+                    _bh = (_bcounts.get("hex", {}) or {}).get(_bsel, 0)
+                    if _bw:
+                        st.caption(
+                            "**%s** — %s well(s) in %s hex(es) at R%d%s"
+                            % (_bsel, format(_bw, ","), format(_bh, ","),
+                               int(st.session_state.get("h3_resolution", 4)),
+                               (" · wells draw automatically"
+                                if _bw <= H3_WELL_HANDOFF else "")))
+                    else:
+                        st.caption(
+                            "**%s** — no wells in any loaded source at R%d"
+                            % (_bsel,
+                               int(st.session_state.get("h3_resolution", 4))))
             # ── ON THE TRANSITION, NOT THE STEADY STATE ────────────────
             # This lifted suppression whenever the Wells toggle was ON, which
             # ran on EVERY render -- so "✗ Clear wells" set wells_suppressed
@@ -13705,6 +14210,66 @@ def run(engine=None):
         # (same grid_visible session key) so the user can hide hexes
         # without losing them.
         if _h3_on:
+            # ── HEX SIZE FOLLOWS THE SCOPE ──────────────────────────────
+            # "Keep hexes and change hex size." Python never learns the map's
+            # zoom -- three designs tried and the scar is in CLAUDE.md -- so
+            # this does not chase the viewport. It reads the bounds the app
+            # ITSELF set, which every gesture that matters produces: a drawn
+            # box, a picked basin, an exploded hex. gl._implied_zoom turns
+            # those into the zoom Leaflet will land on.
+            #
+            # ON A SCOPE CHANGE ONLY, and the operator always wins. Moving
+            # the slider sets _h3_res_manual and this stops driving until the
+            # scope changes again -- the same edge-not-steady-state rule that
+            # "✗ Clear wells" needed, for the same reason: re-deciding on
+            # every render is how a control becomes impossible to use.
+            #
+            # THRESHOLDS ARE MEASURED, not taste -- cells inside each real
+            # scope at each resolution, picking the band that keeps drawn
+            # hexes roughly 100-2,000:
+            #   lower 48   z 4.5 -> R4 (1,953 drawn nationally)
+            #   DENVER     z 6.7 -> R5 (570 in the outline)
+            #   drawn box  z 7.9 -> R5 (~217)
+            #   SAN JUAN   z 8.6 -> R6 (683)
+            #   small box  z11.3 -> R7 (99)
+            # The existing _h3_resolution_for_zoom is NOT used: it was
+            # written for the map's own zoom, its sizes are out by three
+            # resolutions, and feeding it these numbers puts DENVER at R7 --
+            # about 28,000 cells.
+            _scope_bb = None
+            _bs_now = _basin_scope()
+            if _bs_now and engine is not None:
+                _scope_bb = _basin_bounds(engine, _bs_now)
+            _scope_bb = (_clip_bounds_now() or _scope_bb
+                         or st.session_state.get("_drawn_bounds"))
+            _sig = repr(_scope_bb) if _scope_bb else ""
+            if _sig and _sig != st.session_state.get("_h3_res_sig"):
+                # A NEW SCOPE IS A NEW QUESTION, so it also releases a manual
+                # override. Without this the latch is permanent: one nudge of
+                # the slider and the size never follows a box again, which is
+                # the "control that quietly stops working" this file keeps
+                # collecting.
+                st.session_state["_h3_res_sig"] = _sig
+                st.session_state.pop("_h3_res_manual", None)
+                try:
+                    from dataview.mapping.geography_layers import (
+                        _implied_zoom as _giz)
+                    _sz = _giz((_scope_bb[0][0], _scope_bb[0][1],
+                                _scope_bb[1][0], _scope_bb[1][1]))
+                    _auto_r = (4 if _sz < 6 else 5 if _sz < 8
+                               else 6 if _sz < 10.5 else 7)
+                except Exception as _rexc:
+                    _sz, _auto_r = None, None
+                    _say("[map] auto resolution skipped: %s" % str(_rexc)[:90])
+                if _auto_r and int(
+                        st.session_state.get("h3_resolution", 4)) != _auto_r:
+                    st.session_state["h3_resolution"] = int(_auto_r)
+                    # A different resolution maps the same coords to a
+                    # different hex, so the click dedupe is stale.
+                    st.session_state.pop("_last_h3_click", None)
+                    _say("[map] scope fits at zoom ~%.1f -> R%d "
+                         "(auto; move the slider to override)"
+                         % (_sz, _auto_r))
             _h3_c1, _h3_c2 = st.columns([4, 6])
             with _h3_c1:
                 _cur_res = int(st.session_state.get("h3_resolution", 4))
@@ -13715,6 +14280,12 @@ def run(engine=None):
 
                 )
                 if _h3_res_choice != _cur_res:
+                    # THE OPERATOR JUST OVERRODE THE AUTO PICK. Latched until
+                    # the scope changes, so the automatic size stops fighting
+                    # a deliberate choice -- and resumes on the next box or
+                    # basin, which is a new question rather than the same one
+                    # answered twice.
+                    st.session_state["_h3_res_manual"] = True
                     st.session_state["h3_resolution"] = int(_h3_res_choice)
                     # Clear stale click dedupe — a different resolution maps
                     # the same coords to a different hex.
@@ -14510,9 +15081,19 @@ def run(engine=None):
                 try:
                     # SAY WHICH SOURCE, because the difference between
                     # them is 40x and it was invisible.
-                    _say("[map] H3 R%d density source=%s"
+                    #
+                    # AND SAY WHETHER A BASIN IS SCOPING IT, on the SAME line,
+                    # every render -- including when the answer is "none".
+                    # "All hexes are drawn now, not just the Anadarko basin"
+                    # took an inference from two ABSENT log lines to diagnose:
+                    # the filter logs when it runs and says nothing when there
+                    # is no scope, so a scope that got cleared and a filter
+                    # that broke look identical in the log. They have nothing
+                    # in common as repairs. A state worth reading is worth
+                    # printing even when it is empty.
+                    _say("[map] H3 R%d density source=%s basin=%s"
                          % (_h3_res, _h3_schema or "ALL ARMS (4M reference "
-                            "included)"))
+                            "included)", _basin_scope() or "none"))
                     _phase(15, f"🔶 Querying density view R{_h3_res}…")
                     _h3_df = _qry_h3_grid(engine, resolution=_h3_res,
                                           schema_filter=_h3_schema)
@@ -14559,12 +15140,201 @@ def run(engine=None):
                     # it: they answer different questions and both can be on.
                     # _clip_bounds_now() returns None unless the operator
                     # asked AND an extent exists.
+                    # ── WHERE THE HEXES WENT ────────────────────────────
+                    # Four things can empty this frame -- the query, the
+                    # state/county constraint, the box, the basin -- and the
+                    # message at the end used to blame the FIRST one whatever
+                    # happened: "Density views may not exist, run
+                    # create_v_well_density_h3.sql". The view had just
+                    # returned 1,953 rows. Reported 4 Sep, alongside a second
+                    # message of mine that was wrong the same way ("DENVER
+                    # holds no wells... it needs the states loading" -- DENVER
+                    # has 49 hexes and 8,576 wells).
+                    #
+                    # Both sent the operator to repair data that was fine.
+                    # That is the "wrong is worse than missing" law: a blank
+                    # map is visible, a confident wrong cause is not. So the
+                    # counts are kept and the message names the stage that
+                    # actually took them.
+                    _h3_stage = [("query", len(_h3_df))]
                     _clipb = _clip_bounds_now()
                     if _clipb is not None:
                         _n_before = len(_h3_df)
-                        _h3_df = _clip_h3_df(_h3_df, _clipb)
-                        _say("[map] clip: hexes %d -> %d"
-                             % (_n_before, len(_h3_df)))
+                        _kept = _clip_h3_df(_h3_df, _clipb)
+                        # ── A SELECTED HEX SURVIVES THE CLIP ────────────
+                        # The clip keeps hexes whose CENTRE is in the box, so
+                        # a box drawn INSIDE a hexagon clips away the very hex
+                        # it just selected -- the fallback above picks the
+                        # right cell and this would throw it straight out
+                        # again, leaving the blank map the fallback exists to
+                        # prevent. Selecting a thing and then hiding it is
+                        # never the answer, whichever rule each half is using.
+                        _selnow = set(str(c) for c in
+                                      (st.session_state.get(
+                                          "selected_h3_cells") or []))
+                        if _selnow:
+                            _back = _h3_df[
+                                _h3_df["h3"].astype(str).isin(_selnow)]
+                            if len(_back):
+                                _kept = pd.concat(
+                                    [_kept, _back]).drop_duplicates(
+                                        subset=["h3"]).reset_index(drop=True)
+                        _h3_df = _kept
+                        _say("[map] clip: hexes %d -> %d%s"
+                             % (_n_before, len(_h3_df),
+                                (" (%d selected kept)" % len(_selnow))
+                                if _selnow else ""))
+                        _h3_stage.append(("the drawn box", len(_h3_df)))
+                    # ── AND THE BASIN OUTLINE, IF ONE IS THE SCOPE ───────
+                    # AFTER the box, not instead of it, for the same reason
+                    # the box comes after the state/county constraint: they
+                    # answer different questions and both can be on. A basin
+                    # picked with a box already drawn means "these hexes, in
+                    # this basin", which is a narrower and perfectly sensible
+                    # request.
+                    #
+                    # THE SET IS THE FILTER. _basin_cells returns the cells
+                    # whose centre lies in the outline at THIS resolution, so
+                    # the test is a membership check on a frozenset -- no
+                    # geometry per hex, and it stays correct when the
+                    # operator changes resolution because the resolution is
+                    # part of the cache key.
+                    _bscope = _basin_scope()
+                    if _bscope:
+                        _bcells = _basin_cells(engine, _bscope, int(_h3_res))
+                        if _bcells:
+                            _n_before = len(_h3_df)
+                            _h3_df = _h3_df[
+                                _h3_df["h3"].astype(str).isin(_bcells)
+                            ].reset_index(drop=True)
+                            _say("[map] basin '%s': hexes %d -> %d (R%d, "
+                                 "%d cell(s) in the outline)"
+                                 % (_bscope, _n_before, len(_h3_df),
+                                    int(_h3_res), len(_bcells)))
+                            _h3_stage.append(("the %s outline" % _bscope,
+                                              len(_h3_df)))
+                            # SAY THAT THE SOURCE MOVED, on the render where
+                            # the result of moving it is on screen. A control
+                            # that changes itself and says nothing is the
+                            # thing this file warns about; a control that
+                            # changes itself and tells you why is a shortcut.
+                            _sw = st.session_state.pop(
+                                "_basin_src_switched", None)
+                            if _sw:
+                                _mapmsg.info(
+                                    "🏔 **%s** has no wells in **%s**, so the "
+                                    "density source switched to **Reference "
+                                    "(4M)** — %s hex(es) in the basin. Switch "
+                                    "it back above if you meant loaded wells."
+                                    % (_sw[0], _sw[1],
+                                       "{:,}".format(len(_h3_df))))
+                            # ── AN EMPTY BASIN IS A SILENT ENDING ───────
+                            # "Selected a basin from the drop down, nothing."
+                            # It was not nothing: the scope worked and the
+                            # grid it filtered held 12 hexes, because Density
+                            # source was "Loaded wells" -- dv_well, 84,519
+                            # wells nearly all in Wyoming. ARKOMA, DENVER and
+                            # APPALACHIAN hold none of them, so 12 -> 0 was
+                            # the correct answer to the question asked.
+                            #
+                            # The log said so and the SCREEN did not, which is
+                            # the same failure the box handler already lists
+                            # four times over: an empty map cannot tell "the
+                            # scope is wrong" from "there is nothing here" from
+                            # "the control is broken". Name the source and the
+                            # counts, because the repair is a different
+                            # control than the one they just used.
+                            #
+                            # Measured: ANADARKO keeps 0 of 12 on "Loaded
+                            # wells" and 61 of 1,953 on "Reference (4M)".
+                            if _n_before and not len(_h3_df):
+                                # ── DON'T TELL THEM TO GO AND FIX IT ────
+                                # The first version of this printed a tidy
+                                # message naming the other control. That is
+                                # not a fix, it is a footnote: "pick a basin"
+                                # cannot secretly depend on a second setting
+                                # the operator has no reason to connect to it.
+                                # Reported, correctly, as "you're saying I
+                                # have to also pick the density source???"
+                                #
+                                # WHAT MAKES THE SWITCH HONEST is that the
+                                # CONTROL MOVES WITH IT. The thing this file
+                                # warns about -- "why is the gold master even
+                                # involved, I did not ask for it" -- was a
+                                # fallback that counted the reference master
+                                # while the picker still read "Loaded wells".
+                                # The lie was the mismatch, not the source.
+                                # Here the picker changes, a line says so, and
+                                # switching back is one click.
+                                #
+                                # ONCE PER (BASIN, SOURCE), which is what
+                                # keeps it from fighting the operator AND
+                                # from looping. After the switch the source IS
+                                # Reference, so the first test fails and an
+                                # still-empty basin gets the message instead.
+                                # And if they deliberately switch BACK to
+                                # Loaded wells on the same basin, the tried
+                                # key matches and it stays where they put it.
+                                _try_key = (_bscope, _h3_src_pick)
+                                if (_h3_src_pick != "Reference (4M)"
+                                        and st.session_state.get(
+                                            "_basin_src_tried") != _try_key):
+                                    st.session_state["_basin_src_tried"] = \
+                                        _try_key
+                                    st.session_state["_h3_src_request"] = \
+                                        "Reference (4M)"
+                                    st.session_state["_basin_src_switched"] = \
+                                        (_bscope, _h3_src_pick)
+                                    _say("[map] basin '%s' is empty in '%s' "
+                                         "(%d hex(es)) -- switching density "
+                                         "source to Reference (4M)"
+                                         % (_bscope, _h3_src_pick, _n_before))
+                                    st.rerun()
+                                # NAME THE CAUSE, NOT THE SYMPTOM. This said
+                                # the basin was empty "in Reference (4M) --
+                                # the only source with national coverage is
+                                # Reference (4M)", which is both circular and
+                                # useless: it describes the control instead of
+                                # the data. ARKOMA is empty because
+                                # well_master_public_v2 holds 19 states and
+                                # neither Oklahoma nor Arkansas is one of
+                                # them. That is a loading job, not a setting,
+                                # and no amount of clicking will change it.
+                                _mapmsg.warning(
+                                    # ── ONLY BLAME THE DATA IF IT IS THE
+                                    # DATA. This said the basin's states were
+                                    # not loaded, full stop -- and said it
+                                    # about DENVER, which has 49 hexes and
+                                    # 80,496 wells. The box had simply been
+                                    # drawn outside the outline. It sent the
+                                    # operator to load states that were
+                                    # already there, which is the exact
+                                    # failure "wrong is worse than missing"
+                                    # names: a blank map is visible, a
+                                    # confident wrong cause is not.
+                                    #
+                                    # _bcells is the basin's cells that HOLD
+                                    # WELLS, so it separates the two cases
+                                    # cleanly and needs no extra query.
+                                    ("🏔 **%s** and your box do not overlap "
+                                     "— the basin has %s hex(es) with wells, "
+                                     "none of them inside the box. Clear the "
+                                     "box, or draw one inside the outline."
+                                     % (_bscope, format(len(_bcells), ","))
+                                     if _clipb is not None else
+                                     "🏔 **%s** holds no wells in any loaded "
+                                     "source at R%d. The reference master "
+                                     "does not cover this basin's states yet "
+                                     "— that needs the states loading, not a "
+                                     "setting on this page."
+                                     % (_bscope, int(_h3_res))))
+                        else:
+                            # SAY IT RATHER THAN DRAWING EVERYTHING. An empty
+                            # set is "could not compute", not "no hexes here",
+                            # and silently ignoring the scope would show the
+                            # whole continent under a basin's name.
+                            _say("[map] basin '%s': no cells resolved -- "
+                                 "scope NOT applied" % _bscope)
                     if not _h3_df.empty:
                         _phase(50, f"🔶 Rendering {len(_h3_df):,} hexes…")
                         # Selected hexes from session state — same buffer
@@ -14576,24 +15346,139 @@ def run(engine=None):
                         _h3_interactive = (
                             st.session_state.get("gom_sel_mode", "Cells") == "Cells"
                         )
-                        _hex_count = _add_h3_layer(
-                            m, _h3_df,
-                            selected_set=_sel_h3,
-                            interactive=_h3_interactive,
-                        )
+                        # ── COUNT FIRST, THEN DECIDE WHETHER TO DRAW ────
+                        # The hexes GIVE WAY below the threshold, so the
+                        # count has to be known before the layer is built --
+                        # drawing them and hiding them afterwards would pay
+                        # the serialisation for something nobody sees.
                         _total_wells = int(_h3_df["well_count"].sum())
+                        _hand_over = (0 < _total_wells <= H3_WELL_HANDOFF)
+                        if _hand_over:
+                            # WELLS INSTEAD OF HEXES, not as well as. A
+                            # hexagon round nine wells is a box round nine
+                            # dots you could simply look at; the wells ARE
+                            # the answer at that density, and leaving the
+                            # hexes on top of them is the thing that made
+                            # this handoff invisible in the first place --
+                            # the wells were already drawing under a box and
+                            # nothing on screen changed at the threshold.
+                            #
+                            # Precedent: exploding a hex already replaces it
+                            # with its wells rather than showing both, and
+                            # _refwell_zoom_gate hides the hexes to do it.
+                            _hex_count = 0
+                            _say("[map] hexes give way: %d well(s) at or "
+                                 "under %d -- drawing the wells instead of "
+                                 "%d hex(es)"
+                                 % (_total_wells, H3_WELL_HANDOFF,
+                                    len(_h3_df)))
+                        else:
+                            _hex_count = _add_h3_layer(
+                                m, _h3_df,
+                                selected_set=_sel_h3,
+                                interactive=_h3_interactive,
+                            )
                         _sel_note = (f" · {len(_sel_h3)} selected"
                                      if _sel_h3 else "")
-                        _mapmsg.info(
-                            f"🔶 H3 R{_h3_res}: {_hex_count:,} hexes · "
-                            f"{_total_wells:,} wells aggregated{_sel_note}"
-                        )
+                        # ── THE HANDOFF, decided above as _hand_over ────
+                        # THE COUNT IS FREE. _total_wells is the sum over the
+                        # hexes that survived every filter, so it already
+                        # respects the box, the state constraint and the
+                        # basin outline -- it is "the wells this picture
+                        # represents", which is exactly the quantity the
+                        # decision is about. No extra query, and it cannot
+                        # drift from the picture the way a separately-derived
+                        # scope would.
+                        #
+                        # AFFORDABLE, MEASURED: 20,000 markers cost ~0.4s of
+                        # browser time and 10,000 about 0.16s, so the handoff
+                        # is nowhere near what makes a render slow. The 4s
+                        # this page spends is the st_folium round trip, and
+                        # drawing wells does not add to it materially.
+                        _auto_wells = _hand_over
+                        if _auto_wells:
+                            st.session_state["_h3_handoff_wells"] = True
+                            # ── AND THE BOUNDS TO DRAW THEM IN ──────────
+                            # The handoff has to carry its own scope. Without
+                            # it the well layer falls back to _layer_bounds,
+                            # which is None when a BASIN is the only thing
+                            # scoping the map -- and an unbounded reference
+                            # layer is 46,602 wells of the wrong continent
+                            # drawn under a basin's name. Wrong is worse than
+                            # missing, and this one would look right.
+                            #
+                            # The hexes THEMSELVES are the honest bounds:
+                            # they are what is on screen, already filtered by
+                            # the box, the state and the basin outline, and
+                            # read from geometry the app drew rather than a
+                            # viewport Python cannot see.
+                            _hb = _bounds_of_h3_cells(
+                                [str(c) for c in _h3_df["h3"].tolist()])
+                            if _hb:
+                                st.session_state["_h3_handoff_bounds"] = _hb
+                            else:
+                                st.session_state.pop("_h3_handoff_bounds",
+                                                     None)
+                            _say("[map] hex->well handoff: %d well(s) in the "
+                                 "drawn hexes, at or under %d -- turning the "
+                                 "reference wells on%s"
+                                 % (_total_wells, H3_WELL_HANDOFF,
+                                    ("" if _hb else
+                                     " (NO BOUNDS derived -- not scoped)")))
+                        else:
+                            st.session_state.pop("_h3_handoff_wells", None)
+                            st.session_state.pop("_h3_handoff_bounds", None)
+                        # SAY THE HEXES WENT, and why. A count of "0 hexes"
+                        # beside a map that just changed completely reads as
+                        # a failure; naming the handoff makes it a decision.
+                        if _auto_wells:
+                            _mapmsg.info(
+                                f"📍 {_total_wells:,} well(s) here — under "
+                                f"{H3_WELL_HANDOFF:,}, so the hexes have "
+                                f"given way to the wells themselves. Zoom "
+                                f"out or widen the area for hexes again."
+                                f"{_sel_note}")
+                        else:
+                            _mapmsg.info(
+                                f"🔶 H3 R{_h3_res}: {_hex_count:,} hexes · "
+                                f"{_total_wells:,} wells aggregated"
+                                f"{_sel_note}")
                     else:
-                        _mapmsg.warning(
-                            f"🔶 H3 R{_h3_res}: no data. Density views "
-                            f"may not exist — run "
-                            f"create_v_well_density_h3.sql first."
-                        )
+                        # ── NAME THE STAGE THAT EMPTIED IT ──────────────
+                        # This blamed the density views unconditionally --
+                        # "may not exist, run create_v_well_density_h3.sql" --
+                        # on a render where the view had just returned 1,953
+                        # rows and a drawn box removed all of them. It sent
+                        # the operator to rebuild healthy SQL. Reported 4 Sep
+                        # together with a message of mine that was wrong the
+                        # same way.
+                        #
+                        # _h3_stage carries (label, count) after each filter,
+                        # so the first stage that reached zero is the honest
+                        # answer, and every one of them has a different
+                        # repair: the view, the area picker, the box, the
+                        # basin.
+                        _culprit = None
+                        for _sname, _scount in _h3_stage:
+                            if not _scount:
+                                _culprit = _sname
+                                break
+                        if _culprit == "query" or not _h3_stage:
+                            _mapmsg.warning(
+                                f"🔶 H3 R{_h3_res}: the density view returned "
+                                f"nothing. If this is the first run, the "
+                                f"views may not exist — "
+                                f"create_v_well_density_h3.sql builds them.")
+                        else:
+                            _mapmsg.warning(
+                                "🔶 H3 R%d: the density data is fine (%s "
+                                "hexes) — **%s** removed all of them. Clear "
+                                "it to get the hexes back."
+                                % (_h3_res, format(_h3_stage[0][1], ","),
+                                   _culprit or "a filter"))
+                        _say("[map] H3 empty: stages %s"
+                             % " -> ".join("%s=%d" % (_s, _c)
+                                           for _s, _c in _h3_stage))
                 except Exception as _e:
                     _phase(100)
                     # THE TRACEBACK GOES TO THE LOG. "H3 render skipped:
@@ -15306,8 +16191,19 @@ def run(engine=None):
                 # made the gesture look broken: the hexes took the click,
                 # turned blue, and nothing else happened.
                 _hex_pick = list(st.session_state.get("selected_h3_cells") or [])
+                # ── AND THE HANDOFF, which is a fourth way to ask ────────
+                # Set by the hex block above when the hexes on screen
+                # represent H3_WELL_HANDOFF wells or fewer. It reads as a
+                # request for the wells because that is what it is: at that
+                # density the hexagon has stopped being the answer.
+                #
+                # Session state rather than a local, because the hex block is
+                # ~800 lines up and inside a different try/except -- a local
+                # would have to be initialised on every path out of it, and
+                # this file's own history says which of those gets forgotten.
                 if ("geo_refwells" in active_db or _hex_pick
-                        or _clip_bounds_now()):
+                        or _clip_bounds_now()
+                        or st.session_state.get("_h3_handoff_wells")):
                     # INDIVIDUAL reference wells, which the density layer
                     # cannot give: v_well_density_r* answers "where are wells"
                     # for 3.9M rows, never "which wells are these".
@@ -15322,6 +16218,20 @@ def run(engine=None):
                         # _layer_bounds, not session state: the camera's
                         # oneshot pop has already run by now.
                         _rb = _layer_bounds
+                        # ── THE HANDOFF'S OWN BOUNDS, when nothing else has
+                        # any. Only as a FALLBACK: a drawn box or a clicked
+                        # hex is a deliberate statement of scope and still
+                        # wins below. This covers the case those two do not
+                        # -- a basin picked and nothing drawn -- where
+                        # _layer_bounds is None and an unbounded reference
+                        # layer would quietly draw the wrong continent.
+                        if _rb is None:
+                            _rb = st.session_state.get("_h3_handoff_bounds")
+                            if _rb:
+                                _say("[map] refwells scoped by the handoff's "
+                                     "hexes -> %.4f,%.4f .. %.4f,%.4f"
+                                     % (_rb[0][0], _rb[0][1],
+                                        _rb[1][0], _rb[1][1]))
                         # A SELECTED HEX SCOPES THIS LAYER AND ONLY THIS ONE.
                         # Clicking a hex asks "which wells are these", so it
                         # beats the drawn box HERE -- but townships and leases
@@ -15388,20 +16298,51 @@ def run(engine=None):
                         # indistinguishable. A discarded diagnostic makes the
                         # next failure undiagnosable -- so name the bounds it
                         # actually received.
+                        # ── SAMPLED IS NOT THE SAME AS UNBOUNDED ────────
+                        # Both messages here said it was. "a spread sample
+                        # across the WHOLE VIEW. Draw a box or pick an area"
+                        # was printed with a box already drawn and its bounds
+                        # in the very same log line; the log said "over the
+                        # 50,000 cap" when the ceiling that bound was 20,000.
+                        # Reported 4 Sep, and both were written before the
+                        # coarse-zoom ceiling existed -- a BOUNDED box now
+                        # samples too, whenever it is drawn from far enough
+                        # out. Telling the operator to do the thing they have
+                        # just done is worse than saying nothing.
+                        #
+                        # AND THE FILE IS NOT SAMPLED EITHER, which is the
+                        # part that matters most here: the download re-runs
+                        # the scope query, so it holds every well in the box
+                        # whatever the map drew. Saying so is the difference
+                        # between "this is thinned" and "the picture is
+                        # thinned".
+                        _samp = _rscope is None
                         _say("[map] geo layer geo_refwells    drew %s  "
                              "(bounds=%s, %s)"
                              % (_rn,
                                 ("%.4f,%.4f..%.4f,%.4f"
                                  % (_rb[0][0], _rb[0][1], _rb[1][0], _rb[1][1])
                                  if _rb else "NONE"),
-                                "exact" if _rscope is not None
-                                else "SAMPLED (scope over the 50,000 cap)"))
-                        _mapmsg.info(
-                            f"🔵 Drew {_rn:,} reference well(s)"
-                            + ("" if _rscope is not None else
-                               " — a spread sample across the whole view. "
-                               "Draw a box or pick an area to see every well "
-                               "in it."))
+                                "exact" if not _samp
+                                else ("SAMPLED within the box"
+                                      if _rb else "SAMPLED, no bounds")))
+                        if not _samp:
+                            _mapmsg.info(
+                                f"🔵 Drew {_rn:,} reference well(s) — every "
+                                f"well in the area.")
+                        elif _rb:
+                            _mapmsg.info(
+                                f"🔵 Drew {_rn:,} reference well(s) — a "
+                                f"spread sample of the wells **inside your "
+                                f"area**, thinned so the browser can draw "
+                                f"them. Zoom in for every well on screen; "
+                                f"the header download already holds them all."
+                            )
+                        else:
+                            _mapmsg.info(
+                                f"🔵 Drew {_rn:,} reference well(s) — a "
+                                f"spread sample across the whole map. Draw a "
+                                f"box or pick a basin to scope it.")
                     # NOT "as _re". "except ... as X" binds X as a LOCAL for
                     # the WHOLE function, so this one line shadowed the
                     # module-level "import re as _re" everywhere in run() --
@@ -16432,9 +17373,46 @@ def run(engine=None):
 // reverse, so a well under a seismic line or a lease polygon was the
 // one thing you could not reliably click. Armed, every vector path
 // stops taking clicks and only markers do.
-+ ".dv-pick-wells .leaflet-overlay-pane path"
+//
+// EXCEPT THAT A REFERENCE WELL IS NOT A MARKER. "Only markers" was true
+// when a well meant a folium.Marker pin in the marker pane. The
+// reference-well layer draws CircleMarkers, and a CircleMarker is an SVG
+// PATH in the overlay pane -- so this rule switched off the basin, the
+// leases and the seismic AND the wells it was armed to select. Reported
+// 4 Sep: the toggle "stops the basin swallowing clicks but does not
+// allow me to choose a well and get a popup". It was doing exactly what
+// it said and what it said was half a rule.
+//
+// Same shape as the two seismic rules above: exempt the class that IS
+// the target, rather than trusting a pane to sort them.
++ ".dv-pick-wells .leaflet-overlay-pane path:not(.dv-refwell)"
 + "{pointer-events:none !important;}"
++ ".dv-pick-wells .leaflet-overlay-pane path.dv-refwell"
++ "{pointer-events:auto !important;}"
 + ".dv-pick-wells .leaflet-marker-pane{pointer-events:auto;}"
+// A BACKDROP POLYGON'S FILL MUST NOT TAKE A CLICK ───────────────────
+// Registered layers are added at 15894 and the reference wells at 15815,
+// so every polygon lands on top of the dots inside it -- and a filled SVG
+// path is hit across its whole area whether or not you can see through
+// it. Reported as "I can't select a well for a popup because the basin is
+// on top of the wells". The plays, the 1,378 EORI fields and the Teapot
+// structure and fault sets are the same shape, so they get the same rule.
+//
+// THE OUTLINE STAYS LIVE, and that is what selects the polygon -- settled
+// in use: "Boundary works. Just leave it at that." The invisible 16px hit
+// band beside the basin draw is what makes that a comfortable target
+// rather than a 2px one.
+//
+// pointer-events:stroke IS ORDER-INDEPENDENT, which bringToBack is not: a
+// layer re-added by the layer control comes back on top, and this rule
+// does not care.
+//
+// If it is ever revisited, the fuller mechanism is a dedicated Leaflet
+// pane for the well dots (createPane + a zIndex above overlayPane), which
+// gives clickable fills AND reachable wells at once where CSS must pick
+// one. It needs markersInheritOptions so the child CircleMarkers land in
+// that pane -- which is why it was not bolted on here.
++ ".dv-bgpoly{pointer-events:stroke !important;}"
 + ".dv-pick-2d .leaflet-overlay-pane path.dv-seis-2d:not(.dv-hit)"
 + "{stroke-width:5px !important;}"
 + ".dv-pick-3d .leaflet-overlay-pane path.dv-seis-3d"
@@ -17232,6 +18210,129 @@ def run(engine=None):
         # be _mapmsg.empty() -- clearing a placeholder that sat ABOVE the map
         # and had already pushed it down for the whole render.
         _mapmsg.flush(st.container())
+
+        # ── A STARTER SET: the headers for the wells on screen ───────────
+        # The reference wells are agency master headers -- no logs, no tops,
+        # no production -- so the scout-ticket workbook has nothing to say
+        # about them and clicking one is deliberately ignored. What they ARE
+        # good for is exactly this: a list of the wells in an area to begin a
+        # project from. That needs no seeding into dv_well and no tray.
+        #
+        # THE SCOPE, NOT THE PICTURE. geography_layers records both -- the
+        # query that DREW and the query for everything in the same box -- and
+        # this uses the second. The map samples because a browser cannot
+        # paint 191,389 markers; a CSV has no such limit, so shipping a
+        # thinned file because the picture had to be thinned answers a
+        # question nobody asked. "What good does a sample do?" -- none here,
+        # and the sample is gone from the download.
+        #
+        # A BOX IS REQUIRED, and that is the other half of the same decision.
+        # With no box, no hex and no basin the predicate is "has
+        # coordinates": 3.1M wells, ~400 MB. Capping that silently would
+        # hand over a truncated starter set, which is the one failure the
+        # operator cannot see by looking at the file.
+        #
+        # ── BELOW THE MAP, AND THAT IS WHY ──────────────────────────────
+        # It sat beside "Colour reference wells by", ~2,300 lines ABOVE the
+        # st_folium call, and reported the PREVIOUS render's draw: turn the
+        # reference-well chip on and the download was not there until the
+        # next interaction. Driven in a live session to confirm it, which is
+        # the only way that shows -- the count was right, it was simply one
+        # render behind.
+        #
+        # Here it runs AFTER add_reference_wells, so _REFWELL_DRAWN already
+        # holds this render's draw and the count on the expander is the layer
+        # the operator is looking at, on the render they are looking at it.
+        #
+        # Still process-level, for the reason db_pool is: it has to survive
+        # the rerun that pressing the button causes.
+        from dataview.mapping.geography_layers import (
+            refwell_drawn_frame as _rw_frame,
+            refwell_drawn_info as _rw_info)
+        _hn, _hsampled, _, _hbounded = _rw_info()
+        if _hn:
+            with st.expander("⬇ Well headers — starter set", expanded=False):
+                st.caption(
+                    "**Every** reference well in the drawn area, as its "
+                    "master header columns — name, UWI, operator, county, "
+                    "state, type, status, TD, spud and location. Agency "
+                    "headers, not loaded wells: nothing here has logs, tops "
+                    "or production until it is loaded.")
+                if not _hbounded:
+                    # NO BOX IS NOT A SCOPE. Refused rather than capped: a
+                    # 3.1M-well file truncated to fit is indistinguishable
+                    # from a complete one once it is on disk.
+                    st.info(
+                        "Draw a box, click a hex or pick a basin first — "
+                        "with nothing selected this would be every well in "
+                        "the master, which is not a starter set.")
+                elif _hsampled:
+                    # THE MAP SAMPLED; THE FILE DOES NOT. Said plainly,
+                    # because the operator can SEE a thinned map and would
+                    # reasonably assume the file matches it.
+                    st.caption(
+                        "The map is showing a thinned sample of these wells "
+                        "so the browser can draw them — **the file is not "
+                        "thinned**, it holds every well in the area.")
+                # DISABLED, NOT HIDDEN, when there is no box: the message
+                # above says what to do, and a button that vanished would
+                # leave the reader wondering whether the feature exists.
+                if st.button("Prepare the file", key="refhdr_prep",
+                             disabled=not _hbounded,
+                             use_container_width=True):
+                    with st.spinner("Reading %s well header(s)…"
+                                    % format(_hn, ",")):
+                        st.session_state["_refhdr_df"] = _rw_frame(engine)
+                _hdf = st.session_state.get("_refhdr_df")
+                if _hdf is not None:
+                    if _hdf.empty:
+                        # THE TWO EMPTIES ARE NOT THE SAME. Nothing drawn and
+                        # a query that failed read identically on screen, and
+                        # they have different repairs.
+                        st.warning(
+                            "No rows came back. Either the layer has been "
+                            "redrawn since, or the query failed — the log "
+                            "line beginning `[geography_layers] refwell "
+                            "header frame` says which.")
+                    else:
+                        _csv = _hdf.to_csv(index=False).encode("utf-8")
+                        _c1, _c2 = st.columns(2)
+                        with _c1:
+                            st.download_button(
+                                "⬇ CSV (%.1f MB)" % (len(_csv) / 1048576.0),
+                                _csv, file_name="reference_well_headers.csv",
+                                mime="text/csv", key="refhdr_csv",
+                                use_container_width=True)
+                        with _c2:
+                            # EXCEL IS CAPPED AND CSV IS NOT. openpyxl holds
+                            # every cell as an object while it writes, so a
+                            # six-figure sheet is minutes and hundreds of MB
+                            # of RAM for a file whose only advantage is that
+                            # it opens with a double click. Past the cap the
+                            # CSV beside it is the answer, and it says so.
+                            if len(_hdf) <= _REFHDR_XLSX_MAX:
+                                import io as _io
+                                _buf = _io.BytesIO()
+                                with pd.ExcelWriter(_buf,
+                                                    engine="openpyxl") as _w:
+                                    _hdf.to_excel(_w, index=False,
+                                                  sheet_name="well_header")
+                                st.download_button(
+                                    "⬇ Excel (%.1f MB)"
+                                    % (_buf.tell() / 1048576.0),
+                                    _buf.getvalue(),
+                                    file_name="reference_well_headers.xlsx",
+                                    mime=("application/vnd.openxmlformats-"
+                                          "officedocument.spreadsheetml."
+                                          "sheet"),
+                                    key="refhdr_xlsx",
+                                    use_container_width=True)
+                            else:
+                                st.caption(
+                                    "Excel is capped at %s rows — this set "
+                                    "is %s. Use the CSV."
+                                    % (format(_REFHDR_XLSX_MAX, ","),
+                                       format(len(_hdf), ",")))
         if _want_scroll_top:
             _scroll_main_to_top()
         # _watch_seis_choice() USED TO BE CALLED HERE and is now registered at
@@ -17417,6 +18518,57 @@ def run(engine=None):
                             except Exception as _pce:
                                 _say("[map] box->cells failed: %s" % str(_pce)[:120])
                                 _picked = []
+                            # ── A BOX SMALLER THAN A HEXAGON ────────────
+                            # polygon_to_cells returns cells whose CENTRE is
+                            # inside the polygon, which is the right rule for
+                            # a box that spans several hexes and exactly
+                            # backwards for one drawn INSIDE a single hex: an
+                            # R4 hexagon is ~1,770 km2, so a small box holds
+                            # no centre at all and selects nothing. It then
+                            # falls through, sets the clip to that tiny box,
+                            # and the clip removes every hex on the map.
+                            #
+                            # Reported as "sometimes the hexes don't show up",
+                            # and it is the dominant cause -- it depends on
+                            # box size against resolution, so the same gesture
+                            # works at R6 and blanks the map at R4.
+                            #
+                            # A box drawn inside a hexagon means THAT hexagon.
+                            # Reading the cell at the box's centre is the
+                            # smallest honest answer -- no guess about intent,
+                            # no second containment rule.
+                            if not _picked:
+                                # CENTRE **AND** CORNERS, because a small box
+                                # is not necessarily inside ONE hex. Checked
+                                # against the box that was actually reported
+                                # (36.2000,-107.4406 .. 36.4213,-107.1824):
+                                # it holds no hex centre AND is not contained
+                                # by the hex under its own centre -- it
+                                # straddles two. Taking the centre alone would
+                                # have selected half of what was drawn, which
+                                # is the quieter version of the same bug.
+                                _pts = [((_min_lat + _max_lat) / 2.0,
+                                         (_min_lon + _max_lon) / 2.0),
+                                        (_min_lat, _min_lon),
+                                        (_min_lat, _max_lon),
+                                        (_max_lat, _max_lon),
+                                        (_max_lat, _min_lon)]
+                                _touch = []
+                                for _pla, _plo in _pts:
+                                    try:
+                                        _c = h3.latlng_to_cell(_pla, _plo,
+                                                               _box_res)
+                                    except Exception:
+                                        continue
+                                    if _c and _c not in _touch:
+                                        _touch.append(_c)
+                                if _touch:
+                                    _picked = _touch
+                                    _say("[map] box is smaller than one R%d "
+                                         "hex -- selecting the %d hex(es) it "
+                                         "touches (%s)"
+                                         % (_box_res, len(_touch),
+                                            ", ".join(_touch[:4])))
                             _say("[map] box -> %d cell(s) at R%d%s"
                                  % (len(_picked), _box_res,
                                     "" if _picked else "  (falling through to the wells drill)"))
@@ -17467,9 +18619,54 @@ def run(engine=None):
                                     if _cc not in _store:
                                         _store[_cc] = []
                                         _added += 1
-                                _say("[map] box: %d of %d cell(s) hold wells"
-                                     % (_added, len(_picked)))
-                                if _added:
+                                # ── SAY BOTH NUMBERS ────────────────────
+                                # This read "%d of %d cell(s) hold wells"
+                                # with _added on the left, and _added counts
+                                # cells NEWLY added -- both loops above skip
+                                # `if _cc in _store`. So a box over cells
+                                # that were already selected logged "0 of 62
+                                # cell(s) hold wells", which says the box
+                                # found nothing when what happened is that it
+                                # found nothing NEW. The two readings have
+                                # nothing in common and the wrong one sends
+                                # you looking at the density data.
+                                _say("[map] box: %d cell(s) covered, %d new, "
+                                     "%d selected in total"
+                                     % (len(_want), _added, len(_store)))
+                                # ── A BOX ASSERTS ITS CELLS, EVEN OLD ONES ──
+                                # THE GATE WAS `if _added:`, AND THAT IS WHY
+                                # A BOX SOMETIMES HAD TO BE DRAWN TWICE.
+                                # Reported 4 Sep as "why do I have to draw a
+                                # box around hexes twice to explode them".
+                                #
+                                # Draw a box over hexes that are already
+                                # selected and _added is 0, so none of this
+                                # ran: the selection was not re-asserted,
+                                # _drawn_bounds was never set, and there was
+                                # no rerun. Worse, execution fell THROUGH to
+                                # the rectangle wells drill below, which
+                                # reads dv_well -- 84,519 rows, almost none
+                                # outside Wyoming -- so the gesture ended in
+                                # silence. Drawing again "worked" only
+                                # because a hand-drawn box is never quite the
+                                # same box: it caught one cell the first had
+                                # missed, _added became 1, and the block then
+                                # exploded every accumulated cell at once.
+                                #
+                                # The box is a SELECTION GESTURE, so what
+                                # matters is which cells it covers, not which
+                                # of them happen to be new. Gating on _want
+                                # makes it idempotent -- box the same hexes
+                                # twice and you get the same explode, which
+                                # is what "a box is just a faster way to
+                                # click several" already promised.
+                                #
+                                # NOT A TOGGLE, deliberately. A click toggles
+                                # a cell; a box drawn round a selection you
+                                # can see is a request to act on it, and
+                                # having it silently deselect would be the
+                                # same surprise wearing the opposite sign.
+                                if _want:
                                     st.session_state["_h3_cell_uwis"] = _store
                                     st.session_state["selected_h3_cells"] = list(_store)
                                     _seen, _union = set(), []
@@ -17483,10 +18680,19 @@ def run(engine=None):
                                     st.session_state["_drawn_bounds"] = [
                                         [_min_lat, _min_lon], [_max_lat, _max_lon]]
                                     st.session_state["_drawn_bounds_oneshot"] = True
+                                    # SAYS WHAT THE BOX DID, WHICH IS NOT
+                                    # ALWAYS "added". Re-boxing a selection is
+                                    # now a legal, useful gesture, and
+                                    # "added 0 cell(s)" reads as a failure on
+                                    # the one render that proves it worked.
                                     st.success(
-                                        "🔶 Box: added **%d cell(s)** — "
-                                        "**%s wells** across **%d cell(s)**."
-                                        % (_added, format(min(len(_union), 5000), ","),
+                                        "🔶 Box: %s — **%s wells** across "
+                                        "**%d cell(s)**."
+                                        % ("added **%d cell(s)**" % _added
+                                           if _added else
+                                           "**%d cell(s)** already selected"
+                                           % len(_want),
+                                           format(min(len(_union), 5000), ","),
                                            len(_store)))
                                     if _capped:
                                         st.warning(
@@ -17902,6 +19108,26 @@ def run(engine=None):
         # existing _qry_wells_in_bbox loader. No multi-select / Commit —
         # click acts as an immediate drill action.
         # ─────────────────────────────────────────────────────────────
+        # ── WHY A HEX CLICK DID NOTHING ─────────────────────────────────
+        # "The selection of hexes ALWAYS takes two tries. Sometimes the hexes
+        # don't show up." Five conditions gate this branch and a click that
+        # fails any of them ends in silence -- the same shape the box handler
+        # had ("four silent endings", instrumented and then diagnosable in
+        # one read). The strong suspect is `not _click_popup`:
+        # last_object_clicked_popup PERSISTS across reruns, so a basin or a
+        # well clicked EARLIER can still be sitting in it and block every
+        # later hex click. That is a theory; this makes the next click say
+        # which of the five it actually was, which is worth more.
+        if _coord_click and not (
+                _map_mode == "h3" and _cells_mode and not _click_popup
+                and st.session_state.get("grid_visible", True)):
+            _say("[map] hex click IGNORED at %.4f,%.4f -- mode=%s cells=%s "
+                 "grid_visible=%s stale_popup=%r"
+                 % (float((_coord_click or {}).get("lat") or 0),
+                    float((_coord_click or {}).get("lng") or 0),
+                    _map_mode, _cells_mode,
+                    st.session_state.get("grid_visible", True),
+                    (str(_click_popup)[:40] if _click_popup else None)))
         if (_map_mode == "h3" and _cells_mode and _coord_click
                 and not _click_popup
                 and st.session_state.get("grid_visible", True)):
@@ -17923,6 +19149,16 @@ def run(engine=None):
                 # Dedupe: streamlit-folium returns the same click coords
                 # across reruns until something else is clicked. Without
                 # this guard, every rerun would re-drill the same hex.
+                if _clicked_h3 and st.session_state.get(
+                        "_last_h3_click") == _clicked_h3:
+                    # THE OTHER SILENT ENDING, and the one that looks most
+                    # like "two tries": the same cell clicked twice in a row
+                    # is swallowed by the dedupe, so a click that the
+                    # operator means as "select this again" or "toggle this
+                    # off" reads as a dead map.
+                    _say("[map] hex click SKIPPED (same cell as last: %s) "
+                         "-- the dedupe cannot tell a repeat click from "
+                         "st_folium repeating the last one" % _clicked_h3)
                 if _clicked_h3 and st.session_state.get(
                         "_last_h3_click") != _clicked_h3:
                     st.session_state["_last_h3_click"] = _clicked_h3
@@ -18203,6 +19439,60 @@ def run(engine=None):
         # If the click wasn't a cell click, fall through to popup-based
         # well marker handling.
         clicked = map_data.get("last_object_clicked_popup") if map_data else None
+        # ── A BASIN OUTLINE CLICK SETS THE SCOPE ─────────────────────────
+        # BEFORE the well handling, because a basin is not a well and the
+        # code below would otherwise go looking for a UWI in a polygon's
+        # popup. Recognised by BASIN_POPUP_LABEL, the sentinel the popup was
+        # built with -- st_folium returns popup TEXT and nothing else, so the
+        # label is the only thing that can say which layer was hit.
+        #
+        # THE NAME IS MATCHED, NOT PARSED. streamlit-folium strips the HTML
+        # and returns visible text, and how the label and value are separated
+        # is that library's business, not ours -- the GOM handler next door
+        # already pays for parsing popup text with a regex. Testing known
+        # basin names against the string cannot be broken by a whitespace
+        # change, and the list is 32 entries.
+        # ── A POPUP IS NOT AN EVENT, AND THAT COST A LOOP ────────────────
+        # st_folium returns last_object_clicked_popup on EVERY rerun until
+        # something else replaces it -- it is a value, not a click. Acting on
+        # its presence therefore acts once per RENDER, not once per click.
+        # Measured 4 Sep: 41 renders, "basin scope set" / "basin scope
+        # released" alternating forever, because the handler set the scope,
+        # reran, saw the same popup, decided the operator had clicked the
+        # active basin again, released it, reran... The release rule turned a
+        # runaway into an oscillation; the runaway was there without it.
+        #
+        # SO DEDUPE ON THE VALUE. The signature is updated for ANY popup, not
+        # just a basin's -- otherwise clicking a well and then the same basin
+        # again would compare against a stale basin signature and do nothing.
+        #
+        # AND THE RELEASE-BY-RECLICK IS GONE. Under a value-signature dedupe
+        # a second click on the same basin is indistinguishable from the
+        # first one still being reported, and guessing between them is what
+        # produced the loop. The dropdown clears the scope; that is an
+        # unambiguous gesture and it is two feet from the map.
+        _popup_sig = str(clicked or "")
+        _sig_is_new = (_popup_sig != st.session_state.get("_popup_click_sig"))
+        st.session_state["_popup_click_sig"] = _popup_sig
+        if (clicked and not _handled_as_cell and _sig_is_new
+                and BASIN_POPUP_LABEL in _popup_sig):
+            _bstr = _popup_sig
+            _known = sorted(_basin_shapes(engine) or {}, key=len, reverse=True)
+            # LONGEST FIRST: "ARKOMA" is a substring of nothing here, but
+            # "PERMIAN" inside "PERMIAN BASIN" would match the short one and
+            # scope to a basin the operator did not click.
+            _hit = next((b for b in _known if b and b in _bstr), None)
+            if _hit:
+                _say("[map] basin scope set by click: %s" % _hit)
+                st.session_state["_basin_pick_request"] = _hit
+                clicked = None
+                st.rerun()
+            else:
+                # SAY SO. A basin popup that matches no known basin means the
+                # registry and the drawn layer disagree, and silence here
+                # would read as a dead click.
+                _say("[map] basin click: no known basin in popup text %r"
+                     % _bstr[:80])
         if clicked and not _handled_as_cell:
             _clicked_str = str(clicked)
             # A REFERENCE WELL IS NOT A LOADED WELL. This identifies a

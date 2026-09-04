@@ -228,9 +228,18 @@ def points_layer(m, points, name, *, color="#222", fill="#555",
     Coordinates are rounded to 5 decimals (~1 m). Beyond that the digits are
     noise in a well header and cost payload on every redraw.
 
-    A tooltip, never a popup. The map's click handler tells a well marker from
-    a density cell by "markers have popups, cells don't", so giving these
-    popups would make every point look like a marker click to that code.
+    A tooltip by default; a popup ONLY when popup_fields is given. The map's
+    click handler tells a well marker from a density cell by "markers have
+    popups, cells don't", so a popup here is not decoration -- it decides
+    which handler the click reaches.
+
+    THAT CUTS BOTH WAYS, and this used to record only one side of it. A
+    scenery layer (towns, roads) must stay popup-less or every point reads as
+    a marker click. But anything that IS a marker must have one, or the click
+    falls through to the grid handler, which floor-divides the coordinates
+    into a cell and reruns -- clicking a well refreshed the page, 4 Sep. So
+    the reference-well layer passes popup_fields on BOTH its paths, with
+    FEDWELL_POPUP_LABEL as the first alias so the handler knows to ignore it.
     """
     # A GeoJsonPopup emits ONE template plus the per-feature property values,
     # where a folium.Popup per point would emit a block of HTML each. That is
@@ -603,20 +612,51 @@ def _add_refwell_legend(m, colours, title, known, total):
     foot = ("<div style='margin-top:4px;opacity:.7'>%s of %s coloured</div>"
             % ("{:,}".format(known), "{:,}".format(total)))
     html = (
-        "<details id='wm-refwell-legend' style='position:absolute;z-index:9999;"
-        "bottom:64px;left:10px;background:#ffffffee;border:1px solid #cbd5e1;"
+        # POSITION:FIXED, NOT ABSOLUTE. Absolute positions against the
+        # nearest positioned ancestor, which inside folium's document is
+        # not the visible map -- the panel ended up out of view and the
+        # layer looked like it had no legend at all. _add_status_legend
+        # already calls fixed "the canonical folium floating-legend
+        # pattern"; this one was the odd man out.
+        #
+        # AND IT OPENS BY DEFAULT. A <details> with no open attribute
+        # shows only its summary bar, so the first question a reader has
+        # -- what do these colours mean -- needed a click nobody knew to
+        # make. sessionStorage still remembers a deliberate collapse.
+        "<details id='wm-refwell-legend' open style='position:fixed;z-index:9999;"
+        # TOP, NOT BOTTOM. position:fixed pins to the IFRAME's box, and
+        # streamlit-folium sizes that iframe taller than the browser
+        # window -- so a legend anchored to the bottom sits below the
+        # fold and reads as "there is no legend". Reported exactly that
+        # way, twice, while the panel was in the document all along.
+        # The top edge is always on screen; left:56px clears the draw
+        # toolbar, which is the only control in that corner.
+        "top:10px;left:56px;background:#ffffffee;border:1px solid #cbd5e1;"
         "border-radius:6px;padding:5px 8px;font:500 11px system-ui;"
         "color:#0f172a;max-height:40vh;overflow:auto'>"
         "<summary style='cursor:pointer;font-weight:600'>%s</summary>%s%s"
         "</details>"
         "<script>(function(){var d=document.getElementById("
         "'wm-refwell-legend'); if(!d){return;} "
-        "if(sessionStorage.getItem('dv_refleg_open')==='1'){"
-        "d.setAttribute('open','');} "
+        "if(sessionStorage.getItem('dv_refleg_open')==='0'){"
+        "d.removeAttribute('open');} "
         "d.addEventListener('toggle',function(){"
         "sessionStorage.setItem('dv_refleg_open', d.open?'1':'0');});})();"
         "</script>" % (_html_escape(title), rows, foot))
-    m.get_root().html.add_child(_f.Element(html))
+    # A MacroElement, LIKE THE TWO LEGENDS THAT WORK. This used
+    # get_root().html.add_child(Element(...)), which plain folium emits
+    # -- a standalone render contained the panel every time -- and
+    # st_folium does not, so the legend was real, correct, and never on
+    # screen. Reported as "no legend" three times while three separate
+    # explanations were offered for it. The status and lease legends both
+    # wrap their html in {% macro html %}, and page_well_map already calls
+    # that "the canonical folium floating-legend pattern" -- this was the
+    # one that did not follow it.
+    from branca.element import Template as _LTpl, MacroElement as _LME
+    _leg = _LME()
+    _leg._template = _LTpl("{% macro html(this, kwargs) %}" + html
+                           + "{% endmacro %}")
+    m.get_root().add_child(_leg)
 
 
 
@@ -634,13 +674,104 @@ REFWELLS_KEEP = 8
 # across a ~980px map is zoom 9, so the layer drew all 10,452 wells and
 # painted none of them. A whole state is 6-7 and a field is 12-13.
 #
-# 8 IS PERRY'S NUMBER, and it is a deliberate trade: a state view now
-# paints too, where 210,337 dots are a wash rather than an answer. The
-# H3 density layer is what answers "where are wells" at that scale. The
-# floor exists to stop the layer being drawn at a zoom where it cannot
-# be read; where exactly that line falls is a judgement, so it is one
-# constant and not a rule spread through the drawing code.
-REFWELL_MIN_ZOOM = 8
+# 7 IS PERRY'S NUMBER (was 8, lowered 4 Sep), and it is a deliberate
+# trade: a state view now paints too, where 210,337 dots are a wash
+# rather than an answer. The H3 density layer is what answers "where are
+# wells" at that scale. The floor exists to stop the layer being drawn at
+# a zoom where it cannot be read; where exactly that line falls is a
+# judgement, so it is one constant and not a rule spread through the
+# drawing code.
+#
+# IT SETS TWO THINGS FROM ONE NUMBER, which is the point of keeping it as
+# one constant -- the zoom below which the unbounded points are hidden,
+# AND the base of the growth ramp in _refwell_zoom_gate, where the dots
+# sit at their authored radius and grow above it. Moving the floor to 7
+# moves both together: the dots stop shrinking at 7 instead of 8, and a
+# whole-state view (6-7) keeps them.
+REFWELL_MIN_ZOOM = 7
+
+# ── HOW FAST THE DOTS GROW, AND HOW BIG THEY GET ─────────────────────────
+# These were 0.18 and 2, written inline in the gate's JavaScript, and
+# together they are what made the dots LOOK like they were shrinking as you
+# zoomed in -- the complaint that found them, 4 Sep.
+#
+# A CircleMarker's radius is SCREEN PIXELS, so it does not grow with the
+# map. The ramp exists to compensate. It did not compensate nearly enough:
+# the ceiling of 2 is reached at zoom 12.6 and the dot is frozen from there
+# up, while the map keeps doubling every level. Measured in a standalone
+# repro, base radius 2:
+#
+#   zoom      7     9    11    13    15    17    18
+#   dot px  2.0   2.7   3.4   4.0   4.0   4.0   4.0
+#   ground    1x    4x   16x   64x  256x 1024x 2048x
+#
+# So past zoom 13 the dot halves in apparent size every single level. It is
+# not shrinking in pixels -- it is standing still while everything around it
+# grows, which is the same thing to the eye and is what you actually see.
+#
+# GROWTH is the per-zoom-level slope; MAX_SCALE is the ceiling, in multiples
+# of the layer's own authored radius (2 for the detail path, 1.2 for the
+# sample). The ceiling stays because a dot with no ceiling becomes a blob
+# that hides the well it is marking -- but it belongs at a zoom you actually
+# reach, not four levels below the top.
+#
+# Taste, like REFWELL_MIN_ZOOM, so they are named constants and not numbers
+# buried in a JS string where the next person has to find them twice.
+REFWELL_ZOOM_GROWTH = 0.45
+
+# ── LEVEL 13 IS WHERE ONE WELL STOPS BEING PART OF A MASS ────────────────
+# Perry's number, 4 Sep, and it decides TWO things that are really the same
+# fact -- which is why it is one constant and not two:
+#
+#   1. THE DOT STOPS GROWING HERE. Below it the dots start small and grow;
+#      at 13 they reach full size and hold it however far you zoom in. The
+#      first attempt at the shrinking-dots bug grew them all the way to zoom
+#      18, which was wrong in the other direction: past the level where you
+#      can already tell two wells apart, a bigger dot only hides the thing it
+#      is marking.
+#
+#   2. EVERY WELL IS POSTED ONLY FROM HERE UP. Below 13 the dots overlap into
+#      a mass, so drawing all of them answers nothing and costs everything --
+#      measured 4 Sep, a 56-hex explode spanning 3.4 deg x 3.8 deg fetched
+#      191,389 wells, wrote a 45.3 MB GeoJSON and left the browser building
+#      191,389 SVG markers. Python was 7.4s of the ~25s that took; the rest
+#      was the browser, so no amount of query work would have touched it.
+#      Below 13 the layer falls back to the SAME capped, hash-spread sample
+#      the over-the-ceiling path already uses, and says "sample" in its own
+#      name -- a truncation nobody is told about reads as completeness.
+REFWELL_WELL_ZOOM = 13
+
+# What st_folium is given: height=500, use_container_width -> ~980 CSS px.
+# Only used to work out which zoom a set of bounds will FIT at, so it wants
+# to be about right, not exact.
+REFWELL_MAP_PX = (980, 500)
+
+
+def _implied_zoom(bx, map_px=REFWELL_MAP_PX):
+    """The zoom Leaflet lands on when it fits this box, near enough.
+
+    PYTHON NEVER LEARNS ABOUT A PAN OR A ZOOM -- three designs have tried and
+    none could work, and that scar is why this does not ask the browser. It
+    reads a value the app ITSELF set: the bounds it is about to fit the map
+    to. The zoom that produces is arithmetic, not a guess about the viewport.
+
+    Web Mercator, so longitude is linear in the world width and latitude is
+    linear in the projected y. Leaflet fits whichever axis binds first, so
+    take the smaller of the two.
+    """
+    import math
+    s, w, n, e = bx
+    px_w, px_h = map_px
+    lon_span = max(abs(e - w), 1e-9)
+    z_lon = math.log2(360.0 * px_w / (256.0 * lon_span))
+
+    def _y(lat):
+        lat = max(min(lat, 85.05112878), -85.05112878)
+        return math.log(math.tan(math.pi / 4.0 + math.radians(lat) / 2.0))
+
+    y_span = max(abs(_y(n) - _y(s)), 1e-9)
+    z_lat = math.log2(2.0 * math.pi * px_h / (256.0 * y_span))
+    return min(z_lon, z_lat)
 
 
 # STYLE, TOOLTIP AND POPUP ALL IN THE BROWSER, because the geometry is served
@@ -671,7 +802,35 @@ function(feature, layer) {
         layer._dvBaseR = (layer.options && layer.options.radius) || 3;
     }
     (window._dvRefWellLayers = window._dvRefWellLayers || []).push(layer);
-    if (!__DETAIL__) { return; }
+    // ── EVERY DOT GETS A POPUP, EVEN WITH NO DETAIL TO SHOW ─────────────
+    // NOT COSMETIC -- it is what stops a click on a well doing something
+    // else entirely. page_well_map decides what was clicked by whether the
+    // click came back with popup text, and says so in its own comment:
+    // "markers have popups, cells don't". So a dot with NO popup is read as
+    // a click on the hex underneath it, and the H3 handler floor-divides the
+    // coordinates into a cell and reruns -- clicking a well REFRESHED THE
+    // PAGE. Reported 4 Sep.
+    //
+    // The invariant is the fix, not a special case in the handler. A
+    // popup-less marker is the only thing that ever broke it, so nothing on
+    // this map is popup-less any more, and no future change to the detail
+    // threshold can bring the refresh back.
+    //
+    // THE SENTINEL ROW IS WHAT MAKES THIS SAFE TO CLICK. page_well_map
+    // checks for FEDWELL_POPUP_LABEL and deliberately ignores the click --
+    // "federated-well click ignored -- not a dv_well" -- because a master
+    // header has no logs, no tops and no production for the scout builder to
+    // find. Without the label the same click is read as a dv_well.
+    if (!__DETAIL__) {
+        layer.bindPopup(
+            '<table style="font-size:11px;border-collapse:collapse">'
+          + '<tr><td style="color:#64748b;padding-right:8px">__LABEL__</td>'
+          + '<td>' + (p.nm || '(unnamed)') + '</td></tr>'
+          + '<tr><td colspan="2" style="color:#64748b;padding-top:4px">'
+          + 'sampled view — zoom to __WELLZOOM__ for full detail'
+          + '</td></tr></table>', {maxWidth: 320});
+        return;
+    }
     var rows = [["UWI", p.uwi], ["Operator", p.op],
                 ["County", p.cty], ["State", p.st], ["Type", p.ty],
                 ["Status", p.sta], ["TD", p.td], ["Spud", p.spud],
@@ -773,7 +932,19 @@ def _refwell_zoom_gate(m, hide: bool = True):
         # sized not to smear at the handover zoom is a speck four levels in.
         # Scale from the layer's OWN base so the sampled 1.5px dots and the
         # detailed 3px ones keep their relative weight.
-        " var f = Math.max(1, Math.min(2, 1 + (mp.getZoom() - Z) * 0.18));"
+        #
+        # CLAMP THE ZOOM, NOT THE SCALE. The ceiling is a ZOOM
+        # (REFWELL_WELL_ZOOM), so the dot grows from Z up to that level and
+        # holds from there however far you zoom in -- which is the shape
+        # asked for, and it means the two numbers that matter are both
+        # zoom levels rather than one zoom and one opaque multiplier.
+        #
+        # It was `Math.min(2, 1 + (zoom - Z) * 0.18)` inline, which pinned the
+        # dot at twice base from zoom 12.6 up and read, correctly, as dots
+        # that shrink the further in you go.
+        " var F = " + str(REFWELL_WELL_ZOOM) + ";"
+        " var zc = Math.min(Math.max(mp.getZoom(), Z), F);"
+        " var f = 1 + (zc - Z) * " + str(REFWELL_ZOOM_GROWTH) + ";"
         " var a = window._dvRefWellLayers || [];"
         " for (var i = 0; i < a.length; i++) {"
         "   try { a[i].setRadius((a[i]._dvBaseR || 3) * f); } catch (e) {} } }"
@@ -811,8 +982,25 @@ def ensure_refwells_geojson(feats, key, static_dir=None):
         return path, url
     try:
         _os.makedirs(static_dir, exist_ok=True)
+        # dumps() THEN write(), NEVER dump(). They are not the same speed and
+        # the gap is the whole cost of this function.
+        #
+        # json.dump(obj, fp) calls iterencode(_one_shot=False), and that flag
+        # is what selects the PURE-PYTHON encoder; json.dumps(obj) goes
+        # through encode() with _one_shot=True and gets the C one. Identical
+        # bytes, identical file. Measured on the 71,152-well box, 11 MB with
+        # the popup properties attached:
+        #
+        #   json.dump(..., fh)    7.03s   (3.45M _iterencode calls)
+        #   fh.write(dumps(...))  0.33s
+        #
+        # IT HID BEHIND THE QUERY for as long as the query was 26 seconds.
+        # Once the covering index took the fetch to ~1.5s this was 7 of the
+        # 9.6s the profiler attributed to add_reference_wells -- the long
+        # pole, and invisible until the thing in front of it moved.
         with open(path, "w", encoding="utf-8") as _fh:
-            _json.dump({"type": "FeatureCollection", "features": feats}, _fh)
+            _fh.write(_json.dumps({"type": "FeatureCollection",
+                                   "features": feats}))
     except Exception as exc:
         print("[geography_layers] refwells geojson not written: %s"
               % str(exc)[:120])
@@ -833,6 +1021,140 @@ def ensure_refwells_geojson(feats, key, static_dir=None):
               % str(exc)[:120])
     return path, url
 
+
+
+# ── ONE ANSWER PER (BOX, COLOURING), NOT ONE PER RENDER ──────────────────
+# Every box you draw costs TWO explode renders, and this is what makes the
+# second one free. The second is not a bug that can be fixed where it starts:
+# st_folium reports `all_drawings` after the draw, Streamlit reruns, and the
+# page rebuilds from the top. Measured 4 Sep, renders #5 and #6 of one
+# session -- same 61 hexes, same bounds, same 165,802 wells, 7.231s then
+# 10.145s.
+#
+# THE SECOND ONE WAS ALREADY THROWING ITS WORK AWAY, which is what makes
+# memoising safe rather than a new trade. ensure_refwells_geojson names the
+# file after a digest of (bounds, colouring, row count), so on the repeat the
+# file was already on disk and it returned early WITHOUT writing -- the
+# query ran, 165,802 rows came back, the features were rebuilt, and every
+# byte was discarded. Serving stale geometry from that file is not a window
+# this opens; it is the window that has been open all along. All this does is
+# stop paying for an answer nobody reads.
+#
+# KEYED ON WHAT IS KNOWN BEFORE THE QUERY -- the box, the colouring, and the
+# two ceilings -- so a hit costs nothing at all, not even the capped count.
+# `show` and `explode` are NOT in the key: they change how the layer is
+# drawn, never what is in it, and folding them in would miss on a toggle
+# that the draw already handles.
+_REFWELL_MEMO = {}
+_REFWELL_MEMO_MAX = 12
+
+# ── WHAT THE LAST DRAW ACTUALLY FETCHED ──────────────────────────────────
+# The verbatim SELECT behind the dots now on screen, so a download can be
+# "the wells I am looking at" rather than a second guess at the same scope.
+# Process-level for the reason db_pool is: Streamlit drops everything else
+# between reruns, and this has to survive from the render that DREW the
+# layer to the click that asks for the file.
+_REFWELL_DRAWN = {}
+
+
+def refwell_drawn_frame(engine, limit: int = 0):
+    """DataFrame of the header rows for the reference wells last drawn.
+
+    RE-RUNS THE RECORDED QUERY rather than keeping the rows. A bounded box
+    can be 300,000 wells with eleven columns; holding that against the
+    chance somebody presses download would cost the memory every render, on
+    every session, for a button most renders never see. The query is ~1s
+    with the covering index and the row set is identical -- the master is a
+    reference table, not a live feed.
+
+    Returns an EMPTY frame when nothing has been drawn, which the caller
+    must tell apart from "the scope holds no wells". Both are legitimate and
+    they read the same on screen.
+    """
+    import pandas as _pd
+    _sc = dict(_REFWELL_DRAWN)
+    if not _sc.get("scope_sql") or engine is None:
+        return _pd.DataFrame()
+    # ── EVERY WELL IN THE SCOPE, NOT THE ONES THAT FITTED ON SCREEN ─────
+    # The map may have drawn a hash-spread sample of 20,000 because 191,389
+    # SVG markers is a 25-second render; the FILE has no such limit and a
+    # starter set built from a silent 12% is worse than no file. So this
+    # runs the scope query, not the drawn one.
+    _sql = _sc["scope_sql"]
+    _params = _sc.get("scope_params") or {}
+    if limit and " TOP " not in _sql.upper():
+        _sql = _sql.replace("SELECT ", "SELECT TOP %d " % int(limit), 1)
+    try:
+        with engine.connect() as con:
+            _df = _pd.read_sql(text(_sql), con, params=_params)
+    except Exception as exc:
+        print("[geography_layers] refwell header frame failed: %s"
+              % str(exc)[:160])
+        return _pd.DataFrame()
+    # _cb IS OURS, NOT THEIRS. It is whichever column the layer is coloured
+    # by, aliased so one tuple index serves both row shapes -- an internal
+    # detail of the draw. In a starter set it is a duplicate column with a
+    # cryptic name, and it changes when the colour-by picker changes, which
+    # would make two downloads of the same wells differ for no reason the
+    # file explains.
+    return _df.drop(columns=["_cb"], errors="ignore")
+
+
+def refwell_drawn_info():
+    """(n_drawn, sampled, label, bounded) for the last draw.
+
+    `bounded` is what decides whether a download is offered at all: with no
+    box, no hex and no basin the predicate is "has coordinates", which is
+    3.1M wells and not a starter set by any reading.
+    """
+    return (int(_REFWELL_DRAWN.get("n_drawn") or 0),
+            bool(_REFWELL_DRAWN.get("sampled")),
+            str(_REFWELL_DRAWN.get("label") or ""),
+            bool(_REFWELL_DRAWN.get("bounded")))
+
+
+def _draw_refwells_from_file(m, path, url, colours, cb_title, known, total,
+                             label, detail, show, explode):
+    """Add the served-by-URL reference-well layer to `m`.
+
+    LIFTED OUT SO THE MEMO CANNOT DRIFT FROM THE COLD PATH. The alternative
+    was fifteen duplicated lines on the hit branch, and this file's own
+    header records what that costs: the paste-me snippet that drifted from
+    its caller and silently blanked a whole pill.
+    """
+    import json as _js
+    _oneach = (_REFWELL_ON_EACH
+               .replace("__COLOURS__", _js.dumps(colours))
+               .replace("__UNKNOWN__", _REF_UNKNOWN)
+               .replace("__DETAIL__", "true" if detail else "false")
+               .replace("__LABEL__", FEDWELL_POPUP_LABEL)
+               .replace("__WELLZOOM__", str(REFWELL_WELL_ZOOM))
+               .replace("__BYLABEL__",
+                        cb_title.split("·")[-1].strip().title()))
+    if "__" in _oneach.replace("__proto__", ""):
+        # CAUGHT HERE, NOT IN THE BROWSER. An unfilled __TOKEN__ is
+        # valid-looking JavaScript right up until it runs -- the same trap
+        # lease_on_each guards, which shipped a literal __FILT__ and died on
+        # the first township click.
+        _left = [t for t in _oneach.split("__")[1::2]]
+        print("[geography_layers] refwell template placeholder(s) unfilled: %s"
+              % ", ".join(sorted(set(_left)))[:120])
+    # SMALLER WHEN SAMPLED: no popup to hit, and 48,000 dots at radius 5
+    # is a smear, not a map.
+    _gj = _f.GeoJson(
+        path, embed=False, name=label, show=show,
+        marker=_f.CircleMarker(radius=2 if detail else 1.2, weight=1,
+                               fill=True, fill_opacity=0.75),
+        on_each_feature=_f.JsCode(_oneach))
+    # The link folium emits must be the BROWSER's, not ours.
+    _gj.embed_link = url
+    _gj.add_to(m)
+    # AN EXPLODED HEX IS ITS OWN SCOPE. The gate exists so a continental
+    # view does not smear four million dots, but a hex the operator clicked
+    # is a bounded, affordable set they asked for by name -- hiding it under
+    # a zoom rule would answer a question they did not ask.
+    _refwell_zoom_gate(m, hide=not explode)
+    _add_refwell_legend(m, colours, cb_title, known, total)
 
 
 def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
@@ -910,12 +1232,37 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
     _cb_col, _cb_title = _REF_BY.get(by, _REF_BY["operator"])
     _light = _REF_COLS_LIGHT + ", " + _cb_col + " AS _cb"
     _full = _REF_COLS + ", " + _cb_col + " AS _cb"
-    # ROWS FIRST, AND COUNT ONLY IF IT TELLS US SOMETHING. Under the cap the
-    # fetch IS the count -- asking the server twice is free information at a
-    # real price: COUNT(*) over a 2M-row bbox measured 5.90s, longer than
-    # everything else on the map put together, purely to print an exact total
-    # that reads "lots". Over the cap, the honest statement is that it is
-    # capped, which needs no count at all.
+    # COUNT FIRST, AND CAP THE COUNT. This said the opposite until 4 Sep --
+    # "the fetch IS the count, asking the server twice is free information at
+    # a real price" -- and the price was measured backwards.
+    #
+    # The old probe pulled up to BOUNDED_MAX + 1 ROWS to call len() on them,
+    # then threw every one away: the over-cap branch re-asks as a sample and
+    # the under-cap branch re-asks with the detail columns, so NEITHER branch
+    # used what the probe fetched. It was a duplicate fetch wearing a
+    # cheap-check's name, and the light column list was the tell -- three
+    # columns instead of twelve, chosen to make the check affordable.
+    #
+    # COLUMN COUNT IS NOT WHAT IT COSTS. Measured over the same 71,152-well
+    # box: light 3 columns 11.6s, full 11 columns 11.5s. What costs is
+    # carrying the rows at all. Wrapping the same TOP in a COUNT(*) leaves
+    # them on the server and answers the only question the branch asks:
+    #
+    #   exploded hexes (71,152)   15.1s -> 0.80s
+    #   lower 48 (over the cap)    3.8s -> 0.49s
+    #   Teapot (0 wells)          10.1s -> 0.011s
+    #
+    # All three take the same branch as before -- that was checked, because a
+    # probe that disagrees with the fetch it guards is worse than a slow one.
+    #
+    # AND THE EMPTY BOX IS THE INTERESTING ONE. Ten seconds to prove that
+    # nothing is there: TOP 300001 is a row goal large enough that the
+    # optimizer stops believing the lat/lon seek is worth it. The count keeps
+    # the seek and returns in 11ms.
+    #
+    # The 5.90s COUNT(*) this used to cite was an UNCAPPED count over a 2M-row
+    # bbox. TOP inside the count is what makes it a different measurement:
+    # it stops at the ceiling instead of scanning to the end.
     # "TOP n" IS A GEOGRAPHIC SLICE PRETENDING TO BE A SAMPLE, and it bites
     # whenever the scope holds more wells than the cap -- with no bounds at
     # all, and equally inside a bbox that is simply large.
@@ -936,7 +1283,6 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
     # PAGES, and pages are clustered by uwi14, so it clumps.
     lim = int(limit)
     sampled = False
-    detail = False
     # ── A BOX IS THE LIMIT. NOTHING ELSE IS. ──────────────────────────────
     # "The number of wells to post for reference wells should only be limited
     # by the bounding box." So a bounded fetch has no TOP, no sample and no
@@ -955,39 +1301,175 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
     # and streamlit-folium injects that twice. A box drawn round several
     # counties will be slow -- deliberately, because it is what was asked for
     # and a silent truncation reads as completeness.
+    # ── TOO FAR OUT TO BE INDIVIDUAL WELLS ───────────────────────────────
+    # A box only earns every well inside it once the map is close enough to
+    # tell two wells apart -- REFWELL_WELL_ZOOM, which is 13. Below that the
+    # dots overlap into a mass and posting all of them buys nothing: the
+    # 56-hex explode that prompted this fetched 191,389 wells into a 45.3 MB
+    # document the browser then had to turn into 191,389 SVG markers.
+    #
+    # ZOOM MOVES THE CEILING; IT DOES NOT FORCE A SAMPLE. The first cut here
+    # sampled whenever the box fit below 13, and that was wrong for the case
+    # this layer is best at: Teapot fits at ~11.0 and holds 1,681 wells --
+    # 0.15s and 0.5 MB, every one of them clickable. Thinning that buys
+    # nothing and loses the answer. What makes a mass is the COUNT; zoom is
+    # the proxy for when a count becomes one.
+    #
+    # So a far-out box keeps its box and simply gets the tighter ceiling --
+    # `limit`, the same 50,000 the unbounded path uses -- while a close-in
+    # box keeps BOUNDED_MAX. Under either ceiling the fetch is exact; over
+    # it, the existing hash-spread sample takes over and names itself. Two
+    # reasons reach one path, and _coarse records which, because "draw a
+    # smaller box" and "zoom into the box you have" are opposite repairs.
+    # THE COARSE CEILING IS POPUP_MAX, NOT `limit`, so that whatever comes
+    # back from a far-out box is still CLICKABLE. Capping at 50,000 and then
+    # dropping the popups above 20,000 would answer the payload question and
+    # leave the operator with 50,000 dots that do nothing -- which is the bug
+    # this pass was opened to fix. One ceiling, and everything under it has a
+    # popup. It also costs less: ~5 MB rather than ~12 MB.
+    _coarse = False
+    _ceiling = BOUNDED_MAX
+    if _bx:
+        _iz = _implied_zoom(_bx)
+        if _iz < REFWELL_WELL_ZOOM:
+            _ceiling = int(min(POPUP_MAX, limit))
+            lim = _ceiling
+            _coarse = True
+
+    # ── THE REPEAT RENDER STOPS HERE ─────────────────────────────────────
+    # Before the connection, before the capped count -- everything in the key
+    # is known without asking the server anything. A hit re-adds the layer
+    # from the file that is already on disk and returns.
+    _memo_key = (None if not _bx else tuple(round(float(v), 5) for v in _bx),
+                 by, _ceiling, lim)
+    _hit = _REFWELL_MEMO.get(_memo_key)
+    if _hit and os.path.exists(_hit["path"]):
+        print("[geography_layers] reference wells: reusing %s (%s well(s)) "
+              "-- identical request, nothing refetched"
+              % (os.path.basename(_hit["path"]),
+                 "{:,}".format(_hit["n_drawn"])))
+        _draw_refwells_from_file(
+            m, _hit["path"], _hit["url"], _hit["colours"], _hit["cb_title"],
+            _hit["known"], _hit["total"], _hit["label"], _hit["detail"],
+            show, explode)
+        # A HIT IS A DRAW, so it has to leave the same record behind. The
+        # memo key IS the scope, so the stored query is the right one -- but
+        # without this, going box A -> box B -> back to A would serve A's
+        # dots from the memo while the download still held B's query, and the
+        # file would quietly be of somewhere else.
+        _REFWELL_DRAWN.clear()
+        _REFWELL_DRAWN.update({
+            "sql": _hit.get("sql", ""), "params": _hit.get("params") or {},
+            "n_drawn": _hit["n_drawn"], "sampled": bool(_hit.get("sampled")),
+            "label": _hit.get("label", ""), "by": by,
+            "scope_sql": _hit.get("scope_sql", ""),
+            "scope_params": _hit.get("scope_params") or {},
+            "bounded": bool(_hit.get("bounded")),
+        })
+        return _hit["n_drawn"], _hit["in_scope"]
+    if _hit:
+        # THE FILE WENT, SO THE ENTRY IS A LIE. REFWELLS_KEEP rotates the
+        # static dir, so a memo entry outlives its own geometry -- and a
+        # GeoJson pointed at a deleted path is a layer that silently fails to
+        # load in the browser, where no Python exception ever reaches us.
+        _REFWELL_MEMO.pop(_memo_key, None)
+
+    # ── FORGET THE LAST DRAW BEFORE ATTEMPTING THIS ONE ──────────────────
+    # Cleared HERE, at the top, so that every way out of this function that
+    # is not a completed draw leaves no record: the four early returns (query
+    # failed, no rows, no features, no file) would otherwise keep the
+    # PREVIOUS scope's query alive under the new scope's name.
+    #
+    # Caught by the test rather than by reading: a box over empty ground
+    # returned 0 wells and the download still offered 5,193 -- the previous
+    # box's, in another state. A starter set of the wrong area is exactly the
+    # "wrong is worse than missing" case, because nothing downstream can tell
+    # it is wrong. Populated again only at the successful return, and on a
+    # memo hit.
+    _REFWELL_DRAWN.clear()
+
+    rows = []
+    # ── REMEMBER THE QUERY THAT DREW, NOT A DESCRIPTION OF IT ────────────
+    # So "download the wells I am looking at" can be exactly that. Four
+    # different SELECTs can produce the layer -- bounded exact, unbounded
+    # exact, hash-spread sample, and the sample's second pass -- and each has
+    # its own row set. Recording which one RAN, verbatim, is the only version
+    # of this that cannot drift from the dots: re-describing the scope in the
+    # download would be a second implementation of the same decision, and
+    # this file's header is a list of what that costs.
+    _drew = {"sql": "", "params": {}}
+
+    # ── AND THE SCOPE, WHICH IS NOT THE SAME THING AS THE DRAW ───────────
+    # THE SAMPLE IS A RENDERING LIMIT, NOT A DATA ONE. It exists because a
+    # browser cannot paint 191,389 SVG markers -- that was a 45 MB document
+    # and a 25-second render. A CSV of the same wells is ~20 MB and opens
+    # instantly. Handing over a thinned file because the MAP had to thin the
+    # picture answers a question nobody asked: "what good does a sample do?"
+    # -- none, for a starter set, which is the whole point of the download.
+    #
+    # So the scope query is recorded ALONGSIDE the drawn one: same WHERE
+    # clause, full columns, no TOP and no CHECKSUM filter. `clause` still
+    # carries the bbox even when the bounded path falls through to sampling
+    # (that fall-through clears `bounds`, never the predicate), so this is
+    # every well inside the box whether the map drew all of them or not.
+    _drew["scope_sql"] = ("SELECT %s FROM %s WHERE %s"
+                          % (_full, REFERENCE_MASTER, clause))
+    _drew["scope_params"] = dict(params)
+    # UNBOUNDED IS NOT A SCOPE. With no box the predicate is "has
+    # coordinates" -- 3.1M wells and a ~400 MB file. The download refuses
+    # that rather than capping it silently, because a truncated starter set
+    # is the one failure the operator cannot see in the file.
+    _drew["bounded"] = bool(_bx)
+
+    def _fetch(_con, _sql, _p):
+        _drew["sql"], _drew["params"] = _sql, dict(_p or {})
+        return _con.execute(text(_sql), _p).fetchall()
+
     try:
         with engine.connect() as con:
             if bounds:
-                # PROBE FIRST, WITH THE LIGHT COLUMNS. One row past the
-                # ceiling is all we need to know, and asking for it in
-                # three columns rather than twelve is what makes the
-                # check affordable on a box that turns out to be huge.
-                rows = con.execute(text(
-                    f"SELECT TOP {BOUNDED_MAX + 1} {_light} "
-                    f"FROM {REFERENCE_MASTER} WHERE {clause}"),
-                    params).fetchall()
-                if len(rows) > BOUNDED_MAX:
+                # COUNT PAST THE CEILING, DON'T CARRY THE ROWS OVER IT. One
+                # row past the ceiling is all the branch needs to know, and
+                # TOP inside the COUNT is what stops the server the moment it
+                # knows -- without sending anything back.
+                n_in_box = con.execute(text(
+                    f"SELECT COUNT(*) FROM (SELECT TOP {_ceiling + 1} 1 "
+                    f"AS x FROM {REFERENCE_MASTER} WHERE {clause}) t"),
+                    params).scalar() or 0
+                if n_in_box > _ceiling:
                     # TOO BIG TO BE A BOX. Fall through to the sampled
                     # path, which caps, spreads and says "sample" in the
-                    # layer name.
-                    print("[geography_layers] reference wells: box holds "
-                          "more than %s wells -- sampling instead"
-                          % "{:,}".format(BOUNDED_MAX))
+                    # layer name. SAY WHICH CEILING BOUND -- the repairs
+                    # differ, and a log line naming the wrong one is how
+                    # "was the box ignored?" and "was the box too big?"
+                    # became indistinguishable once before.
+                    if _coarse:
+                        print("[geography_layers] reference wells: box fits "
+                              "at zoom ~%.1f, below %d -- more than %s wells "
+                              "is a mass at that scale, sampling instead"
+                              % (_iz, REFWELL_WELL_ZOOM,
+                                 "{:,}".format(_ceiling)))
+                    else:
+                        print("[geography_layers] reference wells: box holds "
+                              "more than %s wells -- sampling instead"
+                              % "{:,}".format(_ceiling))
                     bounds = None
                 else:
-                    rows = con.execute(text(
+                    rows = _fetch(con,
                         f"SELECT {_full} FROM {REFERENCE_MASTER} "
-                        f"WHERE {clause}"), params).fetchall()
-                    detail = bool(rows)
+                        f"WHERE {clause}", params)
             if not bounds:
-                # limit+1 tells us "capped" without a COUNT, which measured
-                # 5.90s over a 2M-row bbox for a number that only ever reads
-                # "lots".
-                rows = con.execute(text(
-                    f"SELECT TOP {lim + 1} {_light} "
-                    f"FROM {REFERENCE_MASTER} WHERE {clause}"),
-                    params).fetchall()
-                if len(rows) > lim:
+                # SAME DUPLICATE FETCH AS THE BOUNDED PROBE, same cure. This
+                # pulled lim + 1 rows -- 50,001 of them -- to compare a length
+                # against lim, and then discarded every one: the capped branch
+                # re-asks with the hash sample, the under-cap branch re-asks
+                # with the detail columns. Counting a capped TOP answers the
+                # same question without moving the rows.
+                n_in_scope = con.execute(text(
+                    f"SELECT COUNT(*) FROM (SELECT TOP {lim + 1} 1 AS x "
+                    f"FROM {REFERENCE_MASTER} WHERE {clause}) t"),
+                    params).scalar() or 0
+                if n_in_scope > lim:
                     # NAME THE TABLE WE ACTUALLY READ. This was hard-coded to
                     # 'well_master_gold'; when that table was dropped the
                     # count came back 0 and k collapsed to 2, thinning every
@@ -1006,27 +1488,32 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
                     # indistinguishable to the eye from "hardly any wells".
                     k = max(2, int(est // max(lim, 1)) + 1)
                     sampled = True
-                    rows = con.execute(text(
-                        f"SELECT TOP {lim} {_light} "
+                    rows = _fetch(con,
+                        f"SELECT TOP {lim} {_full} "
                         f"FROM {REFERENCE_MASTER} "
-                        f"WHERE {clause} AND ABS(CHECKSUM(uwi14)) % {k} = 0"),
-                        params).fetchall()
+                        f"WHERE {clause} AND ABS(CHECKSUM(uwi14)) % {k} = 0",
+                        params)
                     if rows:
                         scope_est = len(rows) * k
                         k2 = max(2, int(scope_est // max(lim, 1)) + 1)
                         # Only worth a second pass if it changes the picture.
                         if k2 < k // 2:
-                            q2 = (f"SELECT TOP {lim} {_light} "
+                            q2 = (f"SELECT TOP {lim} {_full} "
                                   f"FROM {REFERENCE_MASTER} WHERE {clause} "
                                   f"AND ABS(CHECKSUM(uwi14)) % {k2} = 0")
-                            rows = con.execute(text(q2), params).fetchall()
-                elif rows:
+                            rows = _fetch(con, q2, params)
+                elif n_in_scope:
+                    # KEYED ON THE COUNT, NOT ON `rows`. This read `elif
+                    # rows:` when `rows` was the probe's own result; the probe
+                    # is gone, `rows` is [] here, and left alone this branch
+                    # could never fire -- an unbounded scope under the cap
+                    # would have drawn nothing at all, silently.
+                    #
                     # Under the cap even unbounded: it can be clicked, so it
                     # gets the detail columns and the popup.
-                    rows = con.execute(text(
+                    rows = _fetch(con,
                         f"SELECT {_full} FROM {REFERENCE_MASTER} "
-                        f"WHERE {clause}"), params).fetchall()
-                    detail = bool(rows)
+                        f"WHERE {clause}", params)
     except Exception as exc:
         print(f"[geography_layers] reference wells query failed: {exc}")
         return 0, 0
@@ -1035,13 +1522,40 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
 
 
     in_scope = None if sampled else len(rows)
+
+    # ── THE COUNT DECIDES THE POPUP, NOT WHICH QUERY RAN ─────────────────
+    # `detail` used to be set on the two EXACT paths and nowhere else, so a
+    # sampled layer had no popups at all -- and that is a click that does
+    # nothing. Worse than nothing, in fact: the map subscribes to
+    # last_object_clicked, which fires for any clicked object, so a dot with
+    # no popup bound falls through to the H3 grid handler, which reads the
+    # lat/lon and reruns. Clicking a well REFRESHED THE PAGE instead of
+    # answering. Found 4 Sep, the day the zoom ceiling started routing
+    # explodes through the sample and turned a rare case into the usual one.
+    #
+    # POPUP_MAX was written for exactly this decision and then never wired to
+    # anything -- a dead constant documenting an intent nobody could see was
+    # missing. It is the rule now, and it is applied to every path: under it
+    # the set is clickable and gets the popup, over it the popups are paid
+    # for and not used. Both queries fetch the full columns (the covering
+    # index makes the extra ones ~free: 0.91s for 2 columns against 1.05s for
+    # 11), so this is a decision about what to EMIT, not what to select.
+    detail = bool(rows) and len(rows) <= POPUP_MAX
+
     # THE COLOUR COLUMN IS ALWAYS LAST, whichever query ran, so one index
     # serves both row shapes and neither has to be unpacked by name.
     bands = [_ref_band(by, r[-1]) for r in rows]
     colours = _ref_colours(by, bands)
     known = sum(1 for _b in bands if _b)
-    label = ("\u26ab Reference wells (%s%s)"
-             % ("{:,}".format(len(rows)), " sample" if sampled else ""))
+    # SAY WHICH SAMPLE THIS IS. Both reasons cap the layer, and they have
+    # opposite fixes: over the ceiling means draw a smaller box, too far out
+    # means zoom in on the box you already drew. A label reading only
+    # "sample" sends the reader to the wrong one half the time.
+    _why = ""
+    if sampled:
+        _why = (" sample \u00b7 zoom to %d for every well" % REFWELL_WELL_ZOOM
+                if _coarse else " sample")
+    label = "\u26ab Reference wells (%s%s)" % ("{:,}".format(len(rows)), _why)
 
     # ── THE POINTS GO IN A FILE, NOT IN THE DOCUMENT ──────────────────────
     # A bounded set is now uncapped, so it can be large: 210,337 wells over
@@ -1070,52 +1584,37 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
         return 0, in_scope
 
     import hashlib as _hl
-    import json as _js
     _key = _hl.sha1(repr((
         None if not bounds else [round(float(x), 5)
                                  for x in (bounds[0][0], bounds[0][1],
                                            bounds[1][0], bounds[1][1])],
         by, detail, len(feats))).encode("utf-8")).hexdigest()[:16]
     _path, _url = ensure_refwells_geojson(feats, _key)
-    _oneach = (_REFWELL_ON_EACH
-               .replace("__COLOURS__", _js.dumps(colours))
-               .replace("__UNKNOWN__", _REF_UNKNOWN)
-               .replace("__DETAIL__", "true" if detail else "false")
-               .replace("__LABEL__", FEDWELL_POPUP_LABEL)
-               .replace("__BYLABEL__",
-                        _cb_title.split("\u00b7")[-1].strip().title()))
-    if "__" in _oneach.replace("__proto__", ""):
-        # CAUGHT HERE, NOT IN THE BROWSER. An unfilled __TOKEN__ is
-        # valid-looking JavaScript right up until it runs -- the same trap
-        # lease_on_each guards, which shipped a literal __FILT__ and died on
-        # the first township click.
-        _left = [t for t in _oneach.split("__")[1::2]]
-        print("[geography_layers] refwell template placeholder(s) unfilled: %s"
-              % ", ".join(sorted(set(_left)))[:120])
     if _path:
-        # SMALLER WHEN SAMPLED: no popup to hit, and 48,000 dots at radius 5
-        # is a smear, not a map.
-        _gj = _f.GeoJson(
-            _path, embed=False, name=label, show=show,
-            marker=_f.CircleMarker(radius=2 if detail else 1.2, weight=1,
-                                   fill=True, fill_opacity=0.75),
-            on_each_feature=_f.JsCode(_oneach))
-        # The link folium emits must be the BROWSER's, not ours.
-        _gj.embed_link = _url
-        _gj.add_to(m)
-        # AN EXPLODED HEX IS ITS OWN SCOPE. The gate exists so a
-        # continental view does not smear four million dots, but a hex
-        # the operator clicked is a bounded, affordable set they asked
-        # for by name -- hiding it under a zoom rule would answer a
-        # question they did not ask.
-        # hide=False when exploded: the dots must still GROW with the
-        # zoom, they just must not be hidden by it.
-        # EXPLODING REPLACES THE HEXES WITH THEIR WELLS, whether one
-        # was clicked or a box covered several -- same gesture, same
-        # result. The hexes are clipped to the box already, so hiding
-        # them hides exactly the ones that exploded.
-        _refwell_zoom_gate(m, hide=not explode)
         n_drawn = len(feats)
+        _draw_refwells_from_file(m, _path, _url, colours, _cb_title, known,
+                                 len(rows), label, detail, show, explode)
+        # REMEMBER ONLY WHAT THE FILE PATH CANNOT REBUILD. The geometry is
+        # already on disk; what would otherwise have to be re-derived from
+        # 165,802 rows is the colour map and the three counts the legend and
+        # the label are made of. That is a few hundred bytes per entry, so
+        # the bound is about not holding paths to files that have rotated
+        # away, not about memory.
+        if len(_REFWELL_MEMO) >= _REFWELL_MEMO_MAX:
+            _REFWELL_MEMO.pop(next(iter(_REFWELL_MEMO)), None)
+        _REFWELL_MEMO[_memo_key] = {
+            "path": _path, "url": _url, "colours": colours,
+            "cb_title": _cb_title, "known": known, "total": len(rows),
+            "label": label, "detail": detail, "n_drawn": n_drawn,
+            "in_scope": in_scope,
+            # The query too -- a memo hit must be able to restore the
+            # download's scope, not just the picture. Two short strings.
+            "sql": _drew.get("sql", ""), "params": _drew.get("params") or {},
+            "sampled": bool(sampled),
+            "scope_sql": _drew.get("scope_sql", ""),
+            "scope_params": _drew.get("scope_params") or {},
+            "bounded": bool(_drew.get("bounded")),
+        }
     else:
         # EMBEDDED WHEN THE FILE CANNOT BE WRITTEN. A read-only static/ should
         # cost payload, not the layer.
@@ -1130,15 +1629,37 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
             name=label, color="#1d4ed8", fill="#60a5fa",
             radius=3 if detail else 2, show=show, opacity=0.7,
             extra=_fl if detail else ["_cb"],
-            popup_fields=(["nm"] + _fl) if detail else None,
+            # NEVER None. A popup-less marker is read as a click on the hex
+            # underneath it -- see this function's docstring. Without detail
+            # there is only the name to show, and that is still an answer;
+            # what matters is that the sentinel alias is present so the
+            # handler ignores the click instead of drilling a cell.
+            popup_fields=(["nm"] + _fl) if detail else ["nm"],
             popup_aliases=([FEDWELL_POPUP_LABEL, "UWI", "Operator", "County",
                             "State", "Type", "Status", "TD", "Spud",
                             _cb_title.split("\u00b7")[-1].strip().title()]
-                           if detail else None),
+                           if detail else [FEDWELL_POPUP_LABEL]),
             colour_by="_cb", colours=colours)
+        # ONLY ON THIS BRANCH. The served-by-file branch adds the legend
+        # inside _draw_refwells_from_file, because the memo hit has to get
+        # one too and that is the only code both paths share. Leaving the
+        # call out here as well would draw it twice on every cold render.
+        _add_refwell_legend(m, colours, _cb_title, known, len(rows))
 
-    _add_refwell_legend(m, colours, _cb_title, known, len(rows))
-
+    # ── RECORD THE DRAW, AT THE ONE POINT IT IS KNOWN TO HAVE HAPPENED ──
+    # After the layer is on the map, not beside the fetch: a query that ran
+    # and then produced no features is not a draw, and offering a download
+    # for it would hand over rows the operator never saw.
+    _REFWELL_DRAWN.clear()
+    _REFWELL_DRAWN.update({
+        "sql": _drew.get("sql", ""), "params": _drew.get("params") or {},
+        "n_drawn": n_drawn, "sampled": bool(sampled), "label": label,
+        "by": by,
+        # The COMPLETE set for this scope -- what the download uses.
+        "scope_sql": _drew.get("scope_sql", ""),
+        "scope_params": _drew.get("scope_params") or {},
+        "bounded": bool(_drew.get("bounded")),
+    })
     return n_drawn, in_scope
 
 
@@ -2114,8 +2635,13 @@ def write_lease_geojson(engine, out_dir, limit=200000):
     # WRITE THEN REPLACE. The browser can request this file while it is being
     # rebuilt, and half a GeoJSON is a layer that fails to parse -- silently,
     # because a fetch error in the browser never reaches Python.
+    # dumps() then write() -- same reason as ensure_refwells_geojson, where
+    # it was measured: dump() takes the pure-Python encoder and dumps() takes
+    # the C one, 7.03s against 0.33s on an 11 MB collection. The lease file
+    # is the same shape and the same size class, so it gets the same fix
+    # rather than waiting to be found separately.
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"type": "FeatureCollection", "features": feats}, fh)
+        fh.write(json.dumps({"type": "FeatureCollection", "features": feats}))
     os.replace(tmp, path)
     return path, len(feats), legend
 
