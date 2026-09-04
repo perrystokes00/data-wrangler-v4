@@ -473,10 +473,13 @@ it's actually the correct default. **Open: make batched the default.**
   (`app_v3.py`, `page_run.py`) import it lazily inside the button handler and
   already catch the failure, so the button now reports "Reset failed: …"
   instead of crashing or silently doing nothing.
-- `tools/bulk_runner.py` imports `dataview.import_data.page_bulk`, deleted in
-  the v4 reorg; `run_job` exists nowhere in the repo. The import is inside a
-  function, so `--help` succeeds and it dies only when a job actually runs.
-  Repoint it at the surviving loader or retire the headless runner.
+- ~~`tools/bulk_runner.py` imports `dataview.import_data.page_bulk`, deleted in
+  the v4 reorg; `run_job` exists nowhere in the repo.~~ **RETIRED 4 Sep** — the
+  runner is deleted and README's Batch Loading section says so. The lesson it
+  taught is worth keeping: the import was INSIDE a function, so `--help`
+  succeeded and it died only when a job actually ran, which is why a
+  completely broken tool survived a reorg unnoticed. `run_watcher.bat` still
+  points at the same missing module and is the remaining loose end.
 - ~~Compound-key FKs are silently unchecked (`if len(ccols) != 1: continue`)~~
   **CLOSED 23 Aug — `promote_catalog._parent_fk_predicates` holds a child whose
   parent row is missing instead of letting the INSERT 547 and fail the whole

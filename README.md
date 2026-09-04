@@ -96,28 +96,29 @@ On first launch, connect to your SQL Server instance from the sidebar and select
 
 ## Batch Loading
 
-Run the queue once:
-```bash
-python bulk_runner.py --db-server SERVER\INSTANCE --db-name PPDM39 --windows-auth
-```
+The headless batch runner was retired: `tools/bulk_runner.py` imported
+`dataview.import_data.page_bulk`, which the v4 reorganisation deleted, and
+`run_job` exists nowhere in the tree. The import sat inside a function, so
+`--help` kept working and it only failed when a job actually ran — which is
+why it survived unnoticed. `run_batch.bat` had already gone; `run_watcher.bat`
+remains and points at the same missing module.
 
-Run as a continuous file watcher:
-```bash
-python bulk_runner.py --db-server SERVER\INSTANCE --db-name PPDM39 --windows-auth --watch
-```
-
-Or use the included `run_batch.bat` / `run_watcher.bat` for double-click execution on Windows.
+Batch loading is done from the **Data Assistant** page in the app.
 
 ---
 
 ## Architecture
 
+> **This section describes the v3 layout and has not been updated for v4.**
+> `page_bulk.py` and the whole `modules/` directory were deleted in the
+> reorganisation, and the entry point is `app_v4.py`. Left in place rather
+> than half-corrected, because a partly-true map is worse than one labelled
+> out of date. See `CLAUDE.md` for what the code actually looks like now.
+
 ```
 page_pipeline.py    ← Interactive ETL pipeline (8 stages)
-page_bulk.py        ← Batch loader (queue, scheduler, file watcher)
-bulk_runner.py      ← Headless batch runner (CLI / Task Scheduler)
-app.py              ← Main Streamlit app + sidebar
-modules/
+app.py              ← Main Streamlit app + sidebar        (now app_v4.py)
+modules/                                                  (deleted in v4)
   db.py             ← SQL Server connection
   staging.py        ← File ingest and staging
   mapping.py        ← Column mapping and fingerprints
