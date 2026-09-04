@@ -1141,6 +1141,35 @@ def _wells_on_map() -> bool:
                 or st.session_state.get("clicked_uwis"))
 
 
+def _hex_selection_active() -> bool:
+    """Is a hexagon selection currently exploding the map?"""
+    return bool(st.session_state.get("selected_h3_cells"))
+
+
+def _clear_hex_selection() -> None:
+    """Put the density hexes back, without clearing anything else.
+
+    THE WAY OUT OF AN EXPLODE. A selected hex replaces the cells with their
+    wells at every zoom, which is the point -- but it means zooming can no
+    longer undo it, so there has to be a deliberate way back or the map is
+    stuck in a state the operator cannot leave.
+
+    NARROWER THAN _clear_wells_state ON PURPOSE. That one also drops the
+    drawn box, the saved-place outline and the retained geometry, which is
+    right for "clear the wells" and wrong for "show me the cells again" --
+    losing the box you drew because you wanted the hexes back is a surprise.
+
+    BOTH KEYS OR NEITHER. viewport_uwis is rebuilt from _h3_cell_uwis on the
+    next cell click, so clearing the list without its source puts every
+    previously-clicked cell straight back. The tray is deliberately left
+    alone: the wells found by exploding are still a result worth keeping, and
+    Clear removes them when that is what is meant.
+    """
+    st.session_state.pop("_h3_cell_uwis", None)
+    st.session_state.pop("selected_h3_cells", None)
+    st.session_state.pop("_last_h3_click", None)
+
+
 def _clear_wells_state() -> None:
     """Remove every displayed well: drill, base layer, Results and tray.
 
@@ -16773,6 +16802,21 @@ def run(engine=None):
                        disabled=not _wells_on_map()):
             _clear_wells_state()
             st.rerun()
+        # THE WAY OUT OF AN EXPLODE. Selecting a hex replaces the cells with
+        # their wells at EVERY zoom -- that is what makes it an answer rather
+        # than a zoom level -- so zooming can no longer undo it and the map
+        # would otherwise be stuck in a state with no exit. Only shown when
+        # there is a selection to clear, so it is not one more permanent
+        # button competing for the eye.
+        #
+        # KEY ENDS "_clear", which _is_action_key() already excludes; a button
+        # the persist loop self-assigns raises on whatever page draws NEXT,
+        # far from here (scar #6).
+        if _hex_selection_active():
+            if _rvc.button("⬡ Show all cells", key="wm_hex_clear",
+                           use_container_width=True):
+                _clear_hex_selection()
+                st.rerun()
         # THE TRASH ICON IN THE DRAW TOOLBAR CANNOT DO THIS. It empties
         # all_drawings, but st_folium reports all_drawings empty on every
         # render where nobody drew -- the drawings handler says so, which is

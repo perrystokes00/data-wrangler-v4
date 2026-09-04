@@ -57,7 +57,7 @@ SOURCES = {
         # extent -- a basin is neither, so it gets the earth family and a
         # fill light enough to sit under everything else.
         "style": {"color": "#8a5a2b", "weight": 2.0, "opacity": 0.9,
-                  "fill_color": "#c98a4b", "fill_opacity": 0.08},
+                  "fill_color": "#c98a4b", "fill_opacity": 0.30},
         "order": 20,
     },
     "plays": {
@@ -67,7 +67,7 @@ SOURCES = {
         "category": "BOUNDARY",
         "tooltip": "Shale_play,Basin,Age_shale",
         "style": {"color": "#6b21a8", "weight": 1.4, "opacity": 0.9,
-                  "fill_color": "#a855f7", "fill_opacity": 0.10},
+                  "fill_color": "#a855f7", "fill_opacity": 0.22},
         "order": 21,
     },
     # ── AND FIELDS, WHICH ARE NOT A NATIONAL DATASET ──────────────────────
@@ -170,6 +170,13 @@ def bbox(feats):
 # provably needs, so the greedy pass below never runs out.
 _MAP_PALETTE = ["#8a5a2b", "#2c6e8f", "#6b7f3a", "#8c4a6b", "#3f6b34",
                 "#a06a2c", "#4a5a8c", "#7a3a3a"]
+
+# THE FILL OPACITY IS THE KNOB, NOT THE HUE. These eight are already
+# saturated; at the 0.08 the basins shipped with, every one of them washed
+# out to a grey suggestion and the layer read as "barely coloured". Lifting
+# the alpha darkens all thirty-two at once and keeps the adjacency property
+# intact, where re-picking hues would have thrown it away to solve a problem
+# the hues did not cause. --fill-opacity sets it; see FILL_OPACITY below.
 
 
 def _colour_by_adjacency(feats, key):
@@ -320,6 +327,10 @@ def main():
     ap.add_argument("--database", default="DataView_Demo")
     ap.add_argument("--only", choices=sorted(SOURCES),
                     help="load just one of them")
+    ap.add_argument("--fill-opacity", type=float, default=None,
+                    help="override every layer's fill opacity (0-1). "
+                         "The basins shipped at 0.08 and read as barely "
+                         "coloured on a light basemap.")
     ap.add_argument("--source", default=DEFAULT_SOURCE,
                     help="a code that EXISTS in dv_r_source (default %s)"
                          % DEFAULT_SOURCE)
@@ -327,6 +338,17 @@ def main():
                     help="show the registered layers and exit")
     a = ap.parse_args()
     engine = _conn(a.database)
+
+    # APPLIED BEFORE ANYTHING READS A STYLE, so --fill-opacity reaches both
+    # the row written to dv_spatial_layer and the per-feature colours drawn
+    # from it. Set on every layer rather than one, because the complaint that
+    # produced this flag -- "they need to be darker" -- was about the whole
+    # geology stack washing out on a light basemap, not one outline.
+    if a.fill_opacity is not None:
+        if not 0.0 <= a.fill_opacity <= 1.0:
+            raise SystemExit("--fill-opacity must be between 0 and 1")
+        for _spec in SOURCES.values():
+            _spec["style"]["fill_opacity"] = a.fill_opacity
 
     if a.list:
         with engine.connect() as c:

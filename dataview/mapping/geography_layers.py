@@ -743,12 +743,20 @@ def _refwell_zoom_gate(m, hide: bool = True):
         " function sync(){"
         " var el = mp.getContainer();"
         " if (!el) { return; }"
-        + (" if (mp.getZoom() < Z) {"
-           " L.DomUtil.addClass(el, 'dv-refwell-hide');"
-           " L.DomUtil.removeClass(el, 'dv-hex-hide'); }"
-           " else {"
-           " L.DomUtil.removeClass(el, 'dv-refwell-hide');"
-           " L.DomUtil.addClass(el, 'dv-hex-hide'); }" if hide else "")
+        # EXPLODED IS A STATE, NOT AN EXEMPTION. The first cut only skipped
+        # the zoom test, which left the hexes drawn -- so zooming out put a
+        # sheet of colour back over the wells that had just been asked for,
+        # and the cells "reappeared". Exploding REPLACES the cells with their
+        # wells and stays that way at every zoom; the way back is clearing the
+        # selection, not finding the right zoom again.
+        + ((" if (mp.getZoom() < Z) {"
+            " L.DomUtil.addClass(el, 'dv-refwell-hide');"
+            " L.DomUtil.removeClass(el, 'dv-hex-hide'); }"
+            " else {"
+            " L.DomUtil.removeClass(el, 'dv-refwell-hide');"
+            " L.DomUtil.addClass(el, 'dv-hex-hide'); }") if hide else
+           (" L.DomUtil.removeClass(el, 'dv-refwell-hide');"
+            " L.DomUtil.addClass(el, 'dv-hex-hide');"))
         + 
         # GROW THE DOTS WITH THE ZOOM. Radius is in screen pixels, so a dot
         # sized not to smear at the handover zoom is a speck four levels in.
