@@ -743,18 +743,29 @@ def _refwell_zoom_gate(m, hide: bool = True):
         " function sync(){"
         " var el = mp.getContainer();"
         " if (!el) { return; }"
-        # EXPLODED IS A STATE, NOT AN EXEMPTION. The first cut only skipped
-        # the zoom test, which left the hexes drawn -- so zooming out put a
-        # sheet of colour back over the wells that had just been asked for,
-        # and the cells "reappeared". Exploding REPLACES the cells with their
-        # wells and stays that way at every zoom; the way back is clearing the
-        # selection, not finding the right zoom again.
+        # ZOOM DOES NOT DECIDE WHETHER THE HEXES ARE THERE.
+        #
+        # It used to: above Z the gate hid them and showed the points, so
+        # zooming into a box made a layer the operator had switched on
+        # disappear under him. A layer that is ON should stay on until it is
+        # switched off -- zoom is how close you are looking, not what you
+        # asked to see. That was a taste dressed up as a rule, and it read as
+        # the map losing a layer.
+        #
+        # WHAT ZOOM STILL DECIDES is whether the UNBOUNDED well points draw,
+        # and that one is not taste: with no box and no selection the layer is
+        # a 46,602-well sample of a continent, which at zoom 4 is a smear that
+        # says nothing and costs everything. Scope it -- draw a box, click a
+        # hex -- and the floor lifts, because the set is then bounded and
+        # affordable and was asked for by name.
+        #
+        # HIDING A HEX IS A SELECTION DECISION, not a zoom one: exploding a
+        # cell replaces it with its wells, and a box round several does the
+        # same to those several -- one gesture, one rule.
         + ((" if (mp.getZoom() < Z) {"
-            " L.DomUtil.addClass(el, 'dv-refwell-hide');"
-            " L.DomUtil.removeClass(el, 'dv-hex-hide'); }"
+            " L.DomUtil.addClass(el, 'dv-refwell-hide'); }"
             " else {"
-            " L.DomUtil.removeClass(el, 'dv-refwell-hide');"
-            " L.DomUtil.addClass(el, 'dv-hex-hide'); }") if hide else
+            " L.DomUtil.removeClass(el, 'dv-refwell-hide'); }") if hide else
            (" L.DomUtil.removeClass(el, 'dv-refwell-hide');"
             " L.DomUtil.addClass(el, 'dv-hex-hide');"))
         + 
@@ -762,7 +773,7 @@ def _refwell_zoom_gate(m, hide: bool = True):
         # sized not to smear at the handover zoom is a speck four levels in.
         # Scale from the layer's OWN base so the sampled 1.5px dots and the
         # detailed 3px ones keep their relative weight.
-        " var f = Math.max(1, Math.min(3, 1 + (mp.getZoom() - Z) * 0.28));"
+        " var f = Math.max(1, Math.min(2, 1 + (mp.getZoom() - Z) * 0.18));"
         " var a = window._dvRefWellLayers || [];"
         " for (var i = 0; i < a.length; i++) {"
         "   try { a[i].setRadius((a[i]._dvBaseR || 3) * f); } catch (e) {} } }"
@@ -825,7 +836,7 @@ def ensure_refwells_geojson(feats, key, static_dir=None):
 
 
 def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
-                        show: bool = True, by: str = "spud",
+                        show: bool = True, by: str = "operator",
                         explode: bool = False):
     """Individual reference wells as ONE GeoJson layer. (drawn, in_scope).
 
@@ -891,7 +902,12 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
     # THE COLOUR COLUMN RIDES ALONG ON WHICHEVER QUERY RUNS, so the
     # sampled path is coloured too. One more column on a scan that is
     # already happening, not a second query.
-    _cb_col, _cb_title = _REF_BY.get(by, _REF_BY["spud"])
+    # FALL BACK TO SOMETHING THAT COLOURS. spud_date is 0.0% filled in
+    # well_master_public_v2 -- the loader does not map it -- so an
+    # unrecognised `by` landing here used to produce a map of grey
+    # "not known" dots that looked like a broken layer rather than a
+    # bad argument. operator is 92% filled.
+    _cb_col, _cb_title = _REF_BY.get(by, _REF_BY["operator"])
     _light = _REF_COLS_LIGHT + ", " + _cb_col + " AS _cb"
     _full = _REF_COLS + ", " + _cb_col + " AS _cb"
     # ROWS FIRST, AND COUNT ONLY IF IT TELLS US SOMETHING. Under the cap the
@@ -1081,7 +1097,7 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
         # is a smear, not a map.
         _gj = _f.GeoJson(
             _path, embed=False, name=label, show=show,
-            marker=_f.CircleMarker(radius=3 if detail else 1.5, weight=1,
+            marker=_f.CircleMarker(radius=2 if detail else 1.2, weight=1,
                                    fill=True, fill_opacity=0.75),
             on_each_feature=_f.JsCode(_oneach))
         # The link folium emits must be the BROWSER's, not ours.
@@ -1094,6 +1110,10 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
         # question they did not ask.
         # hide=False when exploded: the dots must still GROW with the
         # zoom, they just must not be hidden by it.
+        # EXPLODING REPLACES THE HEXES WITH THEIR WELLS, whether one
+        # was clicked or a box covered several -- same gesture, same
+        # result. The hexes are clipped to the box already, so hiding
+        # them hides exactly the ones that exploded.
         _refwell_zoom_gate(m, hide=not explode)
         n_drawn = len(feats)
     else:
@@ -1108,7 +1128,7 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
                ((r[1], r[2], r[0], bands[_i] or "not known")
                 for _i, r in enumerate(rows)),
             name=label, color="#1d4ed8", fill="#60a5fa",
-            radius=5 if detail else 2.5, show=show, opacity=0.7,
+            radius=3 if detail else 2, show=show, opacity=0.7,
             extra=_fl if detail else ["_cb"],
             popup_fields=(["nm"] + _fl) if detail else None,
             popup_aliases=([FEDWELL_POPUP_LABEL, "UWI", "Operator", "County",

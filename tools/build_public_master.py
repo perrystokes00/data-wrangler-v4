@@ -90,13 +90,13 @@ SPECS = {
             api="API_WellNo", lat="Surface_latitude", lon="Surface_Longitude",
             well="Well_Name", op="Company_name", county="County",
             field="Producing_name", wtype="Well_Type", wstat="Well_Status",
-            td="Measured_depth", bounds=(40.4, 45.1, -79.8, -71.8)),
+            td="Measured_depth", spud="Date_Spudded", bounds=(40.4, 45.1, -79.8, -71.8)),
  "AL": dict(code="01", file="Alabama/WellList.csv", source="AL_OGB",
             agency="Geological Survey of Alabama / State Oil and Gas Board",
             api="API", lat="Latitude", lon="Longitude",
             well="WellName", op="Operator", county="County",
             field="FieldName", wtype="TypeDesc", wstat="StatusDesc",
-            td="DTD", bounds=(30.1, 35.1, -88.6, -84.8)),
+            td="DTD", spud="SpudDate", bounds=(30.1, 35.1, -88.6, -84.8)),
  # Kansas keys 35,820 wells by KID alone -- its own well identifier, present
  # on every row in the file. They are named wells with a status and, for
  # 35,772 of them, a coordinate, so they are wells, not stubs.
@@ -106,7 +106,7 @@ SPECS = {
             well="LEASE_WELL_NAME", op="CURR_OPERATOR", county=None,
             field="FIELD", wtype=None, wstat="STATUS", td="DEPTH",
             alt=dict(col="KID", prefix="15", width=10, source="KS_KGS_KID"),
-            bounds=(36.9, 40.1, -102.2, -94.5)),
+            spud="SPUD", bounds=(36.9, 40.1, -102.2, -94.5)),
  # MICHIGAN WAS NEVER IN THE GOLD MASTER. Nothing there uses prefix 21, and
  # the 5,465 rows labelled MI are Mississippi wells (prefix 23, Jasper and
  # Lamar counties, lat 30-34). Its file publishes a full 14-digit api_num --
@@ -130,7 +130,7 @@ SPECS = {
             field=None, wtype=None, wstat="WELL_STATUS", td="DEPTH_FEET",
             alt=dict(col="OIL_GAS_ID", prefix="46", width=8, on_collision=True,
                      source="WA_DNR_OGID"),
-            bounds=(45.5, 49.1, -124.9, -116.9)),
+            spud="DRILL_START_DATE", bounds=(45.5, 49.1, -124.9, -116.9)),
  "VA": dict(code="45", file="Virginia/va_wells_wgs84.csv", source="VA_DMME",
             agency="VA Dept of Mines, Minerals and Energy",
             api="API", lat="GEOM_LATITUDE", lon="GEOM_LONGITUDE",
@@ -149,7 +149,7 @@ SPECS = {
             lat="Surface Latitude*", lon="Surface Longitude*",
             well="Well Name", op="Company Name", county="Bottom Area",
             field=None, wtype="Type Code", wstat="Status Code",
-            td="BH Total MD (feet)", bounds=(25.0, 31.0, -98.0, -81.0)),
+            td="BH Total MD (feet)", spud="Spud Date", bounds=(25.0, 31.0, -98.0, -81.0)),
  # Indiana publishes no API at all -- IGS_ID is the Geological Survey's own
  # well number, and permit_number in this file is empty on every row.
  "IN": dict(code="32", file="Indiana/indiana_wells_coords.csv",
@@ -178,7 +178,7 @@ SPECS = {
             wtype="WELL_TYPE", wstat="WELL_STATUS", td=None,
             alt=dict(col="PERMIT_NUMBER", prefix="37", width=8,
                      source="PA_DEP"),
-            bounds=(39.6, 42.3, -80.6, -74.6)),
+            spud="SPUD_DATE", bounds=(39.6, 42.3, -80.6, -74.6)),
 
  # ---- from a point shapefile's attributes ------------------------------
  "CA": dict(code="04", reader="shp", file="California/Well.shp",
@@ -187,7 +187,7 @@ SPECS = {
             api="API", lat="Latitude", lon="Longitude",
             well="LeaseName", op="OperatorNa", county="CountyName",
             field="FieldName", wtype="WellTypeLa", wstat="WellStatus",
-            td=None, bounds=(32.5, 42.1, -124.5, -114.1)),
+            td=None, spud="SpudDate", bounds=(32.5, 42.1, -124.5, -114.1)),
  # COLORADO'S `API` COLUMN HAS NO STATE CODE -- it reads 12316872, which
  # would key every Colorado well into state 12, Illinois. API_Label is the
  # one that carries the 05.
@@ -197,7 +197,7 @@ SPECS = {
             api="API_Label", lat="Latitude", lon="Longitude",
             well="Well_Name", op="Operator", county=None,
             field="Field_Name", wtype="Well_Class", wstat="Facil_Stat",
-            td="Max_MD", bounds=(36.9, 41.1, -109.1, -102.0)),
+            td="Max_MD", spud="Spud_Date", bounds=(36.9, 41.1, -109.1, -102.0)),
  # Idaho ships both NAD27 and WGS84 pairs; take the WGS84 one.
  "ID": dict(code="11", reader="shp",
             file="Idaho/DD-3OilAndGas2023.v3.zip"
@@ -206,7 +206,7 @@ SPECS = {
             api="API", lat="LatitudeWG", lon="LongitudeW",
             well="WellName", op="Operator", county="County",
             field="FieldName", wtype="WellType", wstat="WellStatus",
-            td="TotalDepth", bounds=(41.9, 49.1, -117.3, -110.9)),
+            td="TotalDepth", spud="SpudDate", bounds=(41.9, 49.1, -117.3, -110.9)),
  # Louisiana MUST be read from the zip: the extracted .shp/.dbf beside it are
  # unhydrated OneDrive placeholders that raise PermissionError. DBF truncates
  # field names to ten characters, hence SURFACE_LA / SURFACE_LO.
@@ -228,7 +228,7 @@ SPECS = {
             # serial is 990,702, so seven digits is enough with room to spare.
             alt=dict(col="WELL_SERIA", prefix="179", width=7,
                      on_collision=True, source="LA_DNR_SERIAL"),
-            bounds=(28.8, 33.1, -94.1, -88.7)),
+            spud="SPUD_DATE", bounds=(28.8, 33.1, -94.1, -88.7)),
  # ND ships api_no formatted and `api` already 14 clean digits.
  "ND": dict(code="33", reader="shp", file="North_Dakota/OGD_Wells.shp",
             source="ND_NDIC",
@@ -236,7 +236,7 @@ SPECS = {
             api="api", lat="latitude", lon="longitude",
             well="well_name", op="operator", county="County",
             field="field_name", wtype="well_type", wstat="status",
-            td="td", bounds=(45.9, 49.1, -104.1, -96.5)),
+            td="td", spud="spud_date", bounds=(45.9, 49.1, -104.1, -96.5)),
  # TEXAS IS 254 COUNTY FILE PAIRS, not one file -- see texas_rows(). Its
  # published API is EIGHT characters because the state code 42 is in the file
  # name, so the reader puts it back before anything sees it.
@@ -253,7 +253,7 @@ SPECS = {
             api="id", lat="latitude", lon="longitude",
             well="name", op="ogrid_name", county="county", field=None,
             wtype="type", wstat="status", td="measured_v",
-            bounds=(31.2, 37.1, -109.1, -102.9)),
+            spud="spud_date", bounds=(31.2, 37.1, -109.1, -102.9)),
 }
 
 
@@ -270,6 +270,43 @@ def num(v):
         return float(str(v).replace(",", "").strip())
     except (TypeError, ValueError):
         return None
+
+
+# The Drake well, 1859. Nothing was spudded before it, so a date earlier than
+# this is a placeholder wearing a date's clothes -- and there are two in these
+# files: Pennsylvania writes 1800/01/01 and Idaho 1/1/1903 where the date is
+# unknown. Stored as-is they would plot a vintage map with wells drilled
+# before the industry existed, which is the confident-wrong-value failure with
+# a date instead of a coordinate.
+SPUD_MIN = datetime.date(1859, 1, 1)
+_SPUD_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%d-%b-%y", "%d-%b-%Y",
+                 "%Y/%m/%d", "%Y%m%d", "%m/%d/%y")
+
+
+def parse_date(v):
+    """A real date, or None. Six formats across thirteen agencies.
+
+    KANSAS WRITES 01-Apr-69 -- a TWO-DIGIT year, which %y reads as 1969 (it
+    pivots at 68/69). That is right for wells and wrong in general, so it is
+    written down rather than left to look like an accident.
+    """
+    s = str(v or "").strip()
+    if not s:
+        return None
+    # ISO with a time, a zone, or both: 1886-06-26 00:00:00, 1961-02-27T07:00Z
+    s = s.replace("T", " ").split(" ")[0].split("+")[0].strip()
+    if not s or set(s) <= {"0", "-", "/"}:
+        return None
+    for f in _SPUD_FORMATS:
+        try:
+            d = datetime.datetime.strptime(s, f).date()
+        except ValueError:
+            continue
+        # A future date is as impossible as a pre-Drake one.
+        if SPUD_MIN <= d <= datetime.date.today():
+            return d
+        return None
+    return None
 
 
 def _codes(spec):
@@ -517,6 +554,8 @@ def read(st, spec):
             surface_latitude=lat, surface_longitude=lon,
             raw_well_type=get(r, "wtype"), raw_well_status=get(r, "wstat"),
             total_depth=num(r.get(spec["td"])) if spec.get("td") else None,
+            spud_date=parse_date(r.get(spec["spud"])) if spec.get("spud")
+            else None,
             primary_source=spec["source"], source_list=spec["source"],
             source_count=1, dup_count=1, quality_score=75,
             uwi_suspect=0, coord_suspect=bad, built_at=now))

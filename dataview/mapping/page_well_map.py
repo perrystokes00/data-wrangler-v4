@@ -1048,15 +1048,32 @@ GEO_PILL_LABELS = {_lbl for _f, _lbl in GEO_PILL_DEFS}
 # Teapot, zero of 12,879 in Natrona. Spud is the reverse -- 35% nationally,
 # 79% at Teapot -- so the national winner is the wrong default for a Wyoming
 # view, and the label says so rather than leaving it to be discovered.
+# COVERAGE MEASURED, NOT GUESSED, and re-measured whenever the master is
+# rebuilt. Choosing an attribute blind gets a map of grey "not known"
+# dots with nothing saying why, so the figure is part of the choice.
+#
+# COUNT(col) WOULD LIE HERE: the master carries literal 'UNKNOWN' and
+# 'NOT AVAILABLE' text, which counts as filled and once reported well
+# type at 93.7% when the real figure was 55.8%. These exclude it.
+#
+# Ordered by coverage, so the first choice is the one most likely to
+# colour what is on screen. Measured 3 Sep against well_master_public_v2
+# (3,140,361 wells). The old labels quoted percentages from the RETIRED
+# gold master and named Wyoming, which is not in the public master at
+# all -- a label describing a table that no longer exists.
+#
+# SPUD DECADE IS NOT OFFERED. spud_date is 0.0% filled: the loader in
+# tools/build_public_master.py does not map it, though most agencies
+# publish one. An option that can only ever produce an all-grey map is
+# worse than no option, so it goes until the column is populated.
 REFWELL_BY_LABELS = {
-    "status":   "Well status — 72% of US, none in WY",
-    "type":     "Well type — 56% of US, none in WY",
-    "operator": "Operator — 52% of US, 100% at Teapot",
-    "depth":    "Total depth — 50% of US, 95% at Teapot",
-    "spud":     "Spud decade — 35% of US, 79% at Teapot",
-    "field":    "Field — 29% of US, 100% at Teapot",
+    "operator": "Operator — 92% filled",
+    "depth":    "Total depth — 76% filled",
+    "status":   "Well status — 62% filled",
+    "field":    "Field — 62% filled",
+    "type":     "Well type — 61% filled",
 }
-REFWELL_BY_DEFAULT = "status"
+REFWELL_BY_DEFAULT = "operator"
 
 
 # Places saved before this list changed carry the OLD text. Leases,
@@ -1142,8 +1159,15 @@ def _wells_on_map() -> bool:
 
 
 def _hex_selection_active() -> bool:
-    """Is a hexagon selection currently exploding the map?"""
-    return bool(st.session_state.get("selected_h3_cells"))
+    """Is anything currently exploding the map?
+
+    TWO GESTURES EXPLODE, SO TWO HAVE TO BE ASKED ABOUT. Clicking a hex
+    selects it; drawing a box scopes the wells to it. Testing only the cell
+    selection meant a box-driven explode showed no way back -- "how do you get
+    the hexes back again" -- because the button that offers it never drew.
+    """
+    return bool(st.session_state.get("selected_h3_cells")
+                or _clip_bounds_now())
 
 
 def _clear_hex_selection() -> None:
@@ -1168,6 +1192,15 @@ def _clear_hex_selection() -> None:
     st.session_state.pop("_h3_cell_uwis", None)
     st.session_state.pop("selected_h3_cells", None)
     st.session_state.pop("_last_h3_click", None)
+    # AND THE BOX, because a box explodes too. Leaving it would put the hexes
+    # back and immediately re-scope the wells to it, so the button would
+    # appear to half-work. The rectangle itself goes with it: an outline
+    # around a constraint that no longer applies is the same lie as a
+    # selection highlight on a cell that is no longer selected.
+    st.session_state.pop("_clip_box", None)
+    st.session_state.pop("_active_drill_bbox", None)
+    st.session_state.pop("_last_drawings", None)
+    st.session_state.pop("processed_drawings", None)
 
 
 def _clear_wells_state() -> None:
@@ -13208,12 +13241,22 @@ def run(engine=None):
         # so the layer had one permanent setting and no way to say so. Oil
         # against gas is a real question about a field, not a preference.
         # Shown only while the layer is on, like the heatmap weight below.
-        if "geo_refwells" in active_db:
-            st.selectbox(
-                "Colour reference wells by",
-                options=list(REFWELL_BY_LABELS),
-                format_func=lambda _k: REFWELL_BY_LABELS[_k],
-                key="wm_refwell_by")
+        # ALWAYS SHOWN, and that is the point. The reference wells reach the
+        # map three ways -- the chip, an exploded hex, a drawn box -- so any
+        # condition here has to predict all three, on a render that happens
+        # 4,000 lines before two of them are decided. It was gated on the chip
+        # (invisible when a box drew the wells), then on chip-or-selection
+        # (still invisible, because the selection is read later than this
+        # runs). Three attempts at the same guard is the signal: the control
+        # costs one selectbox and hiding it has cost more than that twice.
+        #
+        # The setting is read at render time, so it is never stale: with no
+        # wells drawn it simply governs nothing.
+        st.selectbox(
+            "Colour reference wells by",
+            options=list(REFWELL_BY_LABELS),
+            format_func=lambda _k: REFWELL_BY_LABELS[_k],
+            key="wm_refwell_by")
 
         if "db_production_heat" in active_db:
             st.radio("Heatmap weight", ["BOE", "Oil", "Gas"],
@@ -14881,8 +14924,18 @@ def run(engine=None):
                 _lv_choice = dict(_lv_choice,
                                   elev_min=_wel[0], elev_max=_wel[1])
         _lv_mode = (_lv_choice.get("mode") or "")
+        # AND AN EXPLODE WIDENS IT TOO -- the same lesson as the paragraph
+        # above, learned again. Clicking a hex or drawing a box asks for the
+        # reference WELLS, and that renderer lives inside this block. With no
+        # chip ticked the block was skipped entirely, so the selection was
+        # recorded (the log said "box: 6 of 6 cell(s) hold wells"), the hexes
+        # clipped to it, and then nothing drew -- the map agreeing that six
+        # cells were chosen and showing no wells for any of them. The inner
+        # test could never fire because control never reached it.
         if (any(_k in active_db for _k, _lbl in _geo_defs)
-                or _lv_mode in ("leases", "townships", "both")):
+                or _lv_mode in ("leases", "townships", "both")
+                or st.session_state.get("selected_h3_cells")
+                or _clip_bounds_now()):
             try:
                 from dataview.mapping.geography_layers import add_geography_layer
                 # AN EMPTY LAYER LOOKS EXACTLY LIKE A BROKEN ONE. Both adders
@@ -15253,7 +15306,8 @@ def run(engine=None):
                 # made the gesture look broken: the hexes took the click,
                 # turned blue, and nothing else happened.
                 _hex_pick = list(st.session_state.get("selected_h3_cells") or [])
-                if "geo_refwells" in active_db or _hex_pick:
+                if ("geo_refwells" in active_db or _hex_pick
+                        or _clip_bounds_now()):
                     # INDIVIDUAL reference wells, which the density layer
                     # cannot give: v_well_density_r* answers "where are wells"
                     # for 3.9M rows, never "which wells are these".
@@ -15275,6 +15329,19 @@ def run(engine=None):
                         # scope and quietly re-pointing all three at a hex is
                         # how those three layers came to disagree before.
                         _explode = False
+                        # THE DRAWN BOX BEATS THE CAMERA. _layer_bounds reads
+                        # _drawn_bounds FIRST, and _drawn_bounds is also what
+                        # the camera writes to move the view -- so the
+                        # cold-start fit to the lower 48 shadowed a rectangle
+                        # the operator had actually drawn. The log said both
+                        # facts on the same render and they disagreed:
+                        #   clip ON -> 35.9424,-108.4127 .. 36.9499,-107.1161
+                        #   geo_refwells drew 46602 (bounds=24.5,-128.35..
+                        #                            54.5,-68.35, SAMPLED)
+                        # A box is the durable statement of scope -- set by the
+                        # rectangle handler and by nothing else, cleared only
+                        # by ✗ Clear box -- so here it wins.
+                        _clipb = _clip_bounds_now()
                         _hexb = _bounds_of_h3_cells(_hex_pick)
                         if _hexb:
                             _rb, _explode = _hexb, True
@@ -15282,6 +15349,28 @@ def run(engine=None):
                                  "%.4f,%.4f .. %.4f,%.4f"
                                  % (len(_hex_pick), _hexb[0][0], _hexb[0][1],
                                     _hexb[1][0], _hexb[1][1]))
+                        elif _clipb:
+                            # AND A BOX IS AN EXPLODE TOO. Drawing one is the
+                            # same act as clicking a hex -- "show me what is
+                            # HERE" -- so the zoom floor steps aside for it as
+                            # well. Otherwise the wells are fetched, bounded
+                            # and correct, and then hidden by CSS until zoom 8,
+                            # which reads as the box having done nothing.
+                            # A BOX IS A MULTI-CELL CLICK. One hex clicked
+                            # explodes; a box round several explodes those
+                            # several -- same gesture, same result, and the
+                            # hexes are already clipped to the box, so hiding
+                            # them hides exactly the ones that exploded.
+                            #
+                            # This kept them for one revision, to fix hexes
+                            # vanishing on zoom. That was the wrong cure: the
+                            # cause was the zoom gate, which no longer touches
+                            # hexes at all, so the box can explode properly.
+                            _rb, _explode = _clipb, True
+                            _say("[map] box scopes reference wells -> "
+                                 "%.4f,%.4f .. %.4f,%.4f"
+                                 % (_clipb[0][0], _clipb[0][1],
+                                    _clipb[1][0], _clipb[1][1]))
                         _rn, _rscope = add_reference_wells(
                             m, engine, bounds=_rb, show=True,
                             by=st.session_state.get(
@@ -18006,11 +18095,43 @@ def run(engine=None):
                                 _handled_as_cell = True
                                 st.rerun()
                             else:
+                                # NO WELLS IN dv_well IS NOT NO WELLS. Same
+                                # fault as the box handler: the drill above
+                                # reads dataview.dv_well (84,519 wells, nearly
+                                # all in Wyoming) while the hex the operator
+                                # just clicked was DRAWN from the 3.1M-row
+                                # reference master. Over the San Juan Basin
+                                # the drill comes back empty and the click was
+                                # discarded with "No wells in cell" -- of a
+                                # cell whose own tooltip had offered thousands.
+                                #
+                                # Select it anyway, with an empty uwi list:
+                                # the tray is a dv_well thing and stays empty,
+                                # but the cell is now selected, outlined, and
+                                # can be exploded -- which reads its wells
+                                # from the master by BOUNDS, not from here.
+                                _cells = dict(st.session_state.get(
+                                    "_h3_cell_uwis", {}))
+                                if _clicked_h3 in _cells:
+                                    _cells.pop(_clicked_h3, None)
+                                    _verb = "removed"
+                                else:
+                                    _cells[_clicked_h3] = []
+                                    _verb = "added"
+                                st.session_state["_h3_cell_uwis"] = _cells
+                                st.session_state["selected_h3_cells"] = \
+                                    list(_cells)
+                                _say("[map] cell %s %s (no dv_well rows; "
+                                     "explode reads the master)"
+                                     % (_clicked_h3, _verb))
                                 st.info(
-                                    f"🔶 No wells in R{_h3_res_active} "
-                                    f"cell {_clicked_h3}"
+                                    f"🔶 Cell {_verb} — {len(_cells)} "
+                                    f"selected. These wells are in the "
+                                    f"reference master, not dv_well, so the "
+                                    f"tray stays empty; the map draws them."
                                 )
                                 _handled_as_cell = True
+                                st.rerun()
                         except Exception as _e:
                             st.warning(f"H3 drill failed: {_e}")
 
