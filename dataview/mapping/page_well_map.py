@@ -18569,8 +18569,28 @@ def run(engine=None):
         # the rerun that pressing the button causes.
         from dataview.mapping.geography_layers import (
             refwell_drawn_frame as _rw_frame,
-            refwell_drawn_info as _rw_info)
+            refwell_drawn_info as _rw_info,
+            refwell_too_many as _rw_toomany)
         _hn, _hsampled, _, _hbounded = _rw_info()
+        # ── THE BOX WAS REFUSED, SO SAY SO WHERE THE FILE WOULD HAVE BEEN ──
+        # A refusal that only reaches the log is a blank layer, and this page
+        # already knows what that costs: an empty map cannot tell "too much"
+        # from "nothing here" from "the control is broken", and they have
+        # three different repairs. Both numbers, because "too many" without
+        # the count gives no sense of HOW MUCH smaller the box has to be.
+        # st.warning DIRECTLY, NOT _mapmsg. _mapmsg queues and is flushed
+        # ~50 lines above this; anything handed to it here is written into a
+        # container that has already been rendered and is silently dropped.
+        # This block sits below the map by design, so it draws in place.
+        _tm_n, _tm_ceil = _rw_toomany()
+        if _tm_n:
+            st.warning(
+                "⚫ **%s wells** in that box — more than the %s this map "
+                "draws individually, so **none are shown**. Draw a smaller "
+                "box and you get every well in it, on screen and in the "
+                "export. (Nothing is sampled: a thinned picture of a box "
+                "you drew looks complete and is not.)"
+                % ("{:,}".format(_tm_n), "{:,}".format(_tm_ceil)))
         if _hn:
             with st.expander("⬇ Well headers — starter set", expanded=False):
                 st.caption(

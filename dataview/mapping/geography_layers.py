@@ -560,6 +560,24 @@ POPUP_MAX = 20000
 # in its own name, rather than a fetch nobody can use.
 BOUNDED_MAX = 300000
 
+# ── A DRAWN BOX IS ALL-OR-A-MESSAGE, NEVER A SAMPLE ──────────────────────
+# "If I draw a box to select wells I want all wells in that box. If it gets
+# over 20,000 the message should say select a smaller box to see and export
+# all wells."
+#
+# A SAMPLE INSIDE A BOX IS THE WRONG ANSWER TO THE QUESTION ASKED. Drawing a
+# box says "these ones"; thinning it returns a picture of somewhere that
+# looks complete and is not, and this repo's oldest law is that wrong beats
+# missing in cost, never in value. Under the ceiling the box is exact and
+# every dot is clickable and exportable; over it, nothing is drawn and the
+# message names the repair. Refusing is what makes "all wells in that box"
+# true rather than usually true.
+#
+# TUNABLE, BECAUSE THE RIGHT NUMBER IS A JUDGEMENT ABOUT THE BROWSER, not a
+# fact about the data -- 20,000 markers measured ~0.4s to draw, and a faster
+# machine may want more. DW_REFWELL_BOX_MAX raises it without an edit.
+BOX_ALL_MAX = max(1, int(os.environ.get("DW_REFWELL_BOX_MAX", "20000")))
+
 
 
 
@@ -1113,6 +1131,19 @@ def refwell_drawn_info():
             bool(_REFWELL_DRAWN.get("bounded")))
 
 
+def refwell_too_many():
+    """(count, ceiling) when the last box was refused, else (0, 0).
+
+    A SEPARATE ACCESSOR RATHER THAN A FIFTH TUPLE SLOT. refwell_drawn_info's
+    shape is read at a call site that unpacks it positionally; widening it
+    would break that silently at a distance, which is the kind of change this
+    file has paid for before. Refusal is also a different question from "what
+    was drawn" -- nothing was.
+    """
+    return (int(_REFWELL_DRAWN.get("too_many") or 0),
+            int(_REFWELL_DRAWN.get("ceiling") or 0))
+
+
 def _draw_refwells_from_file(m, path, url, colours, cb_title, known, total,
                              label, detail, show, explode):
     """Add the served-by-URL reference-well layer to `m`.
@@ -1327,14 +1358,20 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
     # leave the operator with 50,000 dots that do nothing -- which is the bug
     # this pass was opened to fix. One ceiling, and everything under it has a
     # popup. It also costs less: ~5 MB rather than ~12 MB.
+    # ONE CEILING FOR A BOX NOW, AND IT IS NOT A ZOOM QUESTION ANY MORE.
+    # This used to give a close-in box BOUNDED_MAX (300,000) and a far-out one
+    # POPUP_MAX, on the reasoning that zoom decides when dots become a mass.
+    # That reasoning still holds for LOOKING; it does not survive "I want all
+    # wells in that box", because both ceilings ended in the same place -- a
+    # sample -- and a sample is the thing being refused. So: one number, the
+    # same wherever the box is, and over it nothing is drawn.
     _coarse = False
     _ceiling = BOUNDED_MAX
     if _bx:
         _iz = _implied_zoom(_bx)
-        if _iz < REFWELL_WELL_ZOOM:
-            _ceiling = int(min(POPUP_MAX, limit))
-            lim = _ceiling
-            _coarse = True
+        _ceiling = BOX_ALL_MAX
+        lim = _ceiling
+        _coarse = _iz < REFWELL_WELL_ZOOM
 
     # ── THE REPEAT RENDER STOPS HERE ─────────────────────────────────────
     # Before the connection, before the capped count -- everything in the key
@@ -1437,23 +1474,43 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
                     f"AS x FROM {REFERENCE_MASTER} WHERE {clause}) t"),
                     params).scalar() or 0
                 if n_in_box > _ceiling:
-                    # TOO BIG TO BE A BOX. Fall through to the sampled
-                    # path, which caps, spreads and says "sample" in the
-                    # layer name. SAY WHICH CEILING BOUND -- the repairs
-                    # differ, and a log line naming the wrong one is how
-                    # "was the box ignored?" and "was the box too big?"
-                    # became indistinguishable once before.
-                    if _coarse:
-                        print("[geography_layers] reference wells: box fits "
-                              "at zoom ~%.1f, below %d -- more than %s wells "
-                              "is a mass at that scale, sampling instead"
-                              % (_iz, REFWELL_WELL_ZOOM,
-                                 "{:,}".format(_ceiling)))
-                    else:
-                        print("[geography_layers] reference wells: box holds "
-                              "more than %s wells -- sampling instead"
-                              % "{:,}".format(_ceiling))
-                    bounds = None
+                    # TOO BIG -- AND THAT IS THE ANSWER, NOT A REASON TO
+                    # GUESS. This used to set bounds = None and fall through
+                    # to the hash-spread sample. The sample was honest about
+                    # itself in the layer name and still wrong here: the box
+                    # was drawn to mean "these wells", so returning a picture
+                    # of some of them looks complete at a glance and exports
+                    # differently from what is on screen. That gap is what
+                    # was reported -- "it says exporting 1,000 and there are
+                    # only 10 on the screen".
+                    #
+                    # NOTHING IS DRAWN AND NOTHING IS OFFERED. _REFWELL_DRAWN
+                    # is left cleared, so the download does not appear either:
+                    # the record beside it says a query that produced no
+                    # features is not a draw, and a file of rows the operator
+                    # never saw is exactly what that rule exists to prevent.
+                    print("[geography_layers] reference wells: box holds "
+                          "more than %s well(s) (%s%s) -- NOT sampling; "
+                          "draw a smaller box to see and export them all"
+                          % ("{:,}".format(_ceiling),
+                             "{:,}".format(n_in_box),
+                             "+" if n_in_box > _ceiling else ""))
+                    _REFWELL_DRAWN.clear()
+                    _REFWELL_DRAWN.update({
+                        "sql": "", "params": {}, "n_drawn": 0,
+                        "sampled": False, "by": by,
+                        "scope_sql": "", "scope_params": {},
+                        "bounded": True,
+                        # WHAT THE MESSAGE NEEDS, and the only new key: the
+                        # count that was refused and the ceiling it broke, so
+                        # the page can say both numbers rather than "too many".
+                        "too_many": int(n_in_box),
+                        "ceiling": int(_ceiling),
+                        "label": ("⚫ Reference wells (more than %s in "
+                                  "the box — draw a smaller one)"
+                                  % "{:,}".format(_ceiling)),
+                    })
+                    return 0, int(n_in_box)
                 else:
                     rows = _fetch(con,
                         f"SELECT {_full} FROM {REFERENCE_MASTER} "
