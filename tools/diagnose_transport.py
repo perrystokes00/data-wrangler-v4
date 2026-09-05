@@ -59,7 +59,17 @@ CONN_STR = (
 )
 
 BCP_SERVER = r"localhost\SQLEXPRESS"
-BCP_DATABASE = "DataView"
+# DERIVED FROM CONN_STR, NEVER TYPED A SECOND TIME. This said "DataView"
+# while CONN_STR two lines up said DataView_Demo, so THIS TOOL'S OUTPUT WAS
+# NOT A COMPARISON: the pyodbc methods ran against one database and the bcp
+# methods against another -- and since the login cannot open DataView, every
+# bcp row it ever reported was a failure timing dressed as a measurement.
+# It also PRINTS this name at startup ("Connecting to ...") and then connects
+# with CONN_STR, so it announced the wrong database and carried on.
+#
+# A benchmark that silently changes one variable it is not measuring is worse
+# than no benchmark. One source, parsed, so they cannot drift again.
+BCP_DATABASE = CONN_STR.rsplit("/", 1)[-1].split("?", 1)[0]
 
 WORK_DIR = Path(os.environ["LOCALAPPDATA"]) / "Temp" / "dw_transport_diag"
 

@@ -44,7 +44,13 @@ csv.field_size_limit(10_000_000)
 # Configuration
 # -----------------------------------------------------------------------------
 BCP_SERVER   = r"localhost\SQLEXPRESS"
-BCP_DATABASE = "DataView"
+# DataView_Demo, not DataView. An older DataView is still on this instance and
+# the login cannot open it, so this loader could never have run as shipped --
+# every bcp call would have died with "Cannot open database". Unlike the map's
+# copy of this constant, nothing here falls back, so the failure is at least
+# loud; it is fixed for the same reason, which is that the name was simply
+# wrong. See CLAUDE.md > Environment: the demo database is the one with data.
+BCP_DATABASE = "DataView_Demo"
 
 # Where staging CSVs are written. Cleaned up at end unless --keep-staging.
 STAGING_DIR = Path(os.environ.get("LOCALAPPDATA", "/tmp")) / "Temp" / "dw_kgs_load"

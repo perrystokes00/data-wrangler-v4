@@ -176,7 +176,23 @@ _REFHDR_XLSX_MAX = 100000
 H3_WELL_HANDOFF = 10000
 
 BCP_SERVER = r"localhost\SQLEXPRESS"
-BCP_DATABASE = "DataView"
+# THE FALLBACK, NOT THE ANSWER. The database is resolved from the live
+# connection (SELECT DB_NAME() -> wm_conn_db) and the dropdown can override
+# it; this is only what the map falls back to when that query FAILS.
+#
+# WHICH IS WHY "DataView" WAS THE WORST AVAILABLE VALUE. It is not a typo for
+# a database that does not exist -- an older DataView really is on this
+# instance, the login cannot open it, and the selectbox note ~2,300 lines
+# below spends fifteen lines on what landing there costs: it carries dv_well
+# and most of the federation views, so the map DRAWS, and then the H3 density
+# query dies with "Invalid object name" naming a view that plainly exists --
+# in the other database. A fallback that half-works is worse than one that
+# fails outright, which is this repo's oldest law wearing a different hat.
+#
+# Nothing had gone wrong in the app: DB_NAME() has never failed here, so the
+# constant was never reached. It was found from OUTSIDE Streamlit, where
+# there is no session state and every path falls through to this line.
+BCP_DATABASE = "DataView_Demo"
 
 # Max wells a single drill / "Send results to tray" action auto-adds to the
 # object tray. Keeps the tray (and st_folium serialization) usable; larger
@@ -3091,6 +3107,110 @@ def _basin_hex_counts(_engine, res: int, _v: int = 1) -> dict:
         _hex[_nm] = len(_in)
         _wells[_nm] = int(_have.loc[_in].sum()) if len(_in) else 0
     return {"hex": _hex, "wells": _wells}
+
+
+def _auto_h3_res(bb):
+    """(resolution, span) for a scope bbox -- R4 for a continent, R7 for a field.
+
+    ONE FORMULA, TWO CALLERS. It was inline in the H3 panel, and the basin
+    pre-solve below needs the SAME answer: it decides which density source to
+    ask for, and a source chosen at one resolution and drawn at another is a
+    decision made about a question nobody asked. Two copies of a threshold
+    ladder is the shape this file already lists under "lists that must agree".
+    """
+    if not bb:
+        return None, None
+    try:
+        from dataview.mapping.geography_layers import _implied_zoom as _giz
+        _sz = _giz((bb[0][0], bb[0][1], bb[1][0], bb[1][1]))
+    except Exception as exc:
+        _say("[map] auto resolution skipped: %s" % str(exc)[:90])
+        return None, None
+    return (4 if _sz < 6 else 5 if _sz < 8 else 6 if _sz < 10.5 else 7), _sz
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _basin_source_hexes(_engine, name: str, res: int, schema, _v: int = 1) -> int:
+    """Hexes this basin holds in ONE density source. -1 means "cannot tell".
+
+    THE THREE-STATE RETURN IS THE POINT. _basin_hex_counts answers "is there
+    anything here at all" by UNIONING every source, and that union is load-
+    bearing -- counting only the reference grid got POWDER RIVER exactly
+    backwards. So this does not touch it; it answers the different question
+    the source pre-solve needs, which is per-source and must not be confused
+    with the union.
+
+    0 and -1 are NOT the same and collapsing them would switch the operator's
+    density source on the strength of a failed query. 0 means the basin is
+    genuinely empty in this source; -1 means the grid query failed, or the
+    outline resolved to no cells at this resolution -- a real case for a small
+    basin at a coarse resolution, where centre-in-polygon finds no centre.
+    Only 0 may move a control. That is the "wrong is worse than missing" law
+    applied to a control rather than to a coordinate.
+    """
+    try:
+        _df = _qry_h3_grid(_engine, resolution=int(res), schema_filter=schema)
+    except Exception as exc:
+        _say("[map] basin '%s' source count failed (%s): %s"
+             % (name, schema or "ALL", str(exc)[:90]))
+        return -1
+    _c = _basin_cells(_engine, name, int(res))
+    if not _c:
+        return -1
+    if _df is None or _df.empty:
+        return 0
+    return int(_df["h3"].astype(str).isin(_c).sum())
+
+
+def _basin_presolve_source(engine, name: str) -> None:
+    """Choose the density source WHILE the pick is still a request.
+
+    WHY THIS EXISTS: picking a basin cost THREE renders and three grey
+    screens. One to consume the pick, one to query the current source and
+    discover the basin is empty in it, one to query the other source and
+    draw. The middle render produced nothing an operator wanted -- it existed
+    only to learn something this can look up.
+
+    THE SWITCH ITSELF IS NOT THE COST; THE ORDER IS. Doing it after the
+    picker has drawn leaves two bad options: rerun (a grey screen), or draw
+    reference data under a picker that still reads "Loaded wells". This file
+    warns about the second one twice, and it is the worse bug -- a control
+    saying one thing while the query does another is how the 4M-well master
+    came to be counted by a page that had not asked for it. Deciding HERE,
+    before the widget exists, is what makes the switch honest AND free: same
+    scar #6 door the basin pick itself comes through.
+
+    IT ONLY EVER MOVES OFF A SOURCE THAT HOLDS NOTHING, and it leaves
+    _basin_src_switched behind so the existing message still names what
+    happened. Silent is not the goal; a wasted render is.
+    """
+    if engine is None or not name or name == BASIN_NONE:
+        return
+    _cur = str(st.session_state.get("h3_density_source") or "Loaded wells")
+    if _cur == "Reference (4M)":
+        return                      # already the widest source; nothing to try
+    try:
+        _res = (_auto_h3_res(_basin_bounds(engine, name))[0]
+                or int(st.session_state.get("h3_resolution", 4)))
+        _here = _basin_source_hexes(
+            engine, name, _res, None if _cur == "Everything" else "dataview")
+        if _here != 0:
+            return                  # has data, or unknown (-1) -- leave it be
+        if _basin_source_hexes(engine, name, _res, "well_ref") <= 0:
+            return                  # reference is no better; the message below
+        st.session_state["_h3_src_request"] = "Reference (4M)"
+        # THE SAME KEY THE LATE PATH WRITES, so a deliberate switch BACK to
+        # Loaded wells on this basin is remembered as tried and stays put.
+        st.session_state["_basin_src_tried"] = (name, _cur)
+        st.session_state["_basin_src_switched"] = (name, _cur)
+        _say("[map] basin '%s' empty in '%s' at R%d -- source pre-solved to "
+             "Reference (4M) before the draw (no second pass)"
+             % (name, _cur, _res))
+    except Exception as exc:
+        # A FAILED PRE-SOLVE IS NOT A FAILED PICK. Fall through and let the
+        # late path do what it has always done: one extra render, correct.
+        _say("[map] basin '%s' source pre-solve skipped: %s"
+             % (name, str(exc)[:90]))
 
 
 def _basin_scope() -> str:
@@ -10761,8 +10881,15 @@ def run(engine=None):
             with engine.connect() as _dbc:
                 st.session_state["wm_conn_db"] = _dbc.execute(
                     _dbt("SELECT DB_NAME()")).scalar()
-        except Exception:
+        except Exception as _dbexc:
+            # SAY THAT THE MAP IS GUESSING. This is the ONLY path that reaches
+            # BCP_DATABASE, and everything downstream -- engine queries and
+            # bcp alike -- then points at a database nobody chose. Silent, it
+            # is indistinguishable from a normal start, and the symptom
+            # arrives much later as a missing view.
             st.session_state["wm_conn_db"] = BCP_DATABASE
+            _say("[map] DB_NAME() failed (%s: %s) -- falling back to %r"
+                 % (type(_dbexc).__name__, str(_dbexc)[:90], BCP_DATABASE))
     st.session_state.setdefault(
         "wm_map_db", st.session_state.get("wm_conn_db", BCP_DATABASE))
     # If the dropdown selected a database other than the connected one,
@@ -11125,6 +11252,11 @@ def run(engine=None):
     _bpick = st.session_state.pop("_basin_pick_request", None)
     if _bpick is not None:
         st.session_state["wm_basin_scope"] = str(_bpick) or BASIN_NONE
+        # AND THE DENSITY SOURCE, IN THE SAME BREATH. Both are widget keys,
+        # both are illegal to assign once their widget exists, and this is
+        # the one moment either is legal -- so deciding the source anywhere
+        # else costs a whole render. See _basin_presolve_source.
+        _basin_presolve_source(engine, str(_bpick))
     # ── A BASIN SCOPES THE HEXES, SO IT TURNS THE HEXES ON ────────────
     # It constrains ONE layer, and with that layer off it constrains
     # nothing -- which is exactly how it was reported: "I selected Anadarko
@@ -14270,16 +14402,10 @@ def run(engine=None):
                 # collecting.
                 st.session_state["_h3_res_sig"] = _sig
                 st.session_state.pop("_h3_res_manual", None)
-                try:
-                    from dataview.mapping.geography_layers import (
-                        _implied_zoom as _giz)
-                    _sz = _giz((_scope_bb[0][0], _scope_bb[0][1],
-                                _scope_bb[1][0], _scope_bb[1][1]))
-                    _auto_r = (4 if _sz < 6 else 5 if _sz < 8
-                               else 6 if _sz < 10.5 else 7)
-                except Exception as _rexc:
-                    _sz, _auto_r = None, None
-                    _say("[map] auto resolution skipped: %s" % str(_rexc)[:90])
+                # SAME HELPER THE BASIN PRE-SOLVE USES. It picks a density
+                # source for the resolution this ladder is about to choose,
+                # so the two must not be able to drift apart.
+                _auto_r, _sz = _auto_h3_res(_scope_bb)
                 if _auto_r and int(
                         st.session_state.get("h3_resolution", 4)) != _auto_r:
                     st.session_state["h3_resolution"] = int(_auto_r)
