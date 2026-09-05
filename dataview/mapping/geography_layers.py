@@ -1484,11 +1484,24 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
                     # was reported -- "it says exporting 1,000 and there are
                     # only 10 on the screen".
                     #
-                    # NOTHING IS DRAWN AND NOTHING IS OFFERED. _REFWELL_DRAWN
-                    # is left cleared, so the download does not appear either:
-                    # the record beside it says a query that produced no
-                    # features is not a draw, and a file of rows the operator
-                    # never saw is exactly what that rule exists to prevent.
+                    # NOTHING IS DRAWN. THE EXPORT STILL STANDS.
+                    #
+                    # The first cut refused both, and that conflated two
+                    # unrelated limits: "there may be times a user would want
+                    # to export 300,000 wells". Drawing 300,000 markers is a
+                    # BROWSER problem -- 20,000 measured ~0.4s and it grows
+                    # from there. Writing 300,000 rows to a file is not a
+                    # problem at all. One ceiling was doing both jobs and only
+                    # one of them needed it.
+                    #
+                    # So scope_sql is KEPT, not cleared. It is already built
+                    # above, from the box predicate, and it is every well
+                    # inside the box whether the map drew them or not -- which
+                    # is exactly what the download wants. The rule it seemed
+                    # to break ("a query that produced no features is not a
+                    # draw") is about not offering a file for rows nobody
+                    # asked about; here the operator drew a box round them and
+                    # the message says plainly that none are on screen.
                     print("[geography_layers] reference wells: box holds "
                           "more than %s well(s) (%s%s) -- NOT sampling; "
                           "draw a smaller box to see and export them all"
@@ -1499,7 +1512,8 @@ def add_reference_wells(m, engine, bounds=None, limit: int = 50000,
                     _REFWELL_DRAWN.update({
                         "sql": "", "params": {}, "n_drawn": 0,
                         "sampled": False, "by": by,
-                        "scope_sql": "", "scope_params": {},
+                        "scope_sql": _drew.get("scope_sql", ""),
+                        "scope_params": _drew.get("scope_params") or {},
                         "bounded": True,
                         # WHAT THE MESSAGE NEEDS, and the only new key: the
                         # count that was refused and the ceiling it broke, so

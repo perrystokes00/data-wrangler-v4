@@ -18586,11 +18586,18 @@ def run(engine=None):
         if _tm_n:
             st.warning(
                 "⚫ **%s wells** in that box — more than the %s this map "
-                "draws individually, so **none are shown**. Draw a smaller "
-                "box and you get every well in it, on screen and in the "
-                "export. (Nothing is sampled: a thinned picture of a box "
-                "you drew looks complete and is not.)"
-                % ("{:,}".format(_tm_n), "{:,}".format(_tm_ceil)))
+                "draws individually, so **none are drawn**. "
+                "**The export below still holds all %s.** Draw a smaller "
+                "box if you want to see them on the map too. (Nothing is "
+                "sampled either way: a thinned picture of a box you drew "
+                "looks complete and is not.)"
+                % ("{:,}".format(_tm_n), "{:,}".format(_tm_ceil),
+                   "{:,}".format(_tm_n)))
+        # DRAWN OR MERELY IN SCOPE. _hn is what reached the map; _tm_n is what
+        # the box holds when the map declined to draw it. The download wants
+        # the second one too -- refusing to EXPORT 300,000 wells because the
+        # BROWSER cannot draw them is one limit doing two jobs.
+        _hn = _hn or _tm_n
         if _hn:
             with st.expander("⬇ Well headers — starter set", expanded=False):
                 st.caption(
