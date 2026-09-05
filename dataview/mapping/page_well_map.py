@@ -11257,6 +11257,35 @@ def run(engine=None):
         # the one moment either is legal -- so deciding the source anywhere
         # else costs a whole render. See _basin_presolve_source.
         _basin_presolve_source(engine, str(_bpick))
+    # ── PIN THE SCOPE, BECAUSE A WIDGET KEY IS NOT DURABLE ────────────
+    # "I click a border twice, it draws the cells. Then I have to toggle H3
+    # off before I can pick a different basin -- if I don't, it draws ALL
+    # the cells."
+    #
+    # THE SCOPE LIVES ONLY IN THE SELECTBOX'S OWN KEY, and that selectbox is
+    # built near the BOTTOM of the render. Streamlit drops a keyed widget's
+    # value from session_state when the widget is not instantiated on a run,
+    # so ANY st.rerun() raised before it -- the mode normaliser and the draw
+    # one-shot both sit above it -- takes the basin scope with it. The next
+    # render reads "", the filter never runs, and every hex in the country is
+    # drawn with nothing on screen or in the log saying why. Caught in the
+    # log as a render that emitted ONE line and reran in 0.00s, with
+    # basin=none on the render after it.
+    #
+    # That is also why the H3 toggle "fixes" it: the toggle sits ABOVE the
+    # picker, so flipping it forces a full render that reaches the picker and
+    # re-establishes the key. A workaround that works for a reason nobody
+    # could see is the shape this file keeps collecting.
+    #
+    # RE-ASSERTING IS NOT A MIRROR. The note on _basin_scope() rejects a
+    # second key deliberately -- "one more pair that has to agree", and
+    # _clip_box vs _drawn_bounds is what that costs. This does not add a
+    # second home for the value; it writes the SAME key back, which makes the
+    # entry programmatically set rather than widget-managed, so the cleanup
+    # leaves it alone. One source of truth, made durable.
+    _bkeep = st.session_state.get("wm_basin_scope")
+    if _bkeep:
+        st.session_state["wm_basin_scope"] = _bkeep
     # ── A BASIN SCOPES THE HEXES, SO IT TURNS THE HEXES ON ────────────
     # It constrains ONE layer, and with that layer off it constrains
     # nothing -- which is exactly how it was reported: "I selected Anadarko
@@ -16768,6 +16797,58 @@ def run(engine=None):
             # the reader hunting for a switch that never appears.
             _say("[map] wetlands overlay unavailable: %s" % str(_we)[:140])
 
+        # ── PUT THE DRAWN BOX BACK ON THE MAP ───────────────────────────
+        # "I drew a box around wells but it did not leave the frame of the
+        # box up, so I selected again." The box was never lost -- _clip_box
+        # was set on the FIRST draw and the selection worked. What was lost
+        # was the EVIDENCE: a drawn rectangle lives in the browser's
+        # Leaflet.Draw layer, this page rebuilds the whole folium map on
+        # every rerun, and nothing ever added the shape back. So the one
+        # render that proves the gesture worked is the render that throws
+        # the gesture away.
+        #
+        # THIS IS THE "ALWAYS TAKES TWO TRIES" REPORT. It was read as lost
+        # clicks and then as latency, and it was neither -- the first try
+        # always worked and the map simply never said so, so the natural
+        # response was to do it again. A silent success and a silent failure
+        # look identical, which is the same lesson this file keeps relearning
+        # about empty maps and absent log lines; here it cost an interaction
+        # rather than a diagnosis.
+        #
+        # _clip_box, NOT _drawn_bounds. _drawn_bounds means "whatever last
+        # moved the camera" -- an area change makes it the whole lower 48,
+        # and outlining that is worse than outlining nothing. _clip_box is
+        # written by the rectangle handler and the saved-place recall and by
+        # nothing else, and the clear paths already pop it, so "until you
+        # clear it" needs no new state to mean the right thing.
+        _selbox = _norm_bounds(st.session_state.get("_clip_box"))
+        if _selbox:
+            try:
+                folium.Rectangle(
+                    bounds=[[_selbox[0][0], _selbox[0][1]],
+                            [_selbox[1][0], _selbox[1][1]]],
+                    # INERT BY CSS, AND ONLY BY CSS. interactive=False was
+                    # here first and it is a LIE: folium does not forward it
+                    # -- rendered and read back, the emitted L.rectangle
+                    # options carry className, dashArray, fill and opacity,
+                    # and no `interactive` at all. Leaving it in would have
+                    # left a comment claiming a safety net that does not
+                    # exist, which is worse than the missing net.
+                    #
+                    # So the guarantee is .dv-selbox{pointer-events:none},
+                    # plus fill=False so there is no interior to intercept
+                    # even for one frame before the stylesheet applies.
+                    class_name="dv-selbox",
+                    color="#2563eb",
+                    weight=2,
+                    dash_array="6,4",
+                    fill=False,
+                    opacity=0.9,
+                ).add_to(m)
+            except Exception as _sbe:
+                # Never let scenery break the map it is drawn on.
+                _say("[map] selection outline skipped: %s" % str(_sbe)[:90])
+
         # Draw toolbar — circle + rectangle. Both are bulk cell-selectors
         # for grid mode: drawing one selects every cell whose bbox intersects
         # the shape's bbox. In wells mode, both run the bbox-or-Haversine
@@ -17578,6 +17659,15 @@ def run(engine=None):
 // one. It needs markersInheritOptions so the child CircleMarkers land in
 // that pane -- which is why it was not bolted on here.
 + ".dv-bgpoly{pointer-events:stroke !important;}"
+// THE SELECTION OUTLINE IS SCENERY, NOT A TARGET. `none`, not `stroke`:
+// dv-bgpoly above deliberately keeps its stroke clickable because a basin
+// outline IS the gesture that scopes the map. This is the opposite case --
+// the box has already been drawn and acted on, and the only thing redrawing
+// it can do to a click is steal one. A rectangle over the wells that ate
+// every click inside it would trade "I can't see my box" for "I can't
+// select a well", which is the worse of the two and is exactly the
+// regression the basin fill caused.
++ ".dv-selbox{pointer-events:none !important;}"
 + ".dv-pick-2d .leaflet-overlay-pane path.dv-seis-2d:not(.dv-hit)"
 + "{stroke-width:5px !important;}"
 + ".dv-pick-3d .leaflet-overlay-pane path.dv-seis-3d"
@@ -17654,6 +17744,72 @@ def run(engine=None):
                     // starts and leave the picker armed.
                     mapInst.on("draw:drawstart", function() {
                         if (mode) { setTimeout(disarmDraw, 0); }
+                    });
+                    // ── AND THE PROTECTION HAS TO GO BOTH WAYS ──────────
+                    // The two rules above are one-way: arming a picker puts
+                    // the draw tool away, and starting a draw while a picker
+                    // is armed puts the draw tool away. NOTHING put away a
+                    // draw tool that was armed and simply waiting. So it sat
+                    // there taking every click -- reported as "I clicked a
+                    // border and it drew a box but the screen did not grey
+                    // out", and then "same thing selecting wells", because
+                    // an armed tool does not care what you were aiming at.
+                    //
+                    // ESCAPE, IN THE MAP'S OWN DOCUMENT. Leaflet.Draw does
+                    // bind Escape itself -- on keyup, as the note above
+                    // records -- but this map lives in an st_folium IFRAME,
+                    // so an Escape pressed while the Streamlit page has
+                    // focus never reaches that handler. Bound here it works
+                    // the moment the map has been clicked, which is exactly
+                    // when a tool has been armed by accident.
+                    //
+                    // KEYDOWN, NOT KEYUP, and that is load-bearing:
+                    // disarmDraw DISPATCHES a keyup Escape, so listening on
+                    // keyup would have it retrigger itself.
+                    try {
+                        box.ownerDocument.addEventListener(
+                            "keydown", function(ev) {
+                                if (ev.key === "Escape" || ev.keyCode === 27) {
+                                    disarmDraw();
+                                }
+                            }, true);
+                    } catch (e) { /* no document */ }
+                    // ── A CLICK IS NOT A RECTANGLE ──────────────────────
+                    // A bare click with the tool armed puts down the first
+                    // corner and waits, which is the half-drawn black
+                    // outline that started this. If it does complete, it
+                    // completes as a shape of no size -- and the Python
+                    // handler takes the ring's min/max and sets _clip_box
+                    // from it, so a stray click could scope the whole map
+                    // to a POINT. Nothing downstream would report that as
+                    // wrong; it would just quietly find nothing.
+                    //
+                    // MEASURED IN PIXELS, NOT DEGREES. A degree threshold
+                    // means something different at every zoom, and the
+                    // thing being detected is a mouse that did not travel.
+                    // Four pixels is below any deliberate drag and above
+                    // the jitter of a click.
+                    mapInst.on("draw:created", function(ev) {
+                        try {
+                            var ly = ev.layer;
+                            if (!ly || !ly.getBounds) { return; }
+                            var b = ly.getBounds();
+                            var sw = mapInst.latLngToLayerPoint(
+                                b.getSouthWest());
+                            var ne = mapInst.latLngToLayerPoint(
+                                b.getNorthEast());
+                            if (Math.abs(sw.x - ne.x) < 4
+                                    && Math.abs(sw.y - ne.y) < 4) {
+                                // AFTER folium's own draw:created handler,
+                                // which is what adds it to the drawn-items
+                                // group st_folium reads. Removing it in the
+                                // same tick would race that add.
+                                setTimeout(function() {
+                                    try { ly.remove(); } catch (e2) {}
+                                    disarmDraw();
+                                }, 0);
+                            }
+                        } catch (e) { /* leave the shape alone */ }
                     });
                     function paint() {
                         box.classList.remove("dv-pick-2d", "dv-pick-3d",
