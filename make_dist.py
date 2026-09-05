@@ -50,7 +50,27 @@ import argparse
 import ast
 import os
 import shutil
+import sys
 import time
+
+# ── THIS TOOL MUST NOT DIE OF ITS OWN OUTPUT ─────────────────────────────
+# It crashed with UnicodeEncodeError before printing a single count: the
+# report draws box characters, and a REDIRECTED stdout on Windows gets the
+# ANSI codepage (cp1252) rather than the console's, so the same line that is
+# fine in a console window raises the moment anyone pipes it to a file or a
+# log. Exactly the scar CLAUDE.md records against _say() -- "the timing
+# instrumentation took down the page it was measuring" -- and it lands harder
+# here, because this is the tool that builds the thing being shipped and a
+# build script is the first thing anyone runs under a redirect or in CI.
+#
+# errors="replace" not "ignore": a mangled character still shows something is
+# there. Wrapped, because reconfigure needs 3.7+ and a build must not fail on
+# the way to failing.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 
 SKIP_DIRS = {"__pycache__", ".git", ".hg", ".svn", ".venv", "venv",
              "_quarantine", "dvpath", "node_modules", "build", "dist",
@@ -70,8 +90,14 @@ SKIP_DIRS = {"__pycache__", ".git", ".hg", ".svn", ".venv", "venv",
 # browser where no Python error ever reaches us. The theme is the product's
 # identity. Neither is machine-specific, which is the test for shipping a
 # config at all.
+# well_icons/** IS GONE FROM THIS LIST BECAUSE THE DIRECTORY IS GONE. Its two
+# files were named only by setup_wranglerview.py and deploy_federation.py --
+# WranglerView-era deployment scripts that do not ship and no longer describe
+# this app. Left here it would be an entry pointing at nothing, which is the
+# same phantom tidy_root.ps1's $Keep held after run_watcher.bat was deleted:
+# harmless until someone reads the list and believes it.
 DEFAULT_INCLUDE = [
-    "assets/**", ".streamlit/config.toml", "well_icons/**",
+    "assets/**", ".streamlit/config.toml",
     "requirements*.txt", "pyproject.toml", "setup.py", "setup.cfg",
     "ORIENTATION.md", "README*.md", "LICENSE*",
 ]
@@ -146,6 +172,43 @@ def main(argv=None):
         print("!! no entry point matched — pass --entry app_v4.py")
         return 2
 
+    # ── RESOLVE --keep ONCE, AND REFUSE TO BUILD WITHOUT IT ──────────────
+    # `--keep pipeline_proc_runner.py` -- the name the docstring gives -- did
+    # not resolve, because --keep joins to the ROOT and the file lives at
+    # dataview/import_data/. The old code printed one "not found" line and
+    # CARRIED ON to a successful-looking build. That is the worst possible
+    # outcome for this flag specifically: --keep exists for subprocess entry
+    # points no import analysis can find, so the dist that gets shipped is
+    # missing exactly the file nothing else would have caught, and the
+    # detached pipeline fails on a customer's machine rather than here.
+    #
+    # A BARE NAME NOW RESOLVES, because that is what the documentation says
+    # to type and being right about the path is not the point of the flag.
+    # An ambiguous name is an error rather than a guess -- picking one of two
+    # files called the same thing is how the wrong one ships.
+    _keep_abs, _keep_bad = [], []
+    for k in a.keep:
+        f = os.path.abspath(os.path.join(root, k))
+        if os.path.exists(f):
+            _keep_abs.append(f)
+            continue
+        _hits = [p for p in py if os.path.basename(p) == os.path.basename(k)]
+        if len(_hits) == 1:
+            print("   --keep %s -> %s" % (k, os.path.relpath(_hits[0], root)))
+            _keep_abs.append(_hits[0])
+        elif _hits:
+            _keep_bad.append("%s: ambiguous, %d files share that name (%s)"
+                             % (k, len(_hits),
+                                ", ".join(os.path.relpath(h, root) for h in _hits[:4])))
+        else:
+            _keep_bad.append("%s: not found" % k)
+    if _keep_bad:
+        print("!! --keep could not be resolved, and a dist without it would")
+        print("   be missing a file no import analysis can find:")
+        for b in _keep_bad:
+            print("     " + b)
+        return 2
+
     # 1 · reachable by import — SEEDED WITH --keep, NOT PATCHED IN LATER.
     #
     # An explicitly kept file is usually a SUBPROCESS entry point:
@@ -156,8 +219,7 @@ def main(argv=None):
     # module it needs behind, producing a dist whose detached pipeline
     # fails on first use with an ImportError.
     _seed = list(entries)
-    for k in a.keep:
-        f = os.path.abspath(os.path.join(root, k))
+    for f in _keep_abs:
         if f in py:
             _seed.append(f)
     keep, queue = set(_seed), list(_seed)
@@ -202,13 +264,10 @@ def main(argv=None):
 
     # 4 · explicit keeps that are NOT python (a .sql, a .json) — the
     #     python ones already seeded the traversal above.
-    explicit = set()
-    for k in a.keep:
-        f = os.path.abspath(os.path.join(root, k))
-        if not os.path.exists(f):
-            print(f"!! --keep {k}: not found")
-        elif f not in py:
-            explicit.add(f)
+    # Already resolved and already validated above -- a missing --keep is now
+    # a refusal to build, so anything reaching here exists. The python ones
+    # seeded the traversal; these are the .sql / .json / .bat kind.
+    explicit = {f for f in _keep_abs if f not in py}
     keep |= explicit
 
     # 5 · non-python includes
@@ -220,6 +279,64 @@ def main(argv=None):
                     s in os.path.relpath(f, root).split(os.sep)
                     for s in SKIP_DIRS):
                 assets.add(os.path.abspath(f))
+
+    # ── AN ASSET NOBODY NAMES IS 22 MB OF NOTHING ────────────────────────
+    # assets/** shipped six images, and four of them -- 22.3 MB of a 23 MB
+    # payload -- were referenced by no code, no installer script and no
+    # config: data_wranglerv2.png (13.2 MB), data_wrangler3.png (8.8 MB) and
+    # two _old files. Version cruft, on its way to a customer.
+    #
+    # THE SAME MISTAKE AS .streamlit/*.toml, which is why the report rather
+    # than a narrower glob. A glob is right about the folder as it stands and
+    # says nothing about what lands in it later; naming files individually
+    # trades that for a NEW asset silently not shipping, which is a worse
+    # failure because the app then renders a broken image on a customer
+    # machine. So the glob stays broad and the BUILD SAYS WHAT IT IS
+    # CARRYING -- which is this tool's stated job: "all of it listed in the
+    # report so a mistake is visible before --apply".
+    #
+    # REFERENCES ARE LOOKED FOR EVERYWHERE, not just in the kept set.
+    # data_wrangler.ico is named by installer.iss and make_icon.py, neither
+    # of which ships, and flagging it would train the reader to ignore this.
+    #
+    # STRING LITERALS, NOT RAW TEXT, AND THE FIRST VERSION PROVED WHY. It
+    # scanned whole files, so the comment two paragraphs above -- which names
+    # the very files it was written to describe -- counted as a reference,
+    # and the check cleared 22 MB of dead images by reading its own
+    # documentation. A file is LOADED by a literal; it is only DISCUSSED in
+    # prose. Walking the AST for string constants asks the right question,
+    # and it means writing about an asset can never again hide it.
+    _ref_text = []
+    for _p, _t in py.items():
+        if _t is None:
+            _ref_text.append(text.get(_p, ""))     # unparseable: fall back
+            continue
+        for _n in ast.walk(_t):
+            if isinstance(_n, ast.Constant) and isinstance(_n.value, str):
+                _ref_text.append(_n.value)
+    for _ext in (".iss", ".ps1", ".toml", ".bat", ".cfg"):
+        for _f in _glob.glob(os.path.join(root, "*" + _ext)):
+            try:
+                _ref_text.append(open(_f, encoding="utf-8",
+                                      errors="ignore").read())
+            except OSError:
+                pass
+    _unref = []
+    for _a in assets:
+        _base = os.path.basename(_a)
+        if not any(_base in _t for _t in _ref_text):
+            _unref.append(_a)
+    if _unref:
+        _mb = sum(os.path.getsize(x) for x in _unref) / 1048576.0
+        print("── assets nothing references (%d file(s), %.1f MB) %s"
+              % (len(_unref), _mb, "─" * 18))
+        for _a in sorted(_unref, key=lambda x: -os.path.getsize(x)):
+            print("   %7.2f MB  %s"
+                  % (os.path.getsize(_a) / 1048576.0,
+                     os.path.relpath(_a, root)))
+        print("   These SHIP. Delete them, or narrow --include, if that is")
+        print("   not what you want.")
+        print()
 
     def rel(p):
         return os.path.relpath(p, root)
