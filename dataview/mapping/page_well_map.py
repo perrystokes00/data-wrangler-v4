@@ -4242,10 +4242,29 @@ def _register_spatial_layer(engine, path, name, category, colour, filled):
 
 
 def _load_shp_layers(_engine) -> list[dict]:
+    # SAY WHY IT CAME BACK EMPTY. This was a bare `except: return []`, and an
+    # empty list here removes EVERY registered layer from the map -- basins
+    # included -- with nothing said anywhere. A layer that vanishes silently
+    # cannot be told from one nobody ticked, and those have different repairs:
+    # one is a failing query, the other is a control. Exactly the swallowed-
+    # exception shape CLAUDE.md lists, and it cost 4 Sep: "click a basin and
+    # the hexes don't display" was diagnosed only because the timing log
+    # happened to record WHICH renders called _add_shapefile_layer.
+    #
+    # It still returns [] -- the map must not die because a layer list failed
+    # -- but the log now says a query broke instead of implying nothing is on.
+    # This function is NOT cached, so it runs every rerun: one transient
+    # failure blanks every layer for that render and they come back on the
+    # next one, which is the intermittency that made this hard to see.
     try:
-        return list_layers(_engine)
-    except Exception:
+        _rows = list_layers(_engine)
+    except Exception as exc:
+        _say("[map] SHAPEFILE LAYERS UNAVAILABLE (%s): %s"
+             % (type(exc).__name__, str(exc)[:160]))
         return []
+    if not _rows:
+        _say("[map] shapefile layers: registry returned 0 active row(s)")
+    return _rows
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -16389,6 +16408,26 @@ def run(engine=None):
                     _mapmsg.info(f"➖ Drew {_n_gsticks:,} GOM surface→TD sticks…")
 
         _mark("build: gom drilled")
+        # ── WHAT IS TICKED vs WHAT WILL BE DRAWN, EVERY RENDER ──────────
+        # These three counts are the whole diagnosis when a registered layer
+        # is missing, and until now NONE of them was printed. active_shp is
+        # the intersection of the registry (shp_layers) and the ticked set
+        # (wm_shp_on), and it defaults to [] far above -- so a layer can drop
+        # off the map because the query failed, because the tick was lost, or
+        # because an id in the tick list is no longer in the registry, and all
+        # three look identical on screen: an empty map.
+        #
+        # PRINTED EVEN WHEN IT IS ZERO, which is the point. The basin filter
+        # already logs "basin=none" on every H3 render for the same reason --
+        # a state worth reading is worth printing when it is empty, because a
+        # scope that got cleared and a filter that broke are indistinguishable
+        # from two ABSENT log lines.
+        _shp_on = list(st.session_state.get("wm_shp_on") or [])
+        _say("[map] shapefile layers: registry=%d ticked=%d drawing=%d%s"
+             % (len(shp_layers or []), len(_shp_on), len(active_shp),
+                "" if len(_shp_on) == len(active_shp)
+                else "  <-- TICKED BUT NOT DRAWN: %r"
+                     % [str(k)[:12] for k in _shp_on][:6]))
         for lay in active_shp:
             _mapmsg.info(f"🗂 Loading {lay.get('layer_name','layer')}…")
             _add_shapefile_layer(m, engine, lay)
@@ -19474,6 +19513,26 @@ def run(engine=None):
         _popup_sig = str(clicked or "")
         _sig_is_new = (_popup_sig != st.session_state.get("_popup_click_sig"))
         st.session_state["_popup_click_sig"] = _popup_sig
+        # ── WHAT THE CLICK ACTUALLY RETURNED ────────────────────────────
+        # The basin handler below logs on a hit and on a popup naming no known
+        # basin, but says NOTHING when no popup came back at all -- and those
+        # are the two cases that have to be told apart. A click that misses
+        # the outline returns bare coordinates and no popup text; a click that
+        # lands on a layer whose popup lacks the sentinel returns text without
+        # "Basin" in it. On screen both are "I clicked and nothing happened",
+        # and the repairs are unrelated: aim at the line, versus a popup that
+        # was never built with the alias.
+        #
+        # ONLY ON A NEW SIGNATURE. last_object_clicked_popup is a VALUE, not
+        # an event -- st_folium returns the same one on every rerun until
+        # something replaces it -- so logging it unconditionally would print
+        # the same line for as long as the popup stands. That confusion is
+        # what produced the 41-render basin loop; the dedupe above is the fix
+        # and this reuses it rather than inventing a second rule.
+        if _sig_is_new:
+            _say("[map] click popup=%r sentinel=%s as_cell=%s"
+                 % (_popup_sig[:90] if _popup_sig else None,
+                    BASIN_POPUP_LABEL in _popup_sig, _handled_as_cell))
         if (clicked and not _handled_as_cell and _sig_is_new
                 and BASIN_POPUP_LABEL in _popup_sig):
             _bstr = _popup_sig
